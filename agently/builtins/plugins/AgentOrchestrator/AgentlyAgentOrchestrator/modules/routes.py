@@ -106,6 +106,7 @@ async def run_model_request_route(
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     long_output_delivery: LongOutputDelivery | None = None
     if execution._ensure_long_output_enabled:
+        execution.request.settings.set("$agent_execution.ensure_long_output", True)
         long_output_delivery = LongOutputDelivery(
             execution,
             ensure_keys=ensure_keys,

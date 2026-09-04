@@ -29,6 +29,16 @@ from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules
 )
 
 
+def _action_terminal_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build the default Action-or-Response terminal decision fixture."""
+
+    return {
+        "next_action": "response",
+        "execution_commands": [],
+        "response": json.dumps(payload, ensure_ascii=False),
+    }
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -266,14 +276,24 @@ class _FakeExecutionForGeneratorCancel:
 
 class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
     name = "MockAgentExecutionActionRequester"
+    action_planning_calls = 0
+
+    @staticmethod
+    def _on_register():
+        MockAgentExecutionRequester.requests = []
+        MockAgentExecutionActionRequester.action_planning_calls = 0
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
         if "next_action" in text and "execution_commands" in text:
-            if "done_plans: []" in text:
+            MockAgentExecutionActionRequester.action_planning_calls += 1
+            if "answer directly without using the required action" in text:
+                payload = _action_terminal_response({"answer": "direct answer", "status": "ready"})
+            elif MockAgentExecutionActionRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Run allowlisted echo command",
@@ -284,7 +304,7 @@ class MockAgentExecutionActionRequester(MockAgentExecutionRequester):
                     ],
                 }
             else:
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response({"answer": "used-action", "status": "ready"})
         elif "[ACTION RESULTS]" in text:
             payload = {"answer": "used-action", "status": "ready"}
         else:
@@ -302,6 +322,7 @@ class MockScopedActionRequester(MockAgentExecutionRequester):
             action_id = "blocked_action" if "blocked_action" in text else "allowed_action"
             payload = {
                 "next_action": "execute",
+                "response": None,
                 "execution_commands": [
                     {
                         "purpose": f"Run {action_id}",
@@ -1074,6 +1095,7 @@ class MockFlatActionRequester(MockAgentExecutionRequester):
             if MockFlatActionRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Collect probe action evidence.",
@@ -1083,7 +1105,13 @@ class MockFlatActionRequester(MockAgentExecutionRequester):
                     ],
                 }
             else:
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response(
+                    {
+                        "step_result": "action evidence collected",
+                        "evidence": ["probe_action executed"],
+                        "remaining_work": [],
+                    }
+                )
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "step_result": "action evidence collected",
@@ -1170,6 +1198,7 @@ class MockFlatActionPostExecutionPlanningStallRequester(MockAgentExecutionReques
             if MockFlatActionPostExecutionPlanningStallRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Collect probe action evidence.",
@@ -1227,6 +1256,7 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
             if MockFlatActionPlanningSlowRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Collect probe action evidence.",
@@ -1236,7 +1266,13 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
                     ],
                 }
             else:
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response(
+                    {
+                        "step_result": "action evidence collected",
+                        "evidence": ["probe_action executed"],
+                        "remaining_work": [],
+                    }
+                )
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -1458,6 +1494,7 @@ class MockFlatParallelActionRequester(MockAgentExecutionRequester):
             if MockFlatParallelActionRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Collect evidence A.",
@@ -1472,7 +1509,13 @@ class MockFlatParallelActionRequester(MockAgentExecutionRequester):
                     ],
                 }
             else:
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response(
+                    {
+                        "step_result": "parallel action evidence collected",
+                        "evidence": ["slow_a executed", "slow_b executed"],
+                        "remaining_work": [],
+                    }
+                )
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "step_result": "parallel action evidence collected",
@@ -2004,6 +2047,7 @@ class MockTaskBoardActionPostExecutionPlanningStallRequester(MockAgentExecutionR
             if MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Collect probe evidence before the stall.",
@@ -2099,6 +2143,7 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                 if MockTaskBoardReadbackRequester.review_action_planning_calls == 1:
                     payload = {
                         "next_action": "execute",
+                        "response": None,
                         "execution_commands": [
                             {
                                 "purpose": "Read dependency cold artifact.",
@@ -2112,13 +2157,22 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                         ],
                     }
                 else:
-                    payload = {"next_action": "response", "execution_commands": []}
+                    payload = _action_terminal_response(
+                        {
+                            "status": "completed",
+                            "answer": "readback confirmed",
+                            "evidence": ["read_action_artifact returned the dependency artifact"],
+                            "remaining_work": [],
+                            "diagnostics": [],
+                        }
+                    )
             else:
                 MockTaskBoardReadbackRequester.last_action_id = "produce_large_evidence"
                 MockTaskBoardReadbackRequester.collect_action_planning_calls += 1
                 if MockTaskBoardReadbackRequester.collect_action_planning_calls == 1:
                     payload = {
                         "next_action": "execute",
+                        "response": None,
                         "execution_commands": [
                             {
                                 "purpose": "Produce an opaque artifact.",
@@ -2128,7 +2182,15 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                         ],
                     }
                 else:
-                    payload = {"next_action": "response", "execution_commands": []}
+                    payload = _action_terminal_response(
+                        {
+                            "status": "completed",
+                            "answer": "cold artifact produced",
+                            "evidence": ["produce_large_evidence produced a cold artifact ref"],
+                            "remaining_work": [],
+                            "diagnostics": [],
+                        }
+                    )
         elif "[ACTION RESULTS]" in text:
             if MockTaskBoardReadbackRequester.last_action_id == "read_action_artifact":
                 payload = {
@@ -2219,13 +2281,22 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
                 MockTaskBoardDependencyReadbackRequester.dependency_readback_seen = True
                 if "source_refs" in text and "https://example.test/evidence" in text:
                     MockTaskBoardDependencyReadbackRequester.source_refs_seen = True
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response(
+                    {
+                        "status": "completed",
+                        "answer": "dependency readback evidence used",
+                        "evidence": ["dependency_readbacks included Hidden evidence"],
+                        "remaining_work": [],
+                        "diagnostics": [],
+                    }
+                )
             else:
                 MockTaskBoardDependencyReadbackRequester.last_action_id = "produce_large_evidence"
                 MockTaskBoardDependencyReadbackRequester.collect_action_planning_calls += 1
                 if MockTaskBoardDependencyReadbackRequester.collect_action_planning_calls == 1:
                     payload = {
                         "next_action": "execute",
+                        "response": None,
                         "execution_commands": [
                             {
                                 "purpose": "Produce an opaque artifact.",
@@ -2235,7 +2306,15 @@ class MockTaskBoardDependencyReadbackRequester(MockAgentExecutionRequester):
                         ],
                     }
                 else:
-                    payload = {"next_action": "response", "execution_commands": []}
+                    payload = _action_terminal_response(
+                        {
+                            "status": "completed",
+                            "answer": "cold artifact produced",
+                            "evidence": ["produce_large_evidence produced a cold artifact ref"],
+                            "remaining_work": [],
+                            "diagnostics": [],
+                        }
+                    )
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "status": "completed",
@@ -2338,6 +2417,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
             if MockTaskBoardControlDependencyReadbackRequester.collect_action_planning_calls == 1:
                 payload = {
                     "next_action": "execute",
+                    "response": None,
                     "execution_commands": [
                         {
                             "purpose": "Produce an opaque artifact.",
@@ -2347,7 +2427,15 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                     ],
                 }
             else:
-                payload = {"next_action": "response", "execution_commands": []}
+                payload = _action_terminal_response(
+                    {
+                        "status": "completed",
+                        "answer": "cold artifact produced",
+                        "evidence": ["produce_large_evidence produced a cold artifact ref"],
+                        "remaining_work": [],
+                        "diagnostics": [],
+                    }
+                )
         elif "[ACTION RESULTS]" in text:
             payload = {
                 "status": "completed",
@@ -7146,12 +7234,23 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
         action_ids = list(action_logs.keys())
     else:
         action_ids = [item.get("action_id") for item in action_logs]
+    action_planning_requests = [
+        json.loads(request)
+        for request in MockAgentExecutionRequester.requests
+        if "next_action" in request and "execution_commands" in request
+    ]
 
     assert result["accepted"] is True
     assert step_execution["effective_shape"] == "actions"
     assert step_execution["action_scope_source"] == "planner_capabilities"
     assert set(action_ids) == {"probe_action"}
     assert action_ids
+    assert action_planning_requests
+    assert set(action_planning_requests[0]["output"]) == {
+        "next_action",
+        "execution_commands",
+        "response",
+    }
     delta_paragraphs = [item for item in delta_text.split("\n\n") if item.strip()]
     assert len(delta_paragraphs) >= 3
     assert "🔄 `probe_action` — Running" in delta_text
@@ -8522,7 +8621,7 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     assert MockTaskBoardDependencyReadbackRequester.source_refs_seen is True
     request_text = "\n".join(MockTaskBoardDependencyReadbackRequester.requests)
     assert "Action success or a selection_key proves only execution/ref availability" in request_text
-    assert "do not read a recall Action's output as a new artifact" in request_text
+    assert "do not read a recall Action''s output as a new artifact" in request_text
     assert any(item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started" for item in stream_items)
     assert any(
         item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed" for item in stream_items

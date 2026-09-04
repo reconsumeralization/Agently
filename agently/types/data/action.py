@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Literal
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .task_workspace import TaskWorkspaceFileRef
 from .tool import KwargsType, ReturnType
@@ -139,6 +139,7 @@ class ActionCall(TypedDict, total=False):
 
 class ActionDecision(TypedDict, total=False):
     next_action: str
+    response: str
     use_action: bool
     next: str
     execution_actions: list[ActionCall]
@@ -156,6 +157,7 @@ class ProgrammaticActionDecision(TypedDict):
     next_action: Literal["execute", "response"]
     description: str
     program: str | None
+    response: NotRequired[str | None]
 
 
 class ProgrammaticActionCatalogEntry(TypedDict):
@@ -225,6 +227,7 @@ class ActionRunContext(_ActionRunContextRequired, total=False):
     artifact_scope: dict[str, str]
     action: Any
     runtime: Any
+    response_stream_handler: Callable[[str, Any], Awaitable[None] | None]
 
 
 class ActionPlanningRequest(TypedDict, total=False):

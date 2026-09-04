@@ -529,7 +529,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 {
                     "message": (str, "One concise natural-language progress update.", True),
                 },
-                format="json",
+                format="xml_field",
             )
             result = request.get_result()
             streamed_message = ""

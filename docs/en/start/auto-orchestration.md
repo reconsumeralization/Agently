@@ -39,6 +39,11 @@ results = await asyncio.gather(
 )
 ```
 
+Capability configuration chained after a quick prompt stays on that same
+unstarted execution. For example,
+`agent.input(...).info(...).use_action(...)` retains the input and info; it does
+not silently create a replacement execution.
+
 For multi-statement setup, capture the execution draft explicitly:
 
 ```python
@@ -59,7 +64,11 @@ Accepted development-line routing is candidate-driven and deterministic-first.
 Required Skills bind immutable guidance into `TaskContext`; concrete
 model-response consumption is recorded separately from executable capability
 evidence. Ordinary Actions run through the normal `model_request`
-AgentExecution action loop. Skills never create a route or planner capability.
+AgentExecution action loop. Its default rounds choose either Actions or a final
+response. A terminal response is delivered through that same AgentExecution;
+an extra final-generation request is used only for legacy/custom fallback or a
+separate delivery policy such as `ensure_long_output`. Skills never create a
+route or planner capability.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
@@ -1314,15 +1323,15 @@ await task.async_streaming_print()
 result = await task.async_get_full_data()
 ```
 
-`debug=True` (the `simple` profile) prints concise model request/result and
-process summaries. `debug="detail"` prints the complete diagnostic RuntimeEvent
-flow, including model streaming deltas, ActionRuntime, TriggerFlow, and
-AgentExecution details. It does not replace or duplicate the business output:
-consume `type="delta"` or call `async_streaming_print()` to see the readable
-task stages and final result. Use both together for the complete development
-view. Remove debug settings from examples and production snippets once the
-problem is understood. An EventCenter hook remains available when code needs a
-custom diagnostic sink rather than the built-in console profile.
+`debug=True` (the `simple` profile) prints a readable Prompt, concise
+request/result facts, and meaningful process states. `debug="detail"` adds
+sanitized provider request JSON, attempt/validation/telemetry, Action detail,
+and route/stage metadata, while still filtering compatibility aliases, transport
+mirrors, and repeated progress. The console is not a complete RuntimeEvent flow
+and does not replace business output: consume `type="delta"` or call
+`async_streaming_print()` for readable task stages and the final result. Use an
+EventCenter hook or DevTools for complete audit, storage, or replay. Remove debug
+settings from examples and production snippets once the problem is understood.
 
 ## Submitted DAG Input
 

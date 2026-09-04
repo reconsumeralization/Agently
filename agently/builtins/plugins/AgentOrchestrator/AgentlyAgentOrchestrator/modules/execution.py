@@ -41,6 +41,7 @@ from agently.core.application.SkillLibrary import (
     SkillContextSource,
 )
 from agently.core.context import ModelRequestContextSelector, TaskContext
+from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
 from agently.types.data import (
     AgentExecutionStreamData,
@@ -305,6 +306,16 @@ class AgentExecution:
             return attr
 
         def wrapper(*args: Any, **kwargs: Any):
+            # Agent methods with an ``always`` switch normally create a fresh
+            # execution when called from the Agent. Once a fluent chain already
+            # owns this execution, keep configuring that same chain instead of
+            # silently replacing it and losing its request-local Prompt.
+            if "always" not in kwargs:
+                try:
+                    if "always" in inspect.signature(attr).parameters:
+                        kwargs["always"] = True
+                except (TypeError, ValueError):
+                    pass
             result = attr(*args, **kwargs)
             if result is self.agent:
                 return self._reconfiguration_target()
@@ -1656,17 +1667,18 @@ class AgentExecution:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ) -> Any:
-        return await start_execution(
-            self,
-            type=type,
-            ensure_keys=ensure_keys,
-            ensure_all_keys=ensure_all_keys,
-            validate_handler=validate_handler,
-            key_style=key_style,
-            max_retries=max_retries,
-            raise_ensure_failure=raise_ensure_failure,
-            parent_run_context=parent_run_context,
-        )
+        with bind_runtime_context(settings=self.request.settings):
+            return await start_execution(
+                self,
+                type=type,
+                ensure_keys=ensure_keys,
+                ensure_all_keys=ensure_all_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+                parent_run_context=parent_run_context,
+            )
 
     async def _await_route_with_limits(self, run_coro: Any):
         return await await_route_with_limits(self, run_coro)

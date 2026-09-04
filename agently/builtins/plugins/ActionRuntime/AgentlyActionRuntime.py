@@ -17,6 +17,7 @@ from __future__ import annotations
 from agently_stage import default_stage_call_bridge
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
@@ -271,6 +272,132 @@ class AgentlyActionRuntime:
             return value.strip()
         return None
 
+    @staticmethod
+    def _mark_action_planning_request(request: Any) -> None:
+        request_settings = getattr(request, "settings", None)
+        set_value = getattr(request_settings, "set", None)
+        if callable(set_value):
+            set_value("$model_request.role", "action_planning")
+
+    @staticmethod
+    def _seed_action_planning_prompt(request: Any, source_prompt: Any) -> Any:
+        """Materialize the prepared prompt so the decision output can replace it.
+
+        Prompt inheritance recursively merges mapping slots.  An Action decision
+        envelope must retain every prepared request-local slot except the original
+        output schema, so using the prepared Prompt as a live parent would merge
+        both output contracts.  A local snapshot preserves the prompt while letting
+        ``request.output(...)`` replace the model-facing schema cleanly.
+        """
+
+        request_prompt = getattr(request, "prompt", None)
+        source_get = getattr(source_prompt, "get", None)
+        prompt_set = getattr(request_prompt, "set", None)
+        if request_prompt is None or not callable(source_get) or not callable(prompt_set):
+            return request_prompt
+        source_data = source_get()
+        if isinstance(source_data, dict):
+            for key, value in source_data.items():
+                prompt_set(key, value)
+        return request_prompt
+
+    @staticmethod
+    def _final_response_contract(prompt: Any) -> dict[str, Any]:
+        output = prompt.get("output", default=None)
+        output_format = prompt.get("output_format", default=None)
+        if not output:
+            return {
+                "kind": "text",
+                "instruction": "Return the complete user-facing answer as plain text.",
+            }
+        return {
+            "kind": "structured",
+            "format": output_format or "json",
+            "schema": output,
+            "instruction": (
+                "Return the complete final carrier as text in response. The outer Request will parse "
+                "and validate that text against this original output contract."
+            ),
+        }
+
+    @staticmethod
+    def _validate_action_or_response_decision(value: dict[str, Any], _validation_context: Any):
+        next_action = value.get("next_action")
+        commands = value.get("execution_commands")
+        response = value.get("response")
+        if next_action == "execute":
+            if not isinstance(commands, list) or len(commands) == 0:
+                return {
+                    "ok": False,
+                    "reason": "next_action=execute requires at least one execution command.",
+                }
+            if response not in (None, ""):
+                return {
+                    "ok": False,
+                    "reason": "next_action=execute requires response to be null or empty.",
+                }
+            return True
+        if next_action == "response":
+            if not isinstance(commands, list) or len(commands) != 0:
+                return {
+                    "ok": False,
+                    "reason": "next_action=response requires empty execution_commands.",
+                }
+            if not isinstance(response, str) or not response.strip():
+                return {
+                    "ok": False,
+                    "reason": "next_action=response requires a non-empty response.",
+                }
+            return True
+        return {
+            "ok": False,
+            "reason": "next_action must be execute or response.",
+        }
+
+    @staticmethod
+    async def _call_response_stream_handler(handler: Any, event: str, data: Any) -> None:
+        if handler is None:
+            return
+        result = handler(event, data)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _stream_action_response_field(self, result_reader: Any, handler: Any) -> str:
+        get_generator = getattr(result_reader, "get_async_generator", None)
+        if handler is None or not callable(get_generator):
+            return ""
+        next_action = ""
+        pending_response_deltas: list[str] = []
+        streamed_response_deltas: list[str] = []
+        async for item in cast(Any, get_generator)(type="instant"):
+            path = str(getattr(item, "path", "") or "")
+            if path == "$status":
+                status = getattr(item, "value", None)
+                if isinstance(status, dict) and status.get("retry"):
+                    await self._call_response_stream_handler(handler, "status", status)
+                continue
+            if path == "next_action":
+                value = getattr(item, "value", None)
+                if isinstance(value, str):
+                    next_action = value.strip().lower()
+                    if next_action == "response" and pending_response_deltas:
+                        for delta in pending_response_deltas:
+                            await self._call_response_stream_handler(handler, "delta", delta)
+                            streamed_response_deltas.append(delta)
+                        pending_response_deltas.clear()
+                continue
+            if path != "response":
+                continue
+            delta = getattr(item, "delta", None)
+            if not isinstance(delta, str) or not delta:
+                continue
+            if next_action == "response":
+                await self._call_response_stream_handler(handler, "delta", delta)
+                streamed_response_deltas.append(delta)
+            elif not next_action:
+                pending_response_deltas.append(delta)
+        return "".join(streamed_response_deltas)
+
     async def _default_structured_planning_handler(
         self,
         context: "ActionRunContext",
@@ -281,16 +408,19 @@ class AgentlyActionRuntime:
         prompt = context["prompt"]
         settings = context["settings"]
         agent_name = str(context.get("agent_name", "Manual"))
-        action_list = request.get("action_list", [])
-        done_plans = context.get("done_plans", [])
-        last_round_records = context.get("last_round_records", [])
+        action_list = self.action._to_model_planning_action_list(request.get("action_list", []))
+        done_plans = self.action._to_model_planning_records(context.get("done_plans", []))
+        last_round_records = self.action._to_model_planning_records(context.get("last_round_records", []))
         round_index = context.get("round_index", 0)
         max_rounds = context.get("max_rounds", None)
         round_dispatch_policy = self._resolve_round_dispatch_policy(settings)
         planning_instructions = [
-            "Plan next actions to respond to {input.user_input} with {input.available_actions}.",
+            "Handle the current request by either planning one Action round or returning the final response.",
             "Decide this round action first via 'next_action': 'execute' or 'response'.",
-            "If next_action is 'response', return empty 'execution_commands'.",
+            (
+                "If next_action is 'response', return empty 'execution_commands' and put the complete "
+                "final response carrier in 'response'."
+            ),
             (
                 "If next_action is 'execute', return one or more 'execution_commands'; under "
                 "round_dispatch_policy='single_action_id_cohort', every command in this round "
@@ -299,9 +429,44 @@ class AgentlyActionRuntime:
                 if round_dispatch_policy == "single_action_id_cohort"
                 else "If next_action is 'execute', return one or more 'execution_commands' for parallel execution."
             ),
+            "If next_action is 'execute', keep 'response' null or empty.",
             "Each command must include 'todo_suggestion' for next round decision making.",
-            "Use {info.done_plans}, {info.last_round_result}, {info.round_index}, and {info.max_rounds} for decision.",
         ]
+        planning_info: dict[str, Any] = {}
+        prior_records = list(done_plans) if isinstance(done_plans, list) else []
+        latest_records = list(last_round_records) if isinstance(last_round_records, list) else []
+        if (
+            latest_records
+            and len(prior_records) >= len(latest_records)
+            and prior_records[-len(latest_records) :] == latest_records
+        ):
+            prior_records = prior_records[: -len(latest_records)]
+        if prior_records:
+            planning_info["prior_action_results"] = prior_records
+        if latest_records:
+            planning_info["last_round_result"] = latest_records
+        if round_index:
+            planning_info["round_index"] = round_index
+        if max_rounds is not None:
+            planning_info["max_rounds"] = max_rounds
+        if round_dispatch_policy and round_dispatch_policy != "parallel":
+            planning_info["round_dispatch_policy"] = round_dispatch_policy
+        if planning_info:
+            planning_instructions.append(
+                "Use the non-empty Action round state in ${INFO} as evidence. "
+                "A failed Action or environment check is not a successful execution."
+            )
+        if latest_records and any(
+            record.get("success") is not True
+            for record in latest_records
+            if isinstance(record, dict)
+        ):
+            planning_instructions.append(
+                "For a repairable argument, generated-code, or runtime error, execute a corrected Action call. "
+                "For provider/environment unavailability, choose another eligible Action or explain the blocker "
+                "and remedy; "
+                "never fabricate the unavailable result."
+            )
 
         parent_run_context = get_current_tool_phase_run_context()
         action_plan_request = ModelRequest(
@@ -310,42 +475,72 @@ class AgentlyActionRuntime:
             agent_name=agent_name,
             model_key=self._resolve_planning_model_key(settings),
         )
-        action_plan_request.input(
-            {
-                "user_input": prompt.get("input"),
-                "user_extra_requirement": prompt.get("instruct"),
-                "available_actions": action_list,
-            }
-        ).info(
-            {
-                "done_plans": done_plans,
-                "last_round_result": last_round_records,
-                "round_index": round_index,
-                "max_rounds": max_rounds,
-                "round_dispatch_policy": round_dispatch_policy,
-            }
-        ).instruct(
-            planning_instructions
-        ).output(
+        self._mark_action_planning_request(action_plan_request)
+        action_round_info = {
+            "available_actions": action_list,
+            "round_state": planning_info,
+            "final_response_contract": self._final_response_contract(prompt),
+        }
+        request_prompt = self._seed_action_planning_prompt(action_plan_request, prompt)
+        if request_prompt is not None and callable(getattr(request_prompt, "append", None)):
+            request_prompt.append("info", {"action_runtime": action_round_info})
+            request_prompt.append("instruct", {"action_runtime": planning_instructions})
+        else:
+            # Lightweight custom/fake ModelRequest implementations may expose
+            # only the fluent methods. Keep that extension-test surface usable.
+            action_plan_request.input(
+                {
+                    "user_input": prompt.get("input"),
+                    "available_actions": action_list,
+                }
+            ).info(action_round_info).instruct(planning_instructions)
+        action_plan_request.output(
             {
                 "next_action": ("'execute' | 'response'", "This round action decision."),
                 "execution_commands": [
                     {
                         "purpose": (str, "What this action call collects or verifies."),
-                        "action_id": (str, "Must in {input.available_actions.[].name}"),
-                        "action_input": (dict, "kwargs dict as {input.available_actions.[].kwargs} of {action_id}"),
+                        "action_id": (str, "Must be one ${INFO.action_runtime.available_actions.[].action_id}"),
+                        "action_input": (
+                            dict,
+                            "Must satisfy that Action's ${INFO.action_runtime.available_actions.[].kwargs} contract",
+                        ),
                         "todo_suggestion": (str, "Suggestion for next round's next_action decision."),
                     }
                 ],
+                "response": (
+                    "str | None",
+                    "Complete final response carrier when next_action=response; otherwise null or empty.",
+                ),
             },
             format="json",
         )
+        validate = getattr(action_plan_request, "validate", None)
+        if callable(validate):
+            validate(self._validate_action_or_response_decision)
         action_plan_result = _get_model_request_result(
             action_plan_request,
             parent_run_context=parent_run_context,
         )
         result_reader = getattr(action_plan_result, "result", action_plan_result)
+        response_stream_handler = context.get("response_stream_handler")
+        await self._stream_action_response_field(result_reader, response_stream_handler)
         result = await result_reader.async_get_data()
+        accepted_retry_result = getattr(result_reader, "_accepted_retry_result", None)
+        if accepted_retry_result is not None and response_stream_handler is not None:
+            await self._call_response_stream_handler(
+                response_stream_handler,
+                "status",
+                {
+                    "status": "failed",
+                    "retry": True,
+                    "reason": "action_or_response_validation",
+                },
+            )
+            await self._stream_action_response_field(
+                accepted_retry_result,
+                response_stream_handler,
+            )
         if not isinstance(result, dict):
             return {"next_action": "response", "execution_commands": []}
         return cast("ActionDecision", result)
@@ -371,36 +566,44 @@ class AgentlyActionRuntime:
         action_request = ModelRequest(
             self.plugin_manager,
             parent_settings=settings,
+            parent_prompt=prompt,
             agent_name=agent_name,
             model_key=self._resolve_planning_model_key(settings),
         )
-        action_request.input(
-            {
-                "user_input": prompt.get("input"),
-                "user_extra_requirement": prompt.get("instruct"),
-                "available_actions": action_list,
-            }
-        ).info(
-            {
+        self._mark_action_planning_request(action_request)
+        native_round_info = {
+            "available_actions": action_list,
+            "round_state": {
                 "done_plans": done_plans,
                 "last_round_result": last_round_records,
                 "round_index": round_index,
                 "max_rounds": max_rounds,
                 "round_dispatch_policy": round_dispatch_policy,
-            }
-        ).instruct(
-            [
-                "Decide whether native tool calls are required to answer {input.user_input}.",
-                (
-                    "If a tool is needed, emit one or more native tool calls that all use the same "
-                    "action_id in this round. Wait for the next round's results before choosing a "
-                    "different action_id."
-                    if round_dispatch_policy == "single_action_id_cohort"
-                    else "If a tool is needed, emit native tool calls for one or more available actions."
-                ),
-                "If no tool is needed, answer directly without emitting tool calls.",
-            ]
-        )
+            },
+            "final_response_contract": self._final_response_contract(prompt),
+        }
+        native_instructions = [
+            "Decide whether native Action calls are required to answer the current request.",
+            (
+                "If a tool is needed, emit one or more native tool calls that all use the same "
+                "action_id in this round. Wait for the next round's results before choosing a "
+                "different action_id."
+                if round_dispatch_policy == "single_action_id_cohort"
+                else "If a tool is needed, emit native tool calls for one or more available actions."
+            ),
+            "If no Action is needed, return the complete final response directly without emitting tool calls.",
+        ]
+        request_prompt = getattr(action_request, "prompt", None)
+        if request_prompt is not None and callable(getattr(request_prompt, "append", None)):
+            request_prompt.append("info", {"action_runtime": native_round_info})
+            request_prompt.append("instruct", {"action_runtime": native_instructions})
+        else:
+            action_request.input(
+                {
+                    "user_input": prompt.get("input"),
+                    "available_actions": action_list,
+                }
+            ).info(native_round_info).instruct(native_instructions)
         action_request.prompt.set("tools", action_list)
         result = _get_model_request_result(action_request, parent_run_context=parent_run_context)
         tool_call_chunks: list[Any] = []
@@ -414,6 +617,27 @@ class AgentlyActionRuntime:
                 break
         action_calls = self.action._normalize_native_action_calls(tool_call_chunks)
         if len(action_calls) == 0:
+            response = "".join(text_fragments)
+            textual_tool_markup_detected = any(
+                marker in response.lower()
+                for marker in ("<bash", "<tool", "<command", "```bash")
+            )
+            if response.strip() and not textual_tool_markup_detected:
+                response_stream_handler = context.get("response_stream_handler")
+                for fragment in text_fragments:
+                    await self._call_response_stream_handler(
+                        response_stream_handler,
+                        "delta",
+                        fragment,
+                    )
+                return {
+                    "next_action": "response",
+                    "response": response,
+                    "use_action": False,
+                    "action_calls": [],
+                    "tool_commands": [],
+                    "diagnostics": [],
+                }
             diagnostic = cast(
                 "ActionDiagnostic",
                 {
@@ -426,15 +650,13 @@ class AgentlyActionRuntime:
                     ),
                     "meta": {
                         "planning_protocol": "native_tool_calls",
-                        "textual_tool_markup_detected": any(
-                            marker in "".join(text_fragments).lower()
-                            for marker in ("<bash", "<tool", "<command", "```bash")
-                        ),
+                        "textual_tool_markup_detected": textual_tool_markup_detected,
                     },
                 },
             )
             return {
                 "next_action": "response",
+                "response": "",
                 "use_action": False,
                 "action_calls": [],
                 "tool_commands": [],
@@ -634,59 +856,84 @@ class AgentlyActionRuntime:
             agent_name=agent_name,
             model_key=self._resolve_planning_model_key(settings),
         )
+        self._mark_action_planning_request(action_plan_request)
         action_plan_request._set_output_observation_policy(sensitive_paths=["program"])
-        action_plan_request.input(
-            {
-                "user_input": prompt.get("input"),
-                "user_extra_requirement": prompt.get("instruct"),
-            }
-        ).info(
-            {
-                "action_sdk": catalog.get("sdk", ""),
-                "done_plans": done_plans,
-                "last_round_result": last_round_records,
-                "round_index": round_index,
-                "max_rounds": max_rounds,
-                "program_contract": {
-                    "language": "python",
-                    "python_version": ">=3.10",
-                    "source_shape": (
-                        "statements inside an existing async function body; local helper definitions are allowed"
-                    ),
-                    "completion": "an explicit return directly owned by the generated body",
-                    "max_program_bytes": max_program_bytes,
-                    "max_description_bytes": max_description_bytes,
-                    "dispatch": (
-                        "explicit concurrency_mode='parallel' Actions may overlap up to the host limit; "
-                        "exclusive Actions form ordering barriers"
-                    ),
-                    "return": "lossless JSON",
-                    "model_hot_result": "bounded print output and return value only",
-                },
-            }
-        ).instruct(
-            [
-                "Decide whether another Action round is required to answer {input.user_input}.",
-                "Use next_action='response' with program=null when no Action work remains.",
-                "When Action work remains, write only the statements that belong inside the already-existing async function body, using the authoritative SDK in {info.action_sdk}.",
-                "You may define local helper functions, async handlers, or classes when they make the program clearer; do not wrap or invoke a second top-level program entry point.",
-                "The generated body must contain at least one explicit return directly owned by that body, not only a return nested under another function or class.",
-                "Call only offered bindings as await actions.name({...}) or await actions['exotic-name']({...}).",
-                "Treat every SDK input and return schema as authoritative and exhaustive. Never invent unlisted fields, wildcard ids, magic values, or implicit bulk operations.",
-                "When a later Action requires an id or field produced by an earlier Action, read that exact field from the earlier result and pass it explicitly.",
-                "Use loops, branches, and local JSON data transformations only when they help the current task.",
-                "Use asyncio.gather only for calls that are independent. Actions whose SDK contract declares concurrency_mode='parallel' may overlap; exclusive Actions are serialized as ordering barriers by the host.",
-                "Return one bounded lossless-JSON value containing only what the next response round needs.",
-                "Only print(...) output and the return value become the outer Action result; intermediate Action values stay program-local.",
-                "Do not import network, filesystem, subprocess, package-manager, credential, or host-control capabilities.",
-                "Do not request writes, execution, approvals, or irreversible side effects in programmatic V1.",
-                "Handle the declared bounded Action errors honestly. Do not invent missing results.",
-            ]
-        ).output(
+        programmatic_round_info = {
+            "action_sdk": catalog.get("sdk", ""),
+            "done_plans": done_plans,
+            "last_round_result": last_round_records,
+            "round_index": round_index,
+            "max_rounds": max_rounds,
+            "final_response_contract": self._final_response_contract(prompt),
+            "program_contract": {
+                "language": "python",
+                "python_version": ">=3.10",
+                "source_shape": (
+                    "statements inside an existing async function body; local helper definitions are allowed"
+                ),
+                "completion": "an explicit return directly owned by the generated body",
+                "max_program_bytes": max_program_bytes,
+                "max_description_bytes": max_description_bytes,
+                "dispatch": (
+                    "explicit concurrency_mode='parallel' Actions may overlap up to the host limit; "
+                    "exclusive Actions form ordering barriers"
+                ),
+                "return": "lossless JSON",
+                "model_hot_result": "bounded print output and return value only",
+            },
+        }
+        programmatic_instructions = [
+            "Decide whether another Action round is required to answer the current request.",
+            "Use next_action='response' with program=null and a complete final response when no Action work remains.",
+            (
+                "When Action work remains, write only the statements that belong inside the already-existing "
+                "async function body, using the authoritative SDK in {info.action_sdk}."
+            ),
+            (
+                "You may define local helper functions, async handlers, or classes when they make the program "
+                "clearer; do not wrap or invoke a second top-level program entry point."
+            ),
+            (
+                "The generated body must contain at least one explicit return directly owned by that body, "
+                "not only a return nested under another function or class."
+            ),
+            "Call only offered bindings as await actions.name({...}) or await actions['exotic-name']({...}).",
+            (
+                "Treat every SDK input and return schema as authoritative and exhaustive. Never invent unlisted "
+                "fields, wildcard ids, magic values, or implicit bulk operations."
+            ),
+            (
+                "When a later Action requires an id or field produced by an earlier Action, read that exact "
+                "field from the earlier result and pass it explicitly."
+            ),
+            "Use loops, branches, and local JSON data transformations only when they help the current task.",
+            (
+                "Use asyncio.gather only for calls that are independent. Actions whose SDK contract declares "
+                "concurrency_mode='parallel' may overlap; exclusive Actions are serialized as ordering barriers "
+                "by the host."
+            ),
+            "Return one bounded lossless-JSON value containing only what the next response round needs.",
+            (
+                "Only print(...) output and the return value become the outer Action result; intermediate Action "
+                "values stay program-local."
+            ),
+            "Do not import network, filesystem, subprocess, package-manager, credential, or host-control capabilities.",
+            "Do not request writes, execution, approvals, or irreversible side effects in programmatic V1.",
+            "Handle the declared bounded Action errors honestly. Do not invent missing results.",
+        ]
+        request_prompt = self._seed_action_planning_prompt(action_plan_request, prompt)
+        if request_prompt is not None and callable(getattr(request_prompt, "append", None)):
+            request_prompt.append("info", {"action_runtime": programmatic_round_info})
+            request_prompt.append("instruct", {"action_runtime": programmatic_instructions})
+        else:
+            action_plan_request.input({"user_input": prompt.get("input")}).info(
+                programmatic_round_info
+            ).instruct(programmatic_instructions)
+        action_plan_request.output(
             {
                 "next_action": (
                     "'execute' | 'response'",
-                    "Whether to run one program or return to response generation.",
+                    "Whether to run one program or return the final response.",
                     True,
                 ),
                 "description": (
@@ -703,6 +950,10 @@ class AgentlyActionRuntime:
                     ),
                     True,
                 ),
+                "response": (
+                    "str | None",
+                    "Complete final response carrier when next_action=response; otherwise null or empty.",
+                ),
             },
             format="json",
         ).validate(
@@ -713,7 +964,24 @@ class AgentlyActionRuntime:
             parent_run_context=parent_run_context,
         )
         result_reader = getattr(action_plan_result, "result", action_plan_result)
+        response_stream_handler = context.get("response_stream_handler")
+        await self._stream_action_response_field(result_reader, response_stream_handler)
         raw_decision = await result_reader.async_get_data()
+        accepted_retry_result = getattr(result_reader, "_accepted_retry_result", None)
+        if accepted_retry_result is not None and response_stream_handler is not None:
+            await self._call_response_stream_handler(
+                response_stream_handler,
+                "status",
+                {
+                    "status": "retrying",
+                    "retry": True,
+                    "reason": "action_or_response_validation",
+                },
+            )
+            await self._stream_action_response_field(
+                accepted_retry_result,
+                response_stream_handler,
+            )
         decision = normalize_programmatic_action_decision(
             raw_decision,
             max_program_bytes=max_program_bytes,
@@ -724,6 +992,7 @@ class AgentlyActionRuntime:
                 "ActionDecision",
                 {
                     "next_action": "response",
+                    "response": decision.get("response") or "",
                     "use_action": False,
                     "action_calls": [],
                     "execution_commands": [],
@@ -755,7 +1024,9 @@ class AgentlyActionRuntime:
                 "catalog_revision": catalog["catalog_revision"],
             },
             "source_protocol": "programmatic",
-            "todo_suggestion": "Use the bounded program result to decide whether to respond or run another Action round.",
+            "todo_suggestion": (
+                "Use the bounded program result to decide whether to respond or run another Action round."
+            ),
         }
         return cast(
             "ActionDecision",

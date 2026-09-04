@@ -416,6 +416,8 @@ class ActionFlowController:
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list[ActionResult]:
         action = self._action
         resolved_action_list = (
@@ -451,5 +453,15 @@ class ActionFlowController:
             accepts_runtime_observation_handler = False
         if accepts_runtime_observation_handler:
             run_kwargs["runtime_observation_handler"] = self.async_emit_action_flow_observation
+
+        try:
+            action_flow_parameters = inspect.signature(action.action_flow.async_run).parameters
+        except (TypeError, ValueError):
+            action_flow_parameters = {}
+        accepts_terminal_response_handler = "terminal_response_handler" in action_flow_parameters
+        if accepts_terminal_response_handler:
+            run_kwargs["terminal_response_handler"] = terminal_response_handler
+            if "response_stream_handler" in action_flow_parameters:
+                run_kwargs["response_stream_handler"] = response_stream_handler
 
         return await action.action_flow.async_run(**run_kwargs)

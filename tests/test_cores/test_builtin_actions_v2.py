@@ -956,6 +956,45 @@ async def test_action_runtime_default_planning_uses_configured_model_key(monkeyp
     assert decision["next_action"] == "response"
 
 
+@pytest.mark.parametrize(
+    "decision",
+    [
+        {"next_action": "execute", "execution_commands": [], "response": None},
+        {"next_action": "execute", "execution_commands": [{"action_id": "read"}], "response": "done"},
+        {"next_action": "response", "execution_commands": [{"action_id": "read"}], "response": "done"},
+        {"next_action": "response", "execution_commands": [], "response": ""},
+    ],
+)
+def test_action_runtime_action_or_response_contract_rejects_invalid_cross_fields(decision):
+    agent = Agently.create_agent()
+
+    result = agent.action.action_runtime._validate_action_or_response_decision(decision, None)
+
+    assert isinstance(result, dict)
+    assert result["ok"] is False
+
+
+def test_action_runtime_action_or_response_contract_accepts_discriminated_branches():
+    agent = Agently.create_agent()
+
+    assert agent.action.action_runtime._validate_action_or_response_decision(
+        {
+            "next_action": "execute",
+            "execution_commands": [{"action_id": "read"}],
+            "response": None,
+        },
+        None,
+    ) is True
+    assert agent.action.action_runtime._validate_action_or_response_decision(
+        {
+            "next_action": "response",
+            "execution_commands": [],
+            "response": "done",
+        },
+        None,
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_action_runtime_default_planning_discloses_single_action_id_round_policy(monkeypatch):
     import agently.core as agently_core
@@ -1010,11 +1049,122 @@ async def test_action_runtime_default_planning_discloses_single_action_id_round_
         {"action_list": [{"name": "search"}, {"name": "read"}]},
     )
 
-    assert captured_info[0]["round_dispatch_policy"] == "single_action_id_cohort"
+    assert captured_info[0]["round_state"]["round_dispatch_policy"] == "single_action_id_cohort"
     assert any(
         "same action_id" in instruction and "next round" in instruction
         for instruction in captured_instructions[0]
     )
+
+
+@pytest.mark.asyncio
+async def test_action_runtime_structured_planning_uses_compact_action_projection(monkeypatch):
+    import agently.core as agently_core
+
+    agent = Agently.create_agent()
+    captured_input: list[dict[str, Any]] = []
+    captured_info: list[dict[str, Any]] = []
+    captured_instructions: list[list[str]] = []
+
+    class FakeResult:
+        async def async_get_data(self):
+            return {"next_action": "response", "execution_commands": []}
+
+    class FakeResponse:
+        result = FakeResult()
+
+    class FakeModelRequest:
+        def __init__(self, *_, **__):
+            pass
+
+        def input(self, value):
+            captured_input.append(value)
+            return self
+
+        def info(self, value):
+            captured_info.append(value)
+            return self
+
+        def instruct(self, value, **_kwargs):
+            captured_instructions.append(value)
+            return self
+
+        def output(self, *_args, **_kwargs):
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
+    prompt = Agently.create_prompt()
+    prompt.set("input", "run code")
+    last_record = {"action_call_id": "call-1", "action_id": "run_nodejs_code", "status": "error"}
+
+    await agent.action.action_runtime._default_structured_planning_handler(
+        {
+            "prompt": prompt,
+            "settings": agent.settings,
+            "agent_name": agent.name,
+            "round_index": 1,
+            "max_rounds": None,
+            "done_plans": [last_record],
+            "last_round_records": [last_record],
+        },
+        {
+            "action_list": [
+                {
+                    "name": "run_nodejs_code",
+                    "desc": "Run JavaScript.",
+                    "kwargs": {"js_code": (str, "JavaScript source")},
+                    "required_input_keys": ["js_code"],
+                    "side_effect_level": "exec",
+                    "execution_resources": [{"kind": "code_execution", "config": {"image": "secret"}}],
+                    "executor_type": "NodejsSandbox",
+                    "meta": {"env": {"TOKEN": "secret"}},
+                }
+            ]
+        },
+    )
+
+    action_projection = captured_input[0]["available_actions"][0]
+    assert action_projection == {
+        "action_id": "run_nodejs_code",
+        "desc": "Run JavaScript.",
+        "kwargs": {"js_code": (str, "JavaScript source")},
+        "required_input_keys": ["js_code"],
+        "side_effect_level": "exec",
+    }
+    assert "execution_resources" not in action_projection
+    assert "executor_type" not in action_projection
+    assert captured_info[0]["round_state"]["round_index"] == 1
+    compact_record = captured_info[0]["round_state"]["last_round_result"][0]
+    assert compact_record["action_call_id"] == "call-1"
+    assert compact_record["action_id"] == "run_nodejs_code"
+    assert compact_record["status"] == "error"
+    assert "kwargs" not in compact_record
+    assert "meta" not in compact_record
+    assert "prior_action_results" not in captured_info[0]["round_state"]
+    assert any("execute a corrected Action call" in item for item in captured_instructions[0])
+    assert any("never fabricate" in item for item in captured_instructions[0])
+
+    reply_results = agent.action.to_action_results(
+        cast(
+            Any,
+            [
+                {
+                    **last_record,
+                    "purpose": "Run JavaScript",
+                    "success": True,
+                    "result": {
+                        "returncode": 0,
+                        "stdout": "42\n",
+                        "meta": {"provider_capabilities": {"internal": True}},
+                    },
+                }
+            ],
+        )
+    )
+    assert reply_results["Run JavaScript"]["stdout"] == "42\n"
+    assert "meta" not in reply_results["Run JavaScript"]
 
 
 @pytest.mark.asyncio
@@ -1236,6 +1386,7 @@ async def test_action_runtime_native_tool_planning_uses_configured_model_key(mon
     class FakeResponse:
         def get_async_generator(self, *_, **__):
             async def generate():
+                yield "delta", "Direct native response."
                 yield "done", None
 
             return generate()
@@ -1261,6 +1412,10 @@ async def test_action_runtime_native_tool_planning_uses_configured_model_key(mon
     monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
     prompt = Agently.create_prompt()
     prompt.set("input", "collect evidence")
+    streamed: list[tuple[str, object]] = []
+
+    async def capture_response(event: str, data: object):
+        streamed.append((event, data))
 
     decision = await agent.action.action_runtime._default_native_tool_call_planning_handler(
         {
@@ -1271,12 +1426,15 @@ async def test_action_runtime_native_tool_planning_uses_configured_model_key(mon
             "max_rounds": 1,
             "done_plans": [],
             "last_round_records": [],
+            "response_stream_handler": capture_response,
         },
         {"action_list": [{"name": "search"}]},
     )
 
     assert seen_model_keys == ["task-main"]
     assert decision["next_action"] == "response"
+    assert decision["response"] == "Direct native response."
+    assert streamed == [("delta", "Direct native response.")]
 
 
 def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):

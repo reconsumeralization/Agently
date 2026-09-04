@@ -14,6 +14,8 @@
 
 from agently_stage import default_stage_call_bridge
 
+import asyncio
+import contextlib
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -21,6 +23,7 @@ from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, 
 from typing_extensions import Self
 
 from agently.core import BaseAgent
+from agently.core.model.ModelRequestRunner import PreparedModelResponse
 from agently.core.runtime.RuntimeContext import (
     get_current_action_policy,
     get_current_agent_execution_context,
@@ -1658,26 +1661,121 @@ class ActionExtension(BaseAgent):
         if settings.get("action.loop.enabled", settings.get("tool.loop.enabled", True)) is not True:
             return
 
+        if settings.get("$agent_execution.ensure_long_output", False) is True:
+            return
+
         action_list = self._get_scoped_action_list()
         if len(action_list) == 0:
             return
 
-        records = await self.action.async_plan_and_execute(
-            prompt=prompt,
-            settings=settings,
-            action_list=action_list,
-            agent_name=self.name,
-            planning_handler=self.__action_planning_handler,
-            action_execution_handler=self.__action_execution_handler,
-            max_rounds=settings.get("action.loop.max_rounds", settings.get("tool.loop.max_rounds", None)),  # type: ignore[arg-type]
-            concurrency=settings.get("action.loop.concurrency", settings.get("tool.loop.concurrency", None)),  # type: ignore[arg-type]
-            timeout=settings.get("action.loop.timeout", settings.get("tool.loop.timeout", None)),  # type: ignore[arg-type]
-        )
+        prepared_response = PreparedModelResponse()
 
-        if len(records) > 0:
-            prompt.set("action_results", self.action.to_action_results(records))
-            prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
-            self.__action_logs = records
+        async def response_generator():
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+            terminal_decision: dict[str, Any] = {}
+            streamed_response_parts: list[str] = []
+
+            async def response_stream_handler(event: str, data: Any) -> None:
+                if event == "status" and isinstance(data, Mapping) and data.get("retry"):
+                    streamed_response_parts.clear()
+                elif event == "delta" and isinstance(data, str):
+                    streamed_response_parts.append(data)
+                await queue.put((event, data))
+
+            async def terminal_response_handler(decision: dict[str, Any]) -> None:
+                terminal_decision.clear()
+                terminal_decision.update(decision)
+
+            async def run_action_loop() -> None:
+                try:
+                    records = await self.action.async_plan_and_execute(
+                        prompt=prompt,
+                        settings=settings,
+                        action_list=action_list,
+                        agent_name=self.name,
+                        planning_handler=self.__action_planning_handler,
+                        action_execution_handler=self.__action_execution_handler,
+                        max_rounds=settings.get(  # type: ignore[arg-type]
+                            "action.loop.max_rounds",
+                            settings.get("tool.loop.max_rounds", None),
+                        ),
+                        concurrency=settings.get(  # type: ignore[arg-type]
+                            "action.loop.concurrency",
+                            settings.get("tool.loop.concurrency", None),
+                        ),
+                        timeout=settings.get(  # type: ignore[arg-type]
+                            "action.loop.timeout",
+                            settings.get("tool.loop.timeout", None),
+                        ),
+                        response_stream_handler=response_stream_handler,
+                        terminal_response_handler=terminal_response_handler,
+                    )
+                except BaseException as error:
+                    await queue.put(("$action_loop_error", error))
+                    return
+                await queue.put(("$action_loop_done", records))
+
+            action_loop_task = asyncio.create_task(run_action_loop())
+            try:
+                while True:
+                    event, data = await queue.get()
+                    if event == "$action_loop_error":
+                        raise data
+                    if event == "$action_loop_done":
+                        records = data if isinstance(data, list) else []
+                        action_results = self.action.to_action_results(records)
+                        prompt.set("action_results", action_results)
+                        if records:
+                            prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
+                        self.__action_logs = records
+                        self.__prepared_action_results = action_results
+
+                        response = terminal_decision.get("response")
+                        if isinstance(response, str) and response.strip():
+                            streamed_response = "".join(streamed_response_parts)
+                            if not streamed_response:
+                                yield "delta", response
+                            elif response.startswith(streamed_response):
+                                remainder = response[len(streamed_response) :]
+                                if remainder:
+                                    yield "delta", remainder
+                            elif streamed_response != response:
+                                yield "status", {
+                                    "status": "failed",
+                                    "retry": True,
+                                    "reason": "Replacing a provisional Action response with the accepted response.",
+                                }
+                                yield "delta", response
+                            prepared_response.mark_handled(
+                                delivery="action_response_direct",
+                                planning_protocol=settings.get(
+                                    "action.protocol",
+                                    settings.get("tool.protocol", "structured_plan"),
+                                ),
+                            )
+                            yield "meta", {
+                                "action_response_delivery": "direct",
+                                "action_response_fallback": False,
+                            }
+                            yield "status", {"status": "completed", "retry": False}
+                            yield "done", response
+                        else:
+                            prepared_response.meta.update(
+                                {
+                                    "delivery": "final_request_fallback",
+                                    "reason": "terminal_response_unavailable",
+                                }
+                            )
+                        break
+                    yield event, data
+            finally:
+                if not action_loop_task.done():
+                    action_loop_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await action_loop_task
+
+        prepared_response.set_generator(response_generator())
+        return prepared_response
 
     async def __broadcast_prefix(self, full_result_data: "AgentlyModelResult", _):
         if len(self.__action_logs) == 0:

@@ -84,6 +84,7 @@ class LeadingThinkEventNormalizer:
     """Normalize leading ``<think>...</think>`` content into reasoning events."""
 
     _OPEN = "<think>"
+    _CLOSE = "</think>"
     _CLOSE_RE = re.compile(r"</think>", flags=re.IGNORECASE)
 
     def __init__(self):
@@ -128,10 +129,24 @@ class LeadingThinkEventNormalizer:
         events: list[tuple[str, str]] = []
         close = self._CLOSE_RE.search(self._pending)
         if close is None:
-            if self._pending:
-                self._reasoning_buffer += self._pending
-                events.append(("reasoning_delta", self._pending))
-                self._pending = ""
+            # Keep a suffix that may become a closing tag in the next stream
+            # chunk. Otherwise a boundary such as ``</thi`` + ``nk>`` is
+            # irreversibly emitted as reasoning before the tag is complete.
+            pending_lower = self._pending.lower()
+            close_lower = self._CLOSE.lower()
+            retained_length = max(
+                (
+                    length
+                    for length in range(1, min(len(self._pending), len(self._CLOSE) - 1) + 1)
+                    if pending_lower.endswith(close_lower[:length])
+                ),
+                default=0,
+            )
+            reasoning = self._pending[:-retained_length] if retained_length else self._pending
+            if reasoning:
+                self._reasoning_buffer += reasoning
+                events.append(("reasoning_delta", reasoning))
+            self._pending = self._pending[-retained_length:] if retained_length else ""
             return events
 
         reasoning = self._pending[:close.start()]

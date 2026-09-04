@@ -199,6 +199,8 @@ class TriggerFlowActionFlow:
         timeout: float | None = None,
         planning_protocol: str | None = None,
         runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list["ActionResult"]:
         from agently.core.orchestration.TriggerFlow import TriggerFlow
         from agently.types.data import RunContext
@@ -423,6 +425,7 @@ class TriggerFlowActionFlow:
                         "parent_run_context": parent_run_context,
                         "action": action,
                         "runtime": action.action_runtime,
+                        "response_stream_handler": response_stream_handler,
                     },
                     {
                         "action_list": visible_action_list,
@@ -502,6 +505,10 @@ class TriggerFlowActionFlow:
             if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
+                if terminal_response_handler is not None and decision.get("next_action") == "response":
+                    terminal_result = terminal_response_handler(decision)
+                    if inspect.isawaitable(terminal_result):
+                        await terminal_result
                 await data.async_emit("DONE", [*done_plans, *diagnostic_records])
             return decision
 

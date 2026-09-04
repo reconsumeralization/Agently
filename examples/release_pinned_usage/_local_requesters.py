@@ -91,6 +91,70 @@ class PinnedUsageSpecificStreamRequester(PinnedUsageStructuredRequester):
         yield "meta", {"provider": "pinned-usage-specific-stream"}
 
 
+class PinnedUsageDebugStreamRequester(PinnedUsageStructuredRequester):
+    name = "PinnedUsageDebugStreamRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData) -> AsyncGenerator[tuple[str, Any], None]:
+        _ = request_data
+        yield "message", "PINNED_DEBUG_A"
+        yield "message", "PINNED_DEBUG_B"
+
+
+class PinnedUsageActionResponseRequester:
+    name = "PinnedUsageActionResponseRequester"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+    responses: list[str] = []
+    request_count = 0
+    prompt_texts: list[str] = []
+
+    def __init__(self, prompt: Any, settings: Any) -> None:
+        self.prompt = prompt
+        self.settings = settings
+
+    @classmethod
+    def reset(cls, responses: list[str]) -> None:
+        cls.responses = list(responses)
+        cls.request_count = 0
+        cls.prompt_texts = []
+
+    @staticmethod
+    def _on_register() -> None:
+        pass
+
+    @staticmethod
+    def _on_unregister() -> None:
+        pass
+
+    def generate_request_data(self) -> AgentlyRequestData:
+        request_index = type(self).request_count
+        type(self).request_count += 1
+        type(self).prompt_texts.append(self.prompt.to_text())
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={"request_index": request_index},
+            request_options={"stream": True},
+            request_url="pinned-usage://action-response",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData) -> AsyncGenerator[tuple[str, Any], None]:
+        request_index = int(request_data.data["request_index"])
+        yield "message", type(self).responses[request_index]
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+        for index in range(0, len(response_text), 7):
+            yield "delta", response_text[index : index + 7]
+        yield "done", response_text
+        yield "meta", {"provider": "pinned-usage-action-response"}
+
+
 def create_structured_agent(name: str):
     settings = Settings(name=f"{name}-Settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-PluginManager")
@@ -102,4 +166,18 @@ def create_specific_stream_agent(name: str):
     settings = Settings(name=f"{name}-Settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-PluginManager")
     plugin_manager.register("ModelRequester", PinnedUsageSpecificStreamRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def create_debug_stream_agent(name: str):
+    settings = Settings(name=f"{name}-Settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-PluginManager")
+    plugin_manager.register("ModelRequester", PinnedUsageDebugStreamRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def create_action_response_agent(name: str):
+    settings = Settings(name=f"{name}-Settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-PluginManager")
+    plugin_manager.register("ModelRequester", PinnedUsageActionResponseRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)

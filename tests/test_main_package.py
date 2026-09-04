@@ -1512,3 +1512,14 @@ def test_agent_quick_prompt_supports_key_value_and_kwargs():
         "context": "Public-facing API handler",
         "framework": "FastAPI",
     }
+
+
+def test_agent_execution_info_preserves_fluent_execution_chain():
+    agent = Agently.create_agent()
+
+    execution = agent.input("Summarize the incident.")
+    chained = execution.info("The audience is the support team.")
+
+    assert chained is execution
+    assert chained.instruct("Be concise.").output({"summary": (str,)}) is execution
+    assert execution.request.prompt.to_prompt_object().info == "The audience is the support team."

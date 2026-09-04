@@ -423,25 +423,30 @@ def test_programmatic_decision_normalization_preserves_exact_program():
             "next_action": "response",
             "description": "No Action is needed",
             "program": None,
+            "response": "No Action is needed.",
         },
         max_program_bytes=1,
     )
 
     assert normalized["program"] == program
     assert response["program"] is None
+    assert response.get("response") == "No Action is needed."
 
 
 @pytest.mark.parametrize(
     "decision",
     [
         {"next_action": "execute", "description": "run", "program": None},
-        {"next_action": "response", "description": "done", "program": "return 1"},
+        {"next_action": "execute", "description": "run", "program": "return 1", "response": "done"},
+        {"next_action": "response", "description": "done", "program": None},
+        {"next_action": "response", "description": "done", "program": "return 1", "response": "done"},
         {"next_action": "other", "description": "bad", "program": None},
-        {"next_action": "response", "description": "", "program": None},
+        {"next_action": "response", "description": "", "program": None, "response": "done"},
         {
             "next_action": "response",
             "description": "done",
             "program": None,
+            "response": "done",
             "catalog_revision": "model-must-not-copy-this",
         },
     ],
@@ -467,6 +472,7 @@ def test_programmatic_decision_normalization_enforces_utf8_byte_limits():
                 "next_action": "response",
                 "description": "文",
                 "program": None,
+                "response": "done",
             },
             max_program_bytes=1,
             max_description_bytes=2,

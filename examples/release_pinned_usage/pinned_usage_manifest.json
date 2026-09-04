@@ -12,6 +12,7 @@
       "path": "examples/release_pinned_usage/01_agent_execution_result_lifecycle.py",
       "protected_usage": [
         "agent.input(...).output(...).get_result()",
+        "agent.input(...).info(...).instruct(...).output(...).get_result() preserves one AgentExecution",
         "AgentExecutionResult.get_data(...)",
         "AgentExecutionResult.get_full_data(...)",
         "AgentExecutionResult.get_data_object(...)",
@@ -49,6 +50,36 @@
       "model_dependency": "none; SkillLibrary installation and required AgentExecution binding probe",
       "requires_human_confirmation_for_edits": true,
       "release_gate_reason": "4.1.4.2 keeps management-shaped compatibility installation thin over SkillLibrary while AgentExecution owns task-scoped exact-revision binding."
+    },
+    {
+      "path": "examples/release_pinned_usage/04_debug_console_profiles.py",
+      "protected_usage": [
+        "debug=True remains the readable simple console profile",
+        "streaming response characters finish before ModelRequest Done and delayed AgentExecution copies stay hidden",
+        "debug=detail exposes readable Prompt, provider request JSON, streaming output, and final materialized result",
+        "agent-scoped debug settings preserve AgentExecution start and terminal lifecycle display",
+        "ConsoleSink suppresses duplicate AgentExecution model projections and runtime.progress mirrors",
+        "EventCenter hooks retain the complete underlying RuntimeEvent stream",
+        "ExecutionResource self-check and actionable failure use human-readable labels while repeated image-layer progress stays visible as compact lines",
+        "structured Action planning excludes host-only execution_resources metadata"
+      ],
+      "model_dependency": "none; local multi-chunk ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "RuntimeEvent/EventCenter debug presentation is a Foundation behavior and must remain readable without weakening complete event dispatch."
+    },
+    {
+      "path": "examples/release_pinned_usage/05_action_response_delivery.py",
+      "protected_usage": [
+        "agent.input(...).info(...).use_action(...) preserves one AgentExecution",
+        "one successful Action followed by response uses two ModelRequests rather than a redundant third response request",
+        "the terminal ActionDecision response is delivered through the existing AgentExecution result",
+        "the original request-local info remains visible in every Action planning round",
+        "the next Action planning round receives the observed Action result",
+        "debug=True hides internal Action decision streams and displays the final response once"
+      ],
+      "model_dependency": "none; local scripted Action-or-Response ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "ActionLoop response delivery and execution-local fluent chaining are Foundation behavior and must not regress between releases."
     }
   ],
   "model_backed_release_examples": [

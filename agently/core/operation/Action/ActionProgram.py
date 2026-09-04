@@ -155,11 +155,11 @@ def normalize_programmatic_action_decision(
 
     if not isinstance(decision, Mapping):
         raise ValueError("Programmatic Action decision must be an object.")
-    allowed_keys = {"next_action", "description", "program"}
+    allowed_keys = {"next_action", "description", "program", "response"}
     unknown_keys = sorted(str(key) for key in decision.keys() if key not in allowed_keys)
     if unknown_keys:
         raise ValueError("Programmatic Action decision contains unknown fields: " + ", ".join(unknown_keys) + ".")
-    missing_keys = sorted(allowed_keys - set(decision.keys()))
+    missing_keys = sorted({"next_action", "description", "program"} - set(decision.keys()))
     if missing_keys:
         raise ValueError("Programmatic Action decision is missing required fields: " + ", ".join(missing_keys) + ".")
     if isinstance(max_program_bytes, bool) or not isinstance(max_program_bytes, int) or max_program_bytes <= 0:
@@ -185,12 +185,17 @@ def normalize_programmatic_action_decision(
         )
 
     program = decision.get("program")
+    response = decision.get("response")
     if next_action == "response":
         if program is not None:
             raise ValueError("Programmatic Action response decisions require program=null.")
+        if not isinstance(response, str) or not response.strip():
+            raise ValueError("Programmatic Action response decisions require a non-empty response.")
     else:
         if not isinstance(program, str) or not program.strip():
             raise ValueError("Programmatic Action execute decisions require a non-empty program.")
+        if response not in (None, ""):
+            raise ValueError("Programmatic Action execute decisions require response=null or empty.")
         program_bytes = _strict_utf8_bytes(program, label="program")
         if len(program_bytes) > max_program_bytes:
             raise ValueError(
@@ -203,6 +208,7 @@ def normalize_programmatic_action_decision(
             "next_action": next_action,
             "description": description,
             "program": program,
+            "response": response,
         },
     )
 

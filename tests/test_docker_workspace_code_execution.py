@@ -144,7 +144,11 @@ async def test_docker_async_container_execution_does_not_block_event_loop(
 ) -> None:
     resource = DockerExecutionResource()
     monkeypatch.setattr(resource, "is_binary_available", lambda: True)
-    monkeypatch.setattr(resource, "ensure_image_ready", lambda *_args, **_kwargs: {})
+
+    async def image_ready(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(resource, "async_ensure_image_ready", image_ready)
 
     async def slow_run(*_args, **_kwargs):
         await asyncio.sleep(0.2)
@@ -173,6 +177,51 @@ async def test_docker_async_container_execution_does_not_block_event_loop(
     )
 
     assert ticked_at[0] - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_docker_image_pull_streams_bounded_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    stdout = asyncio.StreamReader()
+    stderr = asyncio.StreamReader()
+    stdout.feed_data(b"layer-a: Pulling fs layer\nlayer-a: Download complete\n")
+    stdout.feed_eof()
+    stderr.feed_eof()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    async def create_process(*_args, **_kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    resource = DockerExecutionResource()
+    observed: list[dict[str, object]] = []
+
+    async def record_progress(**payload):
+        observed.append(payload)
+
+    resource._progress_handler = record_progress
+    result = await resource.async_pull_image("node:22-slim", timeout=30)
+
+    assert result["ok"] is True
+    assert [item["phase"] for item in observed] == [
+        "image_pull_started",
+        "image_pull_progress",
+        "image_pull_progress",
+        "image_pull_completed",
+    ]
+    progress_details = observed[1]["details"]
+    assert isinstance(progress_details, dict)
+    assert progress_details["line"] == "layer-a: Pulling fs layer"
 
 
 @pytest.mark.asyncio

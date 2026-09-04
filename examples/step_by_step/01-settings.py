@@ -23,8 +23,9 @@ agent.set_settings(
 )
 
 ## Debug Toggle
-# Set to False by default. debug=True displays request/result summary logs;
-# use debug="detail" when token-level streaming logs are needed.
+# Set to False by default. debug=True is the readable Prompt/request/process
+# profile. debug="detail" adds sanitized request JSON and deep diagnostics while
+# still deduplicating transport/progress mirrors. Use EventCenter for every event.
 agent.set_settings("debug", True)
 
 agent_model_requester_settings = agent.settings.get("plugins.ModelRequester.OpenAICompatible", {})

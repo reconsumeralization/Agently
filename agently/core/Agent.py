@@ -178,7 +178,7 @@ class BaseAgent:
             {
                 "request_prefixes": [],
                 "broadcast_prefixes": [],
-                "broadcast_suffixes": [],
+                "broadcast_suffixes": {},
                 "finally": [],
                 "validate_handlers": [],
             },

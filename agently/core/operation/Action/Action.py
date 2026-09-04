@@ -78,7 +78,11 @@ from agently.utils import DataFormatter
 from .ActionArtifactManager import ActionArtifactManager
 from .ActionDispatcher import ActionDispatcher
 from .ActionFlowController import ActionFlowController
-from .ActionMetadata import sanitize_action_spec_for_metadata, summarize_action_records
+from .ActionMetadata import (
+    project_action_spec_for_planning,
+    sanitize_action_spec_for_metadata,
+    summarize_action_records,
+)
 from .ActionResourceRegistrar import ActionResourceRegistrar
 from .ActionNormalization import (
     apply_action_decision_round_dispatch_policy,
@@ -117,10 +121,9 @@ class _DeprecatedActionManagerProxy:
 
 class Action:
     ACTION_RESULT_QUOTE_NOTICE = (
-        "NOTICE: MUST QUOTE KEY INFO OR MARK SOURCE (PREFER URL INCLUDED) FROM {action_results} "
-        "IN REPLY IF YOU USE {action_results} TO IMPROVE REPLY! WHEN THE OUTPUT CONTRACT REQUESTS "
-        "STRUCTURED EVIDENCE REFERENCES, USE THE OFFERED HOST-ISSUED action_call_id; ORDINARY "
-        "OUTPUTS DO NOT NEED TO ADD EVIDENCE BINDINGS."
+        "Use {action_results} as execution evidence. Never describe a failed Action as having run "
+        "successfully. When the output contract requests structured evidence references, use the "
+        "host-issued action_call_id; ordinary replies do not need evidence bindings."
     )
     TOOL_RESULT_QUOTE_NOTICE = ACTION_RESULT_QUOTE_NOTICE
 
@@ -989,6 +992,10 @@ class Action:
         return ActionArtifactManager.to_model_visible_records(records)
 
     @classmethod
+    def _to_model_planning_records(cls, records: list["ActionResult"] | None):
+        return ActionArtifactManager.to_model_planning_records(records)
+
+    @classmethod
     def _to_action_flow_return_records(cls, records: list["ActionResult"] | None):
         return ActionArtifactManager._to_action_flow_return_records(records)
 
@@ -1062,6 +1069,16 @@ class Action:
 
     def get_action_list(self, tags: str | list[str] | None = None):
         return list(self.get_action_info(tags).values())
+
+    @staticmethod
+    def _to_model_planning_action_list(action_list: list[dict[str, Any]] | None):
+        if not isinstance(action_list, list):
+            return []
+        return [
+            project_action_spec_for_planning(spec)
+            for spec in action_list
+            if isinstance(spec, dict)
+        ]
 
     def get_tool_list(self, tags: str | list[str] | None = None):
         return list(self.get_tool_info(tags).values())
@@ -1644,7 +1661,7 @@ class Action:
 
     @staticmethod
     def to_action_results(records: list["ActionResult"]):
-        return to_action_results(ActionArtifactManager.to_model_visible_records(records))
+        return to_action_results(ActionArtifactManager.to_model_planning_records(records))
 
     @staticmethod
     def _should_continue(decision: "ActionDecision", *, round_index: int, max_rounds: int | None):
@@ -1708,6 +1725,8 @@ class Action:
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list["ActionResult"]:
         return await self._flow_controller.async_plan_and_execute(
             prompt=prompt,
@@ -1724,6 +1743,8 @@ class Action:
             concurrency=concurrency,
             timeout=timeout,
             planning_protocol=planning_protocol,
+            response_stream_handler=response_stream_handler,
+            terminal_response_handler=terminal_response_handler,
         )
 
 

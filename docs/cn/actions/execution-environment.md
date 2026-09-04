@@ -149,6 +149,20 @@ provider-neutral `providers=` 与 `isolation=` 参数选择。机制专属配置
 host 授权，且不能满足 `isolation="required"`。因此 `unsafe_fallback=True` 必须同时
 显式选择 `isolation="preferred"` 或 `"none"`，不能被隐式选中。
 
+如果 Docker 不可用且代码可信，可以显式选择 subprocess 兼容路径：
+
+```python
+agent.enable_code_runtime(
+    language="nodejs",
+    providers=["trusted_local"],
+    unsafe_fallback=True,
+    isolation="none",
+)
+```
+
+不要用它执行不可信或模型生成的代码。安全默认会 fail closed，不会静默把这类代码
+转移到宿主 subprocess。
+
 公开的 `isolation=` 参数是选择策略，不是 provider 能力标签。`code_execution`
 provider 必须报告具体布尔隔离轴：进程 containment、宿主文件系统限制、提权阻断和
 syscall 限制。required isolation 必须满足全部请求轴；preferred isolation 会先在有序
@@ -287,13 +301,22 @@ manager 发出 `execution_resource.*` 事件：
 - `execution_resource.declared`
 - `execution_resource.approval_required`
 - `execution_resource.ensuring`
+- `execution_resource.probed`
+- `execution_resource.progress`
 - `execution_resource.ready`
 - `execution_resource.unhealthy`
 - `execution_resource.releasing`
 - `execution_resource.released`
 - `execution_resource.failed`
 
-payload 只包含稳定 id 与状态元信息，不能包含原始凭证、环境变量、命令 secret 或 live resource 对象。
+payload 包含稳定 id、清洗后的 provider/镜像自检事实、有界准备进度、状态、稳定错误码与
+可执行建议，不能包含原始凭证、环境变量、命令 secret 或 live resource 对象。
+`debug=True` 会把这些事件显示为精简的环境执行叙事；`debug="detail"` 还会显示有界的
+probe 与准备 payload。显式授权 `image_pull_policy="if_missing"` 后，Action 真正执行前会
+持续显示 Docker 镜像下载进度。simple 模式使用“检查环境”“下载镜像”“镜像就绪”等
+面向人的标签，不显示 `provider=`、`phase=` 等内部字段；重复的 Docker layer 更新使用
+紧凑单行，开始、完成、失败和最终就绪仍使用完整阶段块。detail 模式先显示同样的可读
+说明，再在 `Diagnostics` 下附加清洗后的完整字段。
 
 ## Examples
 

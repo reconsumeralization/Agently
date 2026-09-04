@@ -49,4 +49,5 @@ if __name__ == "__main__":
 # Use file="..." for a local image or files=[...] / urls=[...] for multi-image input.
 # Any OpenAI-compatible VLM provider works here; set QIANFAN_BASE_URL,
 # QIANFAN_VLM_MODEL, and QIANFAN_API_KEY or adapt those env vars to switch
-# providers. debug="detail" prints the raw request/response stream.
+# providers. debug="detail" prints sanitized request diagnostics and one
+# deduplicated response stream; use EventCenter when every raw event is required.

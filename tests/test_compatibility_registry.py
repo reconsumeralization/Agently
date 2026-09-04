@@ -15,8 +15,6 @@ from agently.compatibility import (
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_PATH = ROOT / "compatibility" / "index.json"
 IN_DEVELOPMENT_PATH = ROOT / "compatibility" / "in-development.json"
-
-
 def _development_manifest() -> dict:
     return json.loads(IN_DEVELOPMENT_PATH.read_text(encoding="utf-8"))
 
@@ -114,7 +112,6 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     assert "No Skills route" in contract["execution_policy"]
     assert "SkillSourceProvider" in contract["remote_source_policy"]
     assert "immutable local snapshots" in contract["remote_source_policy"]
-
     request_contract = manifest["request_input"]["skills"]
     assert "AgentExecution.use_skills" in request_contract["surface"]
     assert "Agent.run_skills_task" in request_contract["surface"]
@@ -137,6 +134,25 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert "TaskWorkspace is never an event store" in (devtools["runtime_control"]["record_store_contract"])
     assert "model.reasoning.delta" in devtools["runtime_control"]["model_reasoning_observation_contract"]
     assert "model.validation_failed" in devtools["runtime_control"]["model_validation_diagnostics_contract"]
+    console_contract = devtools["runtime_control"]["local_console_streaming_contract"]
+    assert "ordered raw delivery" in console_contract
+    assert "model.streaming" in console_contract
+    assert "source=model_request" in console_contract
+    assert "null-delta controls remain Process notifications" in console_contract
+    assert "xml_field" in console_contract
+    assert "progress_delta" in console_contract
+    assert "not printed again" in console_contract
+    assert "ExecutionResource environment self-check" in console_contract
+    assert "product-language labels" in console_contract
+    assert "compact translated lines" in console_contract
+    planning_contract = devtools["runtime_control"]["action_planning_projection_contract"]
+    assert "execution_resources" in planning_contract
+    assert "corrected call" in planning_contract
+    assert "never a fabricated execution result" in planning_contract
+    response_console_contract = devtools["runtime_control"]["action_planning_console_projection_contract"]
+    assert "model_request_role=action_planning" in response_console_contract
+    assert "displayed once" in response_console_contract
+    assert "detail and EventCenter retain" in response_console_contract
 
 
 def test_in_development_triggerflow_snapshot_projection_contract() -> None:
@@ -176,6 +192,9 @@ def test_in_development_code_execution_and_evidence_replan_contracts() -> None:
     }
     assert all(candidate["fallback"] == "fail_closed" for candidate in provider_candidates)
     assert "contributor-owned" not in action_runtime["builtin_provider_contract"]
+    assert "without another provider request" in action_runtime["response_delivery_contract"]
+    assert "ensure_long_output" in action_runtime["response_delivery_contract"]
+    assert "input(...).info(...).use_action(...)" in action_runtime["fluent_capability_chain_contract"]
     assert "evidence-reacquisition card" in task_loop["evidence_replan_contract"]
     assert "final-artifact self-readback" in task_loop["evidence_replan_contract"]
 

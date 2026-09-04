@@ -129,6 +129,41 @@ narrow subset. Managed execution environment metadata redacts raw `env` values
 in this visible schema while preserving key names; providers still receive the
 raw env only through the execution path.
 
+The default structured planner receives a smaller projection than this public
+inspection API: `action_id`, description, callable kwargs, required inputs, and
+only non-default approval/side-effect/concurrency constraints. Host-only
+`execution_resources`, provider configuration, executor metadata, and empty
+defaults stay behind the Action boundary and are resolved from the canonical
+registry after selection. Empty round state is omitted, and the latest Action
+result is not duplicated in both history and last-round input.
+Repairable argument/code/runtime failures are replanned as corrected calls;
+provider/environment unavailability instead produces another eligible route or
+an explicit blocker/remedy, never a claimed execution result.
+
+The default loop is an Action-or-Response loop. Each planning round derives
+from the complete execution-local Prompt, so `.input(...)`, `.info(...)`,
+instructions, Session history, language policy, attachments, and the original
+output contract remain available while compact Action state is appended. A
+round returns exactly one branch:
+
+- `execute`: one or more Action calls and no final response; or
+- `response`: no Action calls and the complete final response carrier.
+
+When `response` is selected, that field continues through the existing outer
+Request/AgentExecution stream, parser, validators, result readers, and Session
+finalizer. The decision JSON is not shown as business output and Agently does
+not issue a second request just to regenerate the same answer. A task with one
+Action therefore normally uses two model requests: select/execute, then respond.
+A task that needs no Action after entering the action-enabled path normally uses
+one. Structured `.output(...)` remains authoritative: the response field carries
+the JSON or other configured carrier and the outer Request parses and validates
+it against the original contract.
+
+Older custom planning handlers or ActionFlow plugins that return only
+`next_action="response"` without a response value keep the compatible final
+ModelRequest fallback. `ensure_long_output` also keeps its independent delivery
+path for now. These are fallback paths, not the default ActionLoop topology.
+
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
 `register_action(..., executor=..., execution_resources=[...])` when you are

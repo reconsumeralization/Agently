@@ -60,6 +60,8 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
         execution = agent.create_execution().input("hello").output({"reply": (str,)})
         assert_type(execution, AgentExecution)
+        assert_type(agent.input("hello").info("context"), AgentExecution)
+        assert_type(execution.info("updated context"), AgentExecution)
         assert_type(agent.input("next turn").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.input("reuse draft").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.ensure_long_output(), AgentExecution)
@@ -121,6 +123,7 @@ def test_agent_execution_stream_protocol_contract():
     if TYPE_CHECKING:
         execution = cast(AgentExecution, object())
 
+        assert_type(execution.info("context"), AgentExecution)
         assert_type(execution.get_async_generator(), AsyncGenerator[str, None])
         assert_type(execution.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
         assert_type(execution.get_generator(), Generator[str, None, None])

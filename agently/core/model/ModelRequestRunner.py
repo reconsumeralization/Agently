@@ -30,6 +30,29 @@ from .ModelRequestResult import DEFAULT_SPECIFIC_EVENTS, ModelRequestResult
 _MODEL_REQUEST_ESTIMATED_INPUT_CHARS_META = "_model_request_estimated_input_chars"
 _MODEL_REQUEST_ESTIMATED_INPUT_SOURCE_META = "_model_request_estimated_input_source"
 
+
+class PreparedModelResponse:
+    """Internal response stream supplied by a request-prefix extension.
+
+    The extension marks ``handled`` only after it has produced an accepted
+    terminal response. When it remains false, ModelRequestRunner continues to
+    the ordinary provider request with the prefix-mutated Prompt.
+    """
+
+    def __init__(self) -> None:
+        self.response_generator: AsyncGenerator[Any, None] | None = None
+        self.handled = False
+        self.meta: dict[str, Any] = {}
+
+    def set_generator(self, response_generator: AsyncGenerator[Any, None]) -> "PreparedModelResponse":
+        self.response_generator = response_generator
+        return self
+
+    def mark_handled(self, **meta: Any) -> None:
+        self.handled = True
+        self.meta.update(meta)
+
+
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
@@ -80,6 +103,9 @@ class ModelRequestRunner:
             self.request_run_context.response_id = self.id
         if self.request_run_context.agent_name is None:
             self.request_run_context.agent_name = self.agent_name
+        model_request_role = settings.get("$model_request.role", None)
+        if isinstance(model_request_role, str) and model_request_role:
+            self.request_run_context.meta["model_request_role"] = model_request_role
         self.run_context = self.request_run_context
         self.agent_execution_run_context = agent_execution_run_context
         self.model_run_context = self.request_run_context.create_child(
@@ -87,6 +113,11 @@ class ModelRequestRunner:
             response_id=self.id,
             meta={
                 "attempt_index": self.attempt_index,
+                **(
+                    {"model_request_role": model_request_role}
+                    if isinstance(model_request_role, str) and model_request_role
+                    else {}
+                ),
             },
         )
         self.plugin_manager = plugin_manager
@@ -651,7 +682,141 @@ class ModelRequestRunner:
             scheduler_slot = self._scheduler_slot(provider_name)
             scheduler_slot_entered = False
             terminal_status: str | None = None
+            request_delivery_meta: dict[str, Any] = {}
             try:
+                prepared_response: PreparedModelResponse | None = None
+                request_prefixes = self.extension_handlers.get("request_prefixes", [])
+                for prefix in request_prefixes:
+                    if inspect.iscoroutinefunction(prefix):
+                        prefix_result = await prefix(self.prompt, self.settings)
+                    elif inspect.isfunction(prefix):
+                        prefix_result = prefix(self.prompt, self.settings)
+                    else:
+                        continue
+                    if isinstance(prefix_result, PreparedModelResponse):
+                        if prepared_response is not None:
+                            raise RuntimeError("Multiple request-prefix extensions prepared a terminal model response.")
+                        prepared_response = prefix_result
+
+                broadcast_prefixes = self.extension_handlers.get("broadcast_prefixes", [])
+                broadcast_suffixes = self.extension_handlers.get("broadcast_suffixes", {})
+
+                async def yield_broadcast_prefix_items():
+                    for prefix in broadcast_prefixes:
+                        if inspect.iscoroutinefunction(prefix):
+                            result = await prefix(
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+                        elif inspect.isgeneratorfunction(prefix):
+                            for result in prefix(
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isasyncgenfunction(prefix):
+                            async for result in prefix(
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isfunction(prefix):
+                            result = prefix(
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+
+                async def yield_broadcast_suffix_items(event: Any, data: Any):
+                    suffixes = broadcast_suffixes[event] if event in broadcast_suffixes else []
+                    for suffix in suffixes:
+                        if inspect.iscoroutinefunction(suffix):
+                            result = await suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+                        elif inspect.isgeneratorfunction(suffix):
+                            for result in suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isasyncgenfunction(suffix):
+                            async for result in suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            ):
+                                if result is not None:
+                                    yield result
+                        elif inspect.isfunction(suffix):
+                            result = suffix(
+                                event,
+                                data,
+                                self.result.full_result_data,
+                                self.settings,
+                            )
+                            if result is not None:
+                                yield result
+
+                if prepared_response is not None and prepared_response.response_generator is not None:
+                    prepared_terminal_events: list[tuple[Any, Any]] = []
+                    async for event, data in prepared_response.response_generator:
+                        if event == "status" and isinstance(data, Mapping):
+                            data = await self._emit_status_runtime(data, provider_family=provider_name)
+                            status = str(data.get("status", ""))
+                            if status in {"completed", "cancelled"} or (
+                                status == "failed" and not data.get("retry")
+                            ):
+                                terminal_status = status
+                        if event in {"done", "meta"} or (
+                            event == "status"
+                            and isinstance(data, Mapping)
+                            and not data.get("retry")
+                        ):
+                            prepared_terminal_events.append((event, data))
+                            continue
+                        yield event, data
+                        async for item in yield_broadcast_suffix_items(event, data):
+                            yield item
+                    if prepared_response.handled:
+                        async for item in yield_broadcast_prefix_items():
+                            yield item
+                        for event, data in prepared_terminal_events:
+                            yield event, data
+                            async for item in yield_broadcast_suffix_items(event, data):
+                                yield item
+                        await async_emit_runtime(
+                            {
+                                "event_type": "request.completed",
+                                "source": "ModelRequest",
+                                "message": f"Request completed for agent '{ self.agent_name }'.",
+                                "payload": {
+                                    "agent_name": self.agent_name,
+                                    "response_id": self.id,
+                                    "attempt_index": self.attempt_index,
+                                    "delivery": "action_response_direct",
+                                    **prepared_response.meta,
+                                },
+                                "run": self.request_run_context,
+                            }
+                        )
+                        return
+                    request_delivery_meta.update(prepared_response.meta)
+
                 await scheduler_slot.__aenter__()
                 scheduler_slot_entered = True
                 ModelRequester = cast(
@@ -661,12 +826,6 @@ class ModelRequestRunner:
                         str(self.settings["plugins.ModelRequester.activate"]),
                     ),
                 )
-                request_prefixes = self.extension_handlers.get("request_prefixes", [])
-                for prefix in request_prefixes:
-                    if inspect.iscoroutinefunction(prefix):
-                        await prefix(self.prompt, self.settings)
-                    elif inspect.isfunction(prefix):
-                        prefix(self.prompt, self.settings)
                 self.model_run_context.meta["_model_request_started_at"] = time.perf_counter()
                 request_started_payload = {
                     "agent_name": self.agent_name,
@@ -675,6 +834,7 @@ class ModelRequestRunner:
                     "model_run_id": self.model_run_context.run_id,
                     "attempt_index": self.attempt_index,
                     "provider_family": provider_name,
+                    **request_delivery_meta,
                 }
                 attach_model_request_telemetry(
                     request_started_payload,
@@ -686,7 +846,10 @@ class ModelRequestRunner:
                     {
                         "event_type": "model.request_started",
                         "source": "ModelRequest",
-                        "message": f"Starting model request attempt #{ self.attempt_index } for agent '{ self.agent_name }'.",
+                        "message": (
+                            f"Starting model request attempt #{ self.attempt_index } "
+                            f"for agent '{ self.agent_name }'."
+                        ),
                         "payload": request_started_payload,
                         "run": self.model_run_context,
                     }
@@ -721,6 +884,7 @@ class ModelRequestRunner:
                     "model_run_id": self.model_run_context.run_id,
                     "provider_family": provider_name,
                     "liveness": self._provider_liveness_snapshot(provider_name),
+                    **request_delivery_meta,
                     **request_payload,
                 }
                 attach_model_request_telemetry(
@@ -794,37 +958,8 @@ class ModelRequestRunner:
                 else:
                     response_generator = model_requester.request_model(request_data)
                 broadcast_generator = model_requester.broadcast_response(response_generator)
-                broadcast_prefixes = self.extension_handlers.get("broadcast_prefixes", [])
-                broadcast_suffixes = self.extension_handlers.get("broadcast_suffixes", {})
-                for prefix in broadcast_prefixes:
-                    if inspect.iscoroutinefunction(prefix):
-                        result = await prefix(
-                            self.result.full_result_data,
-                            self.settings,
-                        )
-                        if result is not None:
-                            yield result
-                    elif inspect.isgeneratorfunction(prefix):
-                        for result in prefix(
-                            self.result.full_result_data,
-                            self.settings,
-                        ):
-                            if result is not None:
-                                yield result
-                    elif inspect.isasyncgenfunction(prefix):
-                        async for result in prefix(
-                            self.result.full_result_data,
-                            self.settings,
-                        ):
-                            if result is not None:
-                                yield result
-                    elif inspect.isfunction(prefix):
-                        result = prefix(
-                            self.result.full_result_data,
-                            self.settings,
-                        )
-                        if result is not None:
-                            yield result
+                async for item in yield_broadcast_prefix_items():
+                    yield item
                 async for event, data in broadcast_generator:
                     if event == "status" and isinstance(data, Mapping):
                         data = await self._emit_status_runtime(data, provider_family=provider_name)
@@ -832,44 +967,8 @@ class ModelRequestRunner:
                         if status in {"completed", "cancelled"} or (status == "failed" and not data.get("retry")):
                             terminal_status = status
                     yield event, data
-                    suffixes = broadcast_suffixes[event] if event in broadcast_suffixes else []
-                    for suffix in suffixes:
-                        if inspect.iscoroutinefunction(suffix):
-                            result = await suffix(
-                                event,
-                                data,
-                                self.result.full_result_data,
-                                self.settings,
-                            )
-                            if result is not None:
-                                yield result
-                        elif inspect.isgeneratorfunction(suffix):
-                            for result in suffix(
-                                event,
-                                data,
-                                self.result.full_result_data,
-                                self.settings,
-                            ):
-                                if result is not None:
-                                    yield result
-                        elif inspect.isasyncgenfunction(suffix):
-                            async for result in suffix(
-                                event,
-                                data,
-                                self.result.full_result_data,
-                                self.settings,
-                            ):
-                                if result is not None:
-                                    yield result
-                        elif inspect.isfunction(suffix):
-                            result = suffix(
-                                event,
-                                data,
-                                self.result.full_result_data,
-                                self.settings,
-                            )
-                            if result is not None:
-                                yield result
+                    async for item in yield_broadcast_suffix_items(event, data):
+                        yield item
                 await async_emit_runtime(
                     {
                         "event_type": "request.completed",
@@ -879,6 +978,7 @@ class ModelRequestRunner:
                             "agent_name": self.agent_name,
                             "response_id": self.id,
                             "attempt_index": self.attempt_index,
+                            **request_delivery_meta,
                         },
                         "run": self.request_run_context,
                     }

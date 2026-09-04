@@ -15,9 +15,9 @@ from agently.builtins.hookers.RuntimeConsoleSinkHooker import (
     should_render_console_event,
     should_render_storage_event,
 )
-from agently.core import EventCenter, ObservationEventEmitter, RuntimeEventEmitter
+from agently.core import EventCenter, ModelRequestResult, ObservationEventEmitter, RuntimeEventEmitter
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.types.data import ErrorInfo, ObservationEvent, RuntimeEvent
+from agently.types.data import ErrorInfo, ObservationEvent, RunContext, RuntimeEvent
 from agently.utils import Settings
 
 if TYPE_CHECKING:
@@ -537,7 +537,28 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     assert should_render_console_event(
         RuntimeEvent(event_type="model.completed", payload={"raw_text": "done"}), settings
     )
-    assert not should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
+    assert should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream.delta",
+            payload={"source": "model_request", "path": "model.delta", "delta": "A"},
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream.delta",
+            payload={"source": "model_request", "path": "step_result", "delta": "A"},
+            run=RunContext(
+                run_id="child-execution",
+                run_kind="agent_execution",
+                root_run_id="root-execution",
+                parent_run_id="parent-execution",
+            ),
+        ),
+        settings,
+    )
+    assert should_render_console_event(RuntimeEvent(event_type="prompt.built", message="prompt"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.request_failed", level="ERROR"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.validation_failed", level="WARNING"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="action.loop_started", message="started"), settings)
@@ -571,6 +592,15 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     )
     assert should_render_console_event(RuntimeEvent(event_type="agent_execution.started", message="started"), settings)
     assert should_render_console_event(
+        RuntimeEvent(event_type="execution_resource.ensuring", message="checking"), settings
+    )
+    assert should_render_console_event(
+        RuntimeEvent(event_type="execution_resource.progress", message="pulling image"), settings
+    )
+    assert should_render_console_event(
+        RuntimeEvent(event_type="execution_resource.ready", message="ready"), settings
+    )
+    assert should_render_console_event(
         RuntimeEvent(
             event_type="agent_execution.stream",
             payload={"stream_kind": "phase", "path": "agent_task.phase.planned", "value": {"phase": "planned"}},
@@ -584,7 +614,7 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
         ),
         settings,
     )
-    assert not should_render_console_event(
+    assert should_render_console_event(
         RuntimeEvent(
             event_type="agent_execution.stream.delta",
             payload={"stream_kind": "progress_delta", "path": "agent_task.progress", "delta": "A"},
@@ -610,18 +640,216 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     )
 
 
-def test_runtime_log_profiles_detail_mode_allows_full_runtime_detail():
+def test_runtime_log_profiles_detail_mode_selects_diagnostics_without_dumping_transport_mirrors():
     settings = _build_runtime_log_settings("detail")
 
     assert should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="tool.plan_ready", message="ready"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="triggerflow.signal", message="signal"), settings)
-    assert should_render_console_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+    assert not should_render_console_event(RuntimeEvent(event_type="model.reasoning.delta", level="DEBUG"), settings)
+    assert not should_render_console_event(
+        RuntimeEvent(event_type="model.status", payload={"status": "completed"}), settings
+    )
+    assert should_render_console_event(
+        RuntimeEvent(event_type="model.status", level="ERROR", payload={"status": "failed"}), settings
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={"stream_kind": "runtime_progress", "path": "runtime.progress.model.delta.progress"},
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={
+                "stream_kind": "child_execution",
+                "path": "agent_task.iteration.1.execution.runtime.progress.route_selection.started",
+            },
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={
+                "stream_kind": "child_execution",
+                "path": "agent_task.iteration.1.execution.acceptance_points[0].criterion",
+            },
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={
+                "path": "result",
+                "source": "agent_execution",
+                "route": "model_request",
+                "value": "already rendered by model.completed",
+            },
+        ),
+        settings,
+    )
     assert should_render_console_event(RuntimeEvent(event_type="session.applied_to_request", level="INFO"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="action.completed", level="INFO"), settings)
 
     assert not should_render_storage_event(RuntimeEvent(event_type="model.completed", level="INFO"), settings)
     assert not should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
+
+
+def test_execution_resource_console_simple_uses_readable_compact_image_progress(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+
+    events = [
+        RuntimeEvent(
+            event_type="execution_resource.ensuring",
+            payload={"kind": "code_execution", "phase": "provider_probe"},
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_pull_started",
+                "image": "node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            message="75782e20ea1f: Pulling fs layer",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_pull_progress",
+                "image": "node:22-slim",
+                "line": "75782e20ea1f: Pulling fs layer",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            message="Status: Downloaded newer image for node:22-slim",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_pull_progress",
+                "image": "node:22-slim",
+                "line": "Status: Downloaded newer image for node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            message="docker.io/library/node:22-slim",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_pull_progress",
+                "image": "node:22-slim",
+                "line": "docker.io/library/node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_pull_completed",
+                "image": "node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.probed",
+            payload={
+                "kind": "code_execution",
+                "provider_id": "docker",
+                "phase": "provider_selected",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_inspection",
+                "image": "node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.progress",
+            payload={
+                "provider_id": "docker",
+                "phase": "image_ready",
+                "image": "node:22-slim",
+            },
+        ),
+        RuntimeEvent(
+            event_type="execution_resource.ready",
+            payload={
+                "kind": "code_execution",
+                "provider_id": "docker",
+                "phase": "ready",
+                "image_preparation": {"image": "node:22-slim"},
+            },
+        ),
+    ]
+    for event in events:
+        RuntimeConsoleSinkHooker._handle_execution_resource_event(event, "simple")  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert "[Environment] [Code execution]" in rendered
+    assert "Looking for an available environment for code execution." in rendered
+    assert "Stage: Downloading" in rendered
+    assert "This may take a few minutes on the first run." in rendered
+    assert "[Environment] [Docker image node:22-slim] Downloading layer 75782e20ea1f." in rendered
+    assert "Stage: Downloaded" in rendered
+    assert "Docker passed the environment checks." in rendered
+    assert "Code execution environment is ready with Docker using node:22-slim." in rendered
+    assert "Checking whether Docker image" not in rendered
+    assert "Stage: Image Ready" not in rendered
+    assert "provider=" not in rendered
+    assert "phase=" not in rendered
+    assert "Status: Downloaded newer image" not in rendered
+    assert "docker.io/library/node:22-slim" not in rendered
+
+
+def test_execution_resource_console_detail_leads_with_explanation_then_diagnostics(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._handle_execution_resource_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="execution_resource.failed",
+            level="ERROR",
+            payload={
+                "kind": "code_execution",
+                "provider_id": "docker",
+                "phase": "provider_probe",
+                "reason": "docker_daemon_unavailable",
+                "suggestion": "Start Docker and retry.",
+                "error_code": "execution_resource.provider_unavailable",
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "".join(printed)
+    assert rendered.index("Could not prepare the code execution environment.") < rendered.index("Diagnostics:")
+    assert "Reason: docker daemon unavailable" in rendered
+    assert "Next step: Start Docker and retry." in rendered
+    assert '"phase": "provider_probe"' in rendered
+    assert '"error_code": "execution_resource.provider_unavailable"' in rendered
 
 
 def test_action_logs_prefer_action_setting_and_fall_back_to_tool_setting():
@@ -719,6 +947,53 @@ def test_action_console_rendering_shows_action_name_and_type(monkeypatch):
     assert "Action-unknown" not in rendered
 
 
+def test_action_console_simple_shows_purpose_arguments_and_result_preview(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_action_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="action.started",
+            payload={
+                "action_type": "tool",
+                "action_name": "lookup_ticket",
+                "command": {
+                    "purpose": "Load the incident record.",
+                    "arguments": {"ticket_id": "INC-42"},
+                },
+            },
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_action_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="action.completed",
+            payload={
+                "action_type": "tool",
+                "action_name": "lookup_ticket",
+                "record": {
+                    "data": {
+                        "status": "resolved",
+                        "meta": {"provider_capabilities": {"internal": True}},
+                    }
+                },
+            },
+        ),
+        "simple",
+    )
+
+    rendered = "\n".join(printed)
+    assert "Purpose: Load the incident record." in rendered
+    assert 'Arguments: {"ticket_id": "INC-42"}' in rendered
+    assert 'Result: {"status": "resolved"}' in rendered
+    assert "provider_capabilities" not in rendered
+
+
 def test_action_console_rendering_shows_loop_without_unknown_action(monkeypatch):
     printed: list[str] = []
 
@@ -755,7 +1030,12 @@ def test_model_console_simple_renders_request_and_result(monkeypatch):
             payload={
                 "agent_name": "debug-agent",
                 "response_id": "resp-1",
-                "request_text": "USER: summarize revenue risk",
+                "provider_family": "OpenAICompatible",
+                "request": {
+                    "request_options": {"model": "qwen", "stream": False},
+                    "request_url": "https://example.test/v1/chat/completions",
+                    "stream": False,
+                },
             },
         ),
         "simple",
@@ -776,10 +1056,138 @@ def test_model_console_simple_renders_request_and_result(monkeypatch):
 
     rendered = "\n".join(printed)
     assert "Requesting" in rendered
-    assert "USER: summarize revenue risk" in rendered
+    assert "provider=OpenAICompatible" in rendered
+    assert "model=qwen" in rendered
+    assert "request_options" not in rendered
     assert "Done" in rendered
     assert "Revenue risk is moderate." in rendered
     assert "fallback should not win" not in rendered
+
+
+def test_prompt_console_uses_readable_prompt_text_in_simple_and_detail(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+
+    event = RuntimeEvent(
+        event_type="prompt.built",
+        source="ModelRequest",
+        payload={
+            "agent_name": "debug-agent",
+            "response_id": "resp-prompt",
+            "prompt_text": "[INPUT]\nSummarize the incident.\n[INFO]\nAudience: support team",
+            "prompt": {"input": "fallback should not render"},
+        },
+    )
+    RuntimeConsoleSinkHooker._handle_generic_event(event, "simple")  # type: ignore[attr-defined]
+    RuntimeConsoleSinkHooker._handle_generic_event(event, "detail")  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Prompt") == 2
+    assert rendered.count("Summarize the incident.") == 2
+    assert "fallback should not render" not in rendered
+
+
+def test_model_console_simple_keeps_final_delta_before_done_and_suppresses_delayed_projection(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.requesting",
+            source="ModelRequest",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-simple",
+                "request": {"request_options": {"model": "qwen"}, "stream": True},
+            },
+        ),
+        "simple",
+    )
+    for delta in ("A", "B"):
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="ModelRequestResult",
+                payload={
+                    "agent_name": "debug-agent",
+                    "response_id": "resp-simple",
+                    "delta": delta,
+                },
+            ),
+            "simple",
+        )
+        RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="agent_execution.stream.delta",
+                source="BaseAgent",
+                payload={
+                    "execution_id": "exec-simple",
+                    "source": "model_request",
+                    "path": "model.delta",
+                    "delta": delta,
+                },
+            ),
+            "simple",
+            model_profile="simple",
+        )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.streaming",
+            source="ModelRequestResult",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-simple",
+                "delta": "😊",
+            },
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.completed",
+            source="ModelRequestResult",
+            payload={"agent_name": "debug-agent", "response_id": "resp-simple", "raw_text": "AB"},
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream.delta",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-simple",
+                "source": "model_request",
+                "path": "model.delta",
+                "delta": "😊",
+            },
+        ),
+        "simple",
+        model_profile="simple",
+    )
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert rendered.count("AB😊") == 1
+    assert "Model response completed." in rendered
+    assert rendered.index("AB😊") < rendered.index("Stage: Done")
+    assert "Stage: Streaming" not in rendered[rendered.index("Stage: Done") :]
 
 
 def test_model_console_detail_keeps_structured_result_priority(monkeypatch):
@@ -1144,6 +1552,162 @@ def test_agent_execution_console_simple_renders_process_summary(monkeypatch):
     assert "Plan accepted." in rendered
 
 
+def test_model_console_detail_keeps_stream_open_across_agent_execution_projection(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+
+    for delta in ("A", "B"):
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="ModelRequestResult",
+                payload={
+                    "agent_name": "debug-agent",
+                    "response_id": "resp-1",
+                    "delta": delta,
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="agent_execution.stream.delta",
+                source="BaseAgent",
+                payload={
+                    "execution_id": "exec-1",
+                    "source": "model_request",
+                    "path": "model.delta",
+                    "delta": delta,
+                    "stream_event_type": "delta",
+                },
+            ),
+            "detail",
+        )
+
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-1",
+                "stream_kind": "phase",
+                "path": "agent_task.phase.planned",
+                "value": {"phase": "planned"},
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert "Detail:\nAB\n[AgentExecution]" in rendered
+    assert "agent_execution.stream.delta" not in rendered
+    assert "agent_task.phase.planned" in rendered
+
+
+def test_agent_execution_console_simple_streams_task_delta_in_one_block(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+
+    for delta in ("A", "B"):
+        RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="agent_execution.stream.delta",
+                source="BaseAgent",
+                payload={
+                    "execution_id": "exec-1",
+                    "stream_kind": "progress_delta",
+                    "path": "agent_task.iteration.1.progress.plan.message",
+                    "delta": delta,
+                    "execution_strategy": "flat",
+                },
+            ),
+            "simple",
+        )
+
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-1",
+                "stream_kind": "progress",
+                "path": "agent_task.iteration.1.progress.plan",
+                "value": {"message": "AB"},
+            },
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-1",
+                "stream_kind": "phase",
+                "path": "agent_task.phase.planned",
+                "value": {"phase": "planned"},
+            },
+        ),
+        "simple",
+    )
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert "Detail:\nAB\n[AgentExecution]" in rendered
+    assert rendered.count("AB") == 1
+    assert "kind=progress" not in rendered
+
+
+def test_agent_execution_console_detail_keeps_projection_when_model_logs_are_off(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream.delta",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-1",
+                "source": "model_request",
+                "path": "model.delta",
+                "delta": "A",
+            },
+        ),
+        "detail",
+        model_profile="off",
+    )
+
+    assert "Stage: Streaming" in "".join(printed)
+
+
 @pytest.mark.asyncio
 async def test_runtime_console_sink_renders_generic_runtime_events(monkeypatch):
     printed: list[str] = []
@@ -1158,15 +1722,15 @@ async def test_runtime_console_sink_renders_generic_runtime_events(monkeypatch):
     with bind_runtime_context(settings=settings):
         await RuntimeConsoleSinkHooker.handler(
             RuntimeEvent(
-                event_type="request.completed",
-                source="ModelResponse",
-                message="Request completed.",
+                event_type="session.applied_to_request",
+                source="SessionExtension",
+                message="Session context applied.",
             )
         )
 
     rendered = "\n".join(printed)
-    assert "[ModelResponse] [request.completed]" in rendered
-    assert "Request completed." in rendered
+    assert "[SessionExtension] [session.applied_to_request]" in rendered
+    assert "Session context applied." in rendered
 
 
 @pytest.mark.asyncio
@@ -1203,3 +1767,173 @@ async def test_runtime_console_sink_uses_run_context_log_settings(monkeypatch):
     finally:
         ec.unregister_hook(hook_name)
         _restore_runtime_log_settings(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_runtime_console_sink_raw_delivery_preserves_detail_stream(monkeypatch):
+    printed: list[str] = []
+    settings = _build_runtime_log_settings("detail")
+    ec = EventCenter()
+    hook_name = "runtime_console_sink.raw_stream"
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    ec.register_hook(
+        RuntimeConsoleSinkHooker.handler,
+        hook_name=hook_name,
+        delivery_policy=RuntimeConsoleSinkHooker.delivery_policy,
+    )
+
+    try:
+        with bind_runtime_context(settings=settings):
+            for delta in ("A", "B"):
+                await ec.async_emit(
+                    RuntimeEvent(
+                        event_type="model.streaming",
+                        source="ModelRequestResult",
+                        payload={
+                            "agent_name": "debug-agent",
+                            "response_id": "resp-raw",
+                            "delta": delta,
+                        },
+                        meta={"high_frequency": True},
+                    )
+                )
+                await ec.async_emit(
+                    RuntimeEvent(
+                        event_type="agent_execution.stream",
+                        source="BaseAgent",
+                        payload={
+                            "execution_id": "exec-raw",
+                            "source": "agent_execution",
+                            "stream_kind": "runtime_progress",
+                            "path": "runtime.progress.model.delta.progress",
+                            "value": {"stage": "model.delta", "status": "progress"},
+                        },
+                    )
+                )
+                await ec.async_emit(
+                    RuntimeEvent(
+                        event_type="agent_execution.stream",
+                        source="BaseAgent",
+                        payload={
+                            "execution_id": "exec-raw",
+                            "source": "model_request",
+                            "path": "reply",
+                            "value": delta,
+                        },
+                    )
+                )
+                await ec.async_emit(
+                    RuntimeEvent(
+                        event_type="agent_execution.stream.delta",
+                        source="BaseAgent",
+                        payload={
+                            "execution_id": "exec-raw",
+                            "source": "model_request",
+                            "path": "model.delta",
+                            "delta": delta,
+                        },
+                        meta={"high_frequency": True},
+                    )
+                )
+                await ec.async_emit(
+                    RuntimeEvent(
+                        event_type="agent_execution.stream.delta",
+                        source="BaseAgent",
+                        payload={
+                            "execution_id": "exec-raw",
+                            "source": "model_request",
+                            "path": "model.original_delta",
+                            "delta": delta,
+                            "meta": {"specific_event": "original_delta"},
+                        },
+                        meta={"high_frequency": True},
+                    )
+                )
+            await ec.async_emit(
+                RuntimeEvent(
+                    event_type="agent_execution.stream.delta",
+                    source="BaseAgent",
+                    payload={
+                        "execution_id": "exec-raw",
+                        "source": "agent_task",
+                        "stream_kind": "child_execution",
+                        "path": "agent_task.iteration.1.execution.$status",
+                        "delta": None,
+                        "value": {"status": "streaming_parse_deferred"},
+                    },
+                    meta={"high_frequency": True},
+                )
+            )
+            await ec.async_emit(
+                RuntimeEvent(
+                    event_type="agent_execution.stream",
+                    source="BaseAgent",
+                    payload={
+                        "execution_id": "exec-raw",
+                        "stream_kind": "phase",
+                        "path": "agent_task.phase.planned",
+                        "value": {"phase": "planned"},
+                    },
+                )
+            )
+    finally:
+        ec.unregister_hook(hook_name)
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert "Detail:\nAB\n[AgentExecution]" in rendered
+    assert "coalesced runtime events" not in rendered
+    assert "runtime.progress.model.delta.progress" not in rendered
+    assert "Stage: Process" in rendered
+    assert "streaming_parse_deferred" in rendered
+    assert "Detail:\nNone" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_response_parser_observations_keep_result_log_settings(monkeypatch):
+    printed: list[str] = []
+    settings = _build_runtime_log_settings("detail")
+    request_run = RunContext.create(run_kind="request", agent_name="debug-agent", response_id="resp-parser")
+
+    class FakeParser:
+        def drain_runtime_observations(self):
+            return [
+                {
+                    "kind": "streaming",
+                    "source": "AgentlyResponseParser",
+                    "payload": {"delta": "A"},
+                }
+            ]
+
+    result = object.__new__(ModelRequestResult)
+    result._response_parser = FakeParser()  # type: ignore[attr-defined]
+    result.settings = settings  # type: ignore[attr-defined]
+    result.agent_name = "debug-agent"  # type: ignore[attr-defined]
+    result._response_id = "resp-parser"  # type: ignore[attr-defined]
+    result.request_run_context = request_run  # type: ignore[attr-defined]
+    result.model_run_context = request_run  # type: ignore[attr-defined]
+
+    async def emit_to_console(event):
+        await RuntimeConsoleSinkHooker.handler(RuntimeEvent.model_validate(event))
+
+    monkeypatch.setattr("agently.base.async_emit_runtime", emit_to_console)
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append("".join(map(str, args))))
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+
+    await result._drain_response_parser_observations()  # type: ignore[attr-defined]
+
+    assert "Stage: Streaming" in "".join(printed)

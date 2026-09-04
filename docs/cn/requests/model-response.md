@@ -351,8 +351,9 @@ reasoning 模型可能把开头的外层 `<think>...</think>` 放进普通 conte
 - `get_data(type="all")` 会把最终接受 attempt 的 reasoning 分块保存在
   `reasoning_delta` 列表中，并把完整文本保存在 `reasoning`；provider 没有输出
   reasoning 内容时，`reasoning` 为 `None`。
-- 只归一位于 answer payload 之前的完整外层 `<think>...</think>`。字段、代码块或
-  长文本 payload 内部的 `<think>` 会作为普通 answer 内容保留。
+- 只归一位于 answer payload 之前的完整外层 `<think>...</think>`，即使结束标签跨越
+  多个流式分片也是如此。字段、代码块或长文本 payload 内部的 `<think>` 会作为普通
+  answer 内容保留。
 
 这些字段只保留 provider 实际提供的内容；Agently 不推断隐藏思维链。retry 替换
 attempt 时，也会替换该 attempt 已累积的 reasoning 字段。

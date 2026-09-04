@@ -136,14 +136,20 @@ class ModelRequestResult:
 
         run = self.model_run_context or self.request_run_context
         output_observation_policy = OutputObservationPolicy.from_settings(self.settings)
-        for observation in observations:
-            if isinstance(observation, Mapping):
-                await async_emit_response_parser_observation(
-                    output_observation_policy.project_parser_observation(observation),
-                    agent_name=self.agent_name,
-                    response_id=self._response_id,
-                    run=run,
-                )
+        with bind_runtime_context(
+            parent_run_context=self.request_run_context,
+            request_run_context=self.request_run_context,
+            model_run_context=self.model_run_context,
+            settings=self.settings,
+        ):
+            for observation in observations:
+                if isinstance(observation, Mapping):
+                    await async_emit_response_parser_observation(
+                        output_observation_policy.project_parser_observation(observation),
+                        agent_name=self.agent_name,
+                        response_id=self._response_id,
+                        run=run,
+                    )
 
     async def _run_finally_handlers_once(self):
         if self._finally_handlers_ran:

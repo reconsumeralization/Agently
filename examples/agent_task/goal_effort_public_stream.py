@@ -55,7 +55,10 @@ async def main() -> None:
     agent = Agently.create_agent("goal-effort-public-stream").use_task_workspace(workspace_dir)
     provider = configure_agent_model_pool(agent, temperature=0.0)
     agent.settings.set("agent_task.progress.language", progress_language)
-    if os.getenv("AGENTLY_DEBUG_DETAIL", "").strip().lower() in {"1", "true", "yes"}:
+    debug_profile = os.getenv("AGENTLY_DEBUG_PROFILE", "").strip().lower()
+    if debug_profile in {"simple", "detail"}:
+        agent.set_settings("debug", debug_profile)
+    elif os.getenv("AGENTLY_DEBUG_DETAIL", "").strip().lower() in {"1", "true", "yes"}:
         agent.set_settings("debug", "detail")
 
     incident_facts = {
@@ -188,10 +191,13 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-# Optional full diagnostic console plus the readable process stream:
-#   AGENTLY_DEBUG_DETAIL=1 python examples/agent_task/goal_effort_public_stream.py
-# `debug="detail"` prints RuntimeEvent/model diagnostics; the public delta still
-# comes from `type="delta"` and keeps inputs, keys, raw JSON, and long results out.
+# Optional built-in console views plus the readable public process stream:
+#   AGENTLY_DEBUG_PROFILE=simple python examples/agent_task/goal_effort_public_stream.py
+#   AGENTLY_DEBUG_PROFILE=detail python examples/agent_task/goal_effort_public_stream.py
+# `simple` keeps each model-generated progress message in one updating stream
+# block. `detail` keeps each ModelRequest character stream in one updating block
+# and shows other RuntimeEvent notifications separately. The public process delta
+# still comes from `type="delta"` and keeps inputs, keys, raw JSON, and long results out.
 #
 # Historical task/result baseline from a real DeepSeek run on 2026-06-26 (the
 # exact stream counts can vary by provider/model). The public-delta checks were

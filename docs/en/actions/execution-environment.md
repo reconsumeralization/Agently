@@ -170,6 +170,21 @@ snapshot grant. It requires explicit host authorization and cannot satisfy
 `isolation="required"`. `unsafe_fallback=True` must therefore be paired with an
 explicit `isolation="preferred"` or `"none"`; it is never selected implicitly.
 
+If Docker is unavailable and the code is trusted, the explicit subprocess
+compatibility path is:
+
+```python
+agent.enable_code_runtime(
+    language="nodejs",
+    providers=["trusted_local"],
+    unsafe_fallback=True,
+    isolation="none",
+)
+```
+
+Do not use this for untrusted or model-generated code. The safe default fails
+closed instead of silently moving that code into a host subprocess.
+
 The public `isolation=` option is selection policy, not a provider capability
 label. A `code_execution` provider must report concrete boolean isolation axes:
 process containment, host-filesystem restriction, privilege-escalation
@@ -326,14 +341,26 @@ The manager emits framework events in the `execution_resource.*` family:
 - `execution_resource.declared`
 - `execution_resource.approval_required`
 - `execution_resource.ensuring`
+- `execution_resource.probed`
+- `execution_resource.progress`
 - `execution_resource.ready`
 - `execution_resource.unhealthy`
 - `execution_resource.releasing`
 - `execution_resource.released`
 - `execution_resource.failed`
 
-Payloads include stable ids and status metadata only. They must not include raw
-credentials, environment variables, command secrets, or live resource objects.
+Payloads include stable ids, sanitized provider/image self-check facts, bounded
+preparation progress, status, stable error codes, and actionable guidance. They
+must not include raw credentials, environment variables, command secrets, or
+live resource objects. With `debug=True`, these events form a concise
+environment narrative; `debug="detail"` also shows bounded probe and preparation
+payloads. An authorized `image_pull_policy="if_missing"` displays Docker pull
+progress before the Action starts executing. Simple mode uses human-facing
+labels such as checking environment, downloading image, and image ready rather
+than exposing internal `provider=` or `phase=` fields. Repeated Docker layer
+updates use compact lines, while start, completion, failure, and final readiness
+retain full stage blocks. Detail mode leads with the same readable explanation
+and adds the sanitized fields under `Diagnostics`.
 
 ## Examples
 

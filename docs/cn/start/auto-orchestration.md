@@ -36,6 +36,10 @@ results = await asyncio.gather(
 )
 ```
 
+quick prompt 后继续配置 capability 时仍然保留同一个未启动 execution。例如
+`agent.input(...).info(...).use_action(...)` 会保留 input 和 info，不会静默创建一个
+替代 execution。
+
 多语句 setup 应显式拿住 execution draft：
 
 ```python
@@ -53,7 +57,9 @@ result = await execution.async_start()
 已验收开发线的路由是候选驱动、确定性优先：required Skills 将不可变 guidance
 绑定进 `TaskContext`；具体模型响应对 Skill Context 的消费记录与可执行 capability
 evidence 分开。普通 Actions 进入 `model_request` AgentExecution action loop。
-Skills 不创建 route，也不是 planner capability。
+默认每轮选择继续调用 Actions 或给出最终 response；终态 response 直接由同一个
+AgentExecution 交付。只有 legacy/custom fallback 或 `ensure_long_output` 这类独立交付
+策略才追加最终生成请求。Skills 不创建 route，也不是 planner capability。
 
 公开 Agent API 仍由 core 持有，但路线规划和执行由 active
 `AgentOrchestrator` plugin 通过 `AgentOrchestrator` protocol 承担。这样
@@ -1051,12 +1057,12 @@ await task.async_streaming_print()
 result = await task.async_get_full_data()
 ```
 
-`debug=True`（即 `simple` profile）打印精简的模型请求/结果和过程摘要；
-`debug="detail"` 打印完整诊断 RuntimeEvent 流，包括模型流式 delta、ActionRuntime、
-TriggerFlow 与 AgentExecution 明细。它不会替代或重复业务输出：要查看可读的任务阶段和
-最终结果，仍需消费 `type="delta"` 或调用 `async_streaming_print()`。两者同时使用，
-才是完整的开发观察视图。问题定位后，应从示例和生产代码中移除 debug settings；
-如果需要自定义诊断出口，仍可挂 EventCenter hook。
+`debug=True`（即 `simple` profile）打印可读 Prompt、精简请求/结果和关键过程；
+`debug="detail"` 增加脱敏 provider 请求 JSON、attempt/validation/telemetry、Action 与
+路由/阶段明细，但仍会筛选兼容别名、传输镜像和重复进展。控制台不是完整 RuntimeEvent
+流，也不会替代业务输出：要查看可读的任务阶段和最终结果，仍需消费 `type="delta"` 或
+调用 `async_streaming_print()`；要完整审计、存储或重放则使用 EventCenter hook 或
+DevTools。问题定位后，应从示例和生产代码中移除 debug settings。
 
 ## 提交式 DAG 输入
 

@@ -126,6 +126,32 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 窄范围子集时才传显式 `tags=[...]`。托管执行环境 metadata 在这个可见 schema
 里会脱敏原始 `env` 值，但保留 env key；provider 只会在实际执行路径中拿到 raw env。
 
+默认 structured planner 收到的投影比这个公开检查 API 更小：只包含 `action_id`、
+描述、可调用 kwargs、required inputs，以及非默认的 approval/side-effect/concurrency
+约束。host-only 的 `execution_resources`、provider 配置、executor metadata 与空默认值
+留在 Action 边界后，模型选中 id 后再从 canonical registry 解析。空 round state 不发送，
+最新 Action result 也不会同时在历史与 last-round input 中重复出现。
+可修复的参数、代码或 runtime 错误会进入下一轮生成修正后的调用；provider/环境不可用时
+则选择其他合格路径或明确报告 blocker/修复建议，不能伪造执行结果。
+
+默认 loop 是 Action-or-Response loop。每轮规划都从完整的 execution-local Prompt
+派生，因此 `.input(...)`、`.info(...)`、instructions、Session history、语言策略、
+附件和原始输出合同都会保留，只在其上追加精简的 Action 状态。每轮只能返回一个分支：
+
+- `execute`：返回一个或多个 Action 调用，不返回最终回复；或
+- `response`：不返回 Action 调用，返回完整的最终回复 carrier。
+
+选择 `response` 后，该字段直接进入既有外层 Request/AgentExecution stream、parser、
+validator、result reader 和 Session finalizer。决策 JSON 不会成为业务输出，Agently 也
+不会再发一次请求重复生成相同答案。因此，一次 Action 的任务通常使用两次模型请求：
+选择并执行，然后回复；进入 action-enabled 路径后不需要 Action 的任务通常只用一次。
+结构化 `.output(...)` 仍是权威合同：`response` 携带 JSON 或其他已配置 carrier，再由
+外层 Request 按原合同解析和验证。
+
+旧 custom planning handler 或 ActionFlow plugin 如果只返回
+`next_action="response"` 而没有 response 值，会保留兼容的最终 ModelRequest fallback。
+`ensure_long_output` 当前也保留独立交付路径。这些是 fallback，不是默认 ActionLoop 拓扑。
+
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
 `register_action(..., executor=..., execution_resources=[...])`。

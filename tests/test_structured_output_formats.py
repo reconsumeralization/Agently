@@ -248,6 +248,32 @@ async def test_leading_think_is_reasoning_event_not_parser_content(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_leading_think_with_split_closing_tag_is_reasoning_event(monkeypatch):
+    monkeypatch.setattr(agently.base, "async_emit_runtime", _noop_async_emit_runtime)
+
+    parser = create_parser(
+        [
+            ("delta", "<think>model reasoning</thi"),
+            ("delta", "nk>answer"),
+            ("done", "<think>model reasoning</think>answer"),
+        ],
+        {},
+        "json",
+    )
+
+    events = []
+    async for event, data in parser.get_async_generator(type="specific"):
+        events.append((event, data))
+
+    assert ("reasoning_done", "model reasoning") in events
+    assert ("done", "answer") in events
+    assert all("</think>" not in data for event, data in events if event == "reasoning_delta")
+    assert await parser.async_get_text() == "answer"
+    all_data = await parser.async_get_data(type="all")
+    assert all_data["reasoning"] == "model reasoning"
+
+
+@pytest.mark.asyncio
 async def test_payload_think_is_preserved_when_not_leading_reasoning():
     payload = (
         "<agently_output>"

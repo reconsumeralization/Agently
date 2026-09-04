@@ -90,6 +90,17 @@
       "expires": "review-before-4.2"
     },
     {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.info",
+      "positions": [
+        "param:args",
+        "param:kwargs"
+      ],
+      "owner": "AgentExecution",
+      "reason": "Prompt info accepts the same provider-, contract-, and host-defined payload shapes as the established fluent Prompt info boundary.",
+      "narrowing_plan": "Adopt the same future named prompt-payload alias as input, output, and instruct when those fluent boundaries are narrowed.",
+      "expires": "review-before-4.2"
+    },
+    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.output",
       "positions": [
         "param:args",

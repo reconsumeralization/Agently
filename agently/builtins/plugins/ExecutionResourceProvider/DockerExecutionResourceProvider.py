@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Sequence
 
 from agently.builtins.actions.Cmd import normalize_command_argv
 from agently.types.data import (
@@ -100,6 +100,21 @@ class DockerExecutionResource:
         self._active_binding_bridges: set[CodeExecutionBindingBridge] = set()
         self._active_binding_runtime_dirs: set[Path] = set()
         self._closed = False
+        self._progress_handler: Callable[..., Awaitable[None]] | None = None
+
+    async def _report_progress(
+        self,
+        *,
+        phase: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if self._progress_handler is not None:
+            await self._progress_handler(
+                phase=phase,
+                message=message,
+                details=dict(details or {}),
+            )
 
     async def _remove_container(self, name: str) -> None:
         if not name:
@@ -619,6 +634,81 @@ class DockerExecutionResource:
             "stderr": result.stderr,
         }
 
+    async def async_pull_image(self, image: str, *, timeout: int | None = None) -> dict[str, Any]:
+        timeout_seconds = timeout or max(self.timeout, 300)
+        await self._report_progress(
+            phase="image_pull_started",
+            message=f"Downloading Docker image {image}.",
+            details={"image": image, "timeout_seconds": timeout_seconds},
+        )
+        process = await asyncio.create_subprocess_exec(
+            self.docker_binary,
+            "pull",
+            image,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        emitted_lines = 0
+
+        async def read_stream(name: str, stream: asyncio.StreamReader | None) -> None:
+            nonlocal emitted_lines
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.readline()
+                if not chunk:
+                    break
+                line = chunk.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                captured[name].append(line)
+                if emitted_lines < 200:
+                    emitted_lines += 1
+                    await self._report_progress(
+                        phase="image_pull_progress",
+                        message=line[:500],
+                        details={"image": image, "stream": name, "line": line[:500]},
+                    )
+
+        readers = [
+            asyncio.create_task(read_stream("stdout", process.stdout)),
+            asyncio.create_task(read_stream("stderr", process.stderr)),
+        ]
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+            await asyncio.gather(*readers)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            await asyncio.gather(*readers, return_exceptions=True)
+            return {
+                "ok": False,
+                "status": "timed_out",
+                "image": image,
+                "timeout_seconds": timeout_seconds,
+                "stdout": "\n".join(captured["stdout"])[-20000:],
+                "stderr": "\n".join(captured["stderr"])[-20000:],
+            }
+        result = {
+            "ok": process.returncode == 0,
+            "image": image,
+            "returncode": process.returncode,
+            "stdout": "\n".join(captured["stdout"])[-20000:],
+            "stderr": "\n".join(captured["stderr"])[-20000:],
+        }
+        await self._report_progress(
+            phase="image_pull_completed" if result["ok"] else "image_pull_failed",
+            message=(
+                f"Docker image {image} downloaded."
+                if result["ok"]
+                else f"Docker image download failed for {image}."
+            ),
+            details={"image": image, "returncode": process.returncode},
+        )
+        return result
+
     def ensure_image_ready(self, image: str, *, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         active_profile = self._profile(profile)
         image_pull_policy = str(active_profile.get("image_pull_policy", "never"))
@@ -674,6 +764,95 @@ class DockerExecutionResource:
         if not second_inspect.get("exists"):
             raise ExecutionResourceError(
                 f"Docker image '{ image }' was pulled but could not be inspected.",
+                code="execution_resource.docker_image_pull_failed",
+                payload={
+                    "image": image,
+                    "image_pull_policy": image_pull_policy,
+                    "pull": pull,
+                    "inspect": second_inspect,
+                },
+            )
+        prepared = {
+            "status": "pulled" if not first_inspect.get("exists") else "refreshed",
+            "image": image,
+            "image_id": second_inspect.get("image_id", ""),
+            "image_pull_policy": image_pull_policy,
+            "pull": pull,
+        }
+        self._prepared_images[cache_key] = prepared
+        return prepared
+
+    async def async_ensure_image_ready(
+        self,
+        image: str,
+        *,
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Keep the established synchronous extension seam working for provider
+        # subclasses while the built-in Docker resource uses the non-blocking,
+        # progress-reporting implementation below.
+        if type(self).ensure_image_ready is not DockerExecutionResource.ensure_image_ready:
+            return await asyncio.to_thread(
+                self.ensure_image_ready,
+                image,
+                profile=profile,
+            )
+        active_profile = self._profile(profile)
+        image_pull_policy = str(active_profile.get("image_pull_policy", "never"))
+        cache_key = f"{image}::{image_pull_policy}"
+        if image_pull_policy != "always" and cache_key in self._prepared_images:
+            return self._prepared_images[cache_key]
+        from agently.core import ExecutionResourceError
+
+        await self._report_progress(
+            phase="image_inspection",
+            message=f"Checking Docker image {image}.",
+            details={"image": image, "image_pull_policy": image_pull_policy},
+        )
+        first_inspect = await asyncio.to_thread(self.inspect_image, image)
+        if first_inspect.get("exists") and image_pull_policy != "always":
+            prepared = {
+                "status": "local",
+                "image": image,
+                "image_id": first_inspect.get("image_id", ""),
+                "image_pull_policy": image_pull_policy,
+            }
+            self._prepared_images[cache_key] = prepared
+            await self._report_progress(
+                phase="image_ready",
+                message=f"Docker image {image} is available locally.",
+                details=prepared,
+            )
+            return prepared
+        if image_pull_policy == "never":
+            raise ExecutionResourceError(
+                f"Docker image '{image}' is not available locally and image_pull_policy='never'.",
+                code="execution_resource.docker_image_missing",
+                payload={"image": image, "image_pull_policy": image_pull_policy, "inspect": first_inspect},
+            )
+        if image_pull_policy == "request":
+            raise ExecutionResourceError(
+                f"Docker image '{image}' requires approval before pulling.",
+                code="execution_resource.docker_image_pull_approval_required",
+                payload={"image": image, "image_pull_policy": image_pull_policy, "inspect": first_inspect},
+            )
+        pull_timeout = int(active_profile.get("image_pull_timeout_seconds", 300) or 300)
+        pull = await self.async_pull_image(image, timeout=pull_timeout)
+        if not pull.get("ok"):
+            raise ExecutionResourceError(
+                f"Docker image pull failed for '{image}'.",
+                code="execution_resource.docker_image_pull_failed",
+                payload={
+                    "image": image,
+                    "image_pull_policy": image_pull_policy,
+                    "pull": pull,
+                    "inspect": first_inspect,
+                },
+            )
+        second_inspect = await asyncio.to_thread(self.inspect_image, image)
+        if not second_inspect.get("exists"):
+            raise ExecutionResourceError(
+                f"Docker image '{image}' was pulled but could not be inspected.",
                 code="execution_resource.docker_image_pull_failed",
                 payload={
                     "image": image,
@@ -803,8 +982,7 @@ class DockerExecutionResource:
         if not self.is_binary_available():
             return {"ok": False, "error": f"Docker binary not found: { self.docker_binary }"}
         active_profile = self._profile(profile)
-        await asyncio.to_thread(
-            self.ensure_image_ready,
+        await self.async_ensure_image_ready(
             image,
             profile=active_profile,
         )
@@ -1055,6 +1233,29 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
     DEFAULT_SETTINGS = {}
     kind = "docker"
 
+    def __init__(self) -> None:
+        self._runtime_event_emitter: Callable[..., Awaitable[None]] | None = None
+
+    def _bind_runtime_event_emitter(self, emitter: Callable[..., Awaitable[None]]) -> None:
+        self._runtime_event_emitter = emitter
+
+    def _attach_progress_handler(
+        self,
+        resource: DockerExecutionResource,
+        requirement: "ExecutionResourceRequirement",
+        *,
+        pull_only: bool = False,
+    ) -> DockerExecutionResource:
+        emitter = getattr(self, "_runtime_event_emitter", None)
+        if emitter is not None:
+            async def report(**payload: Any) -> None:
+                if pull_only and not str(payload.get("phase", "")).startswith("image_pull"):
+                    return
+                await emitter(requirement, **payload)
+
+            resource._progress_handler = report
+        return resource
+
     @property
     def provider_id(self) -> str:
         return "docker"
@@ -1153,12 +1354,12 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
         default_args = default_args if isinstance(default_args, list) else []
         runtime_profile = config.get("runtime_profile", {})
         runtime_profile = runtime_profile if isinstance(runtime_profile, dict) else {}
-        resource = self.create_resource(
+        resource = self._attach_progress_handler(self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
-        )
+        ), requirement, pull_only=True)
         availability = await asyncio.to_thread(resource.inspect_availability)
         available = bool(availability.get("available"))
         reason = str(availability.get("reason", "unavailable"))
@@ -1270,21 +1471,20 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "image": DockerExecutionResource._default_image(language),
                 **runtime_profile,
             }
-        resource = self.create_resource(
+        resource = self._attach_progress_handler(self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
             workspace_grant=grant if isinstance(grant, TaskWorkspaceAccessGrant) else None,
             max_output_bytes=int(policy.get("max_output_bytes", 20000)),
-        )
+        ), requirement)
         availability = await asyncio.to_thread(resource.ensure_available)
         active_profile = resource._profile()
         image_preparation: dict[str, Any] | None = None
         image = str(active_profile.get("image", ""))
         if image:
-            image_preparation = await asyncio.to_thread(
-                resource.ensure_image_ready,
+            image_preparation = await resource.async_ensure_image_ready(
                 image,
                 profile=active_profile,
             )

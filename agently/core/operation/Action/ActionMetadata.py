@@ -61,6 +61,30 @@ def sanitize_action_spec_for_metadata(spec: ActionSpec | dict[str, Any]) -> dict
     return _sanitize_metadata_value(deepcopy(dict(spec)))
 
 
+def project_action_spec_for_planning(spec: ActionSpec | dict[str, Any]) -> dict[str, Any]:
+    """Return only metadata that can change model-owned action planning."""
+
+    source = sanitize_action_spec_for_metadata(spec)
+    action_id = str(source.get("name") or source.get("action_id") or "")
+    projected: dict[str, Any] = {
+        "action_id": action_id,
+        "desc": source.get("desc", ""),
+        "kwargs": source.get("kwargs", {}),
+    }
+    required_input_keys = source.get("required_input_keys")
+    if isinstance(required_input_keys, (list, tuple)) and required_input_keys:
+        projected["required_input_keys"] = list(required_input_keys)
+    if source.get("approval_required") is True:
+        projected["approval_required"] = True
+    side_effect_level = str(source.get("side_effect_level", "read"))
+    if side_effect_level and side_effect_level != "read":
+        projected["side_effect_level"] = side_effect_level
+    concurrency_mode = str(source.get("concurrency_mode", "exclusive"))
+    if concurrency_mode and concurrency_mode != "exclusive":
+        projected["concurrency_mode"] = concurrency_mode
+    return projected
+
+
 def _command_to_text(command: Any) -> str | None:
     if isinstance(command, str):
         return command

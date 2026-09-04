@@ -9564,10 +9564,17 @@ class MockAgentTaskRequester:
             payload = {
                 "message": "Progress model summarized the current snapshot.",
             }
-            payload_text = json.dumps(payload, ensure_ascii=False)
-            midpoint = max(1, len(payload_text) // 2)
-            yield "message", payload_text[:midpoint]
-            yield "message", payload_text[midpoint:]
+            if "<agently_output>" in text:
+                yield "message", (
+                    '<agently_output>\n<field name="message" type="text">\n'
+                    "Progress model summarized\n"
+                )
+                yield "message", "the current snapshot.\n</field>\n</agently_output>"
+            else:
+                payload_text = json.dumps(payload, ensure_ascii=False)
+                midpoint = max(1, len(payload_text) // 2)
+                yield "message", payload_text[:midpoint]
+                yield "message", payload_text[midpoint:]
             return
         elif "Analyze this task's execution shape for AgentTask strategy resolution" in text:
             payload = {
@@ -20809,11 +20816,16 @@ async def test_agent_task_loop_progress_model_uses_snapshot_background(tmp_path)
     assert all((item.meta or {}).get("progress_source") == "model" for item in progress_items)
     assert any("Progress model summarized" in item.value.get("message", "") for item in progress_items)
     assert progress_delta_items
+    assert len(progress_delta_items) >= 2
     assert all(item.event_type == "delta" for item in progress_delta_items)
     assert all(item.is_complete is False for item in progress_delta_items)
     assert "Progress model summarized" in "".join(item.delta or "" for item in progress_delta_items)
     assert not any("building a TaskContext package" in item.value.get("message", "") for item in progress_items)
     assert any("Summarize AgentTask progress" in call for call in MockAgentTaskRequester.calls)
+    assert any(
+        "Summarize AgentTask progress" in call and "<agently_output>" in call
+        for call in MockAgentTaskRequester.calls
+    )
 
 
 @pytest.mark.asyncio
@@ -21229,6 +21241,7 @@ async def test_agent_task_loop_rejects_dag_shaped_step_without_global_candidate_
 async def test_agent_task_loop_actions_step_route_policy_prevents_skill_takeover(tmp_path):
     class ActionStepRequester(MockAgentTaskRequester):
         name = "ActionStepRequester"
+        action_planning_calls = 0
 
         async def request_model(self, request_data: AgentlyRequestData):
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -21241,6 +21254,36 @@ async def test_agent_task_loop_actions_step_route_policy_prevents_skill_takeover
                     "replan_instruction": "",
                     "final_result": "source evidence collected",
                 }
+            elif "next_action" in text and "execution_commands" in text:
+                ActionStepRequester.action_planning_calls += 1
+                if ActionStepRequester.action_planning_calls == 1:
+                    payload = {
+                        "next_action": "execute",
+                        "execution_commands": [
+                            {
+                                "purpose": "Collect repository source evidence.",
+                                "action_id": "fetch_agently_architecture_sources",
+                                "action_input": {},
+                                "todo_suggestion": "Return the bounded source evidence.",
+                            }
+                        ],
+                        "response": None,
+                    }
+                else:
+                    payload = {
+                        "next_action": "response",
+                        "execution_commands": [],
+                        "response": json.dumps(
+                            {
+                                "step_result": "collected repository source evidence",
+                                "evidence": [
+                                    "fetch_agently_architecture_sources returned bounded excerpts"
+                                ],
+                                "remaining_work": [],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
             elif "Execute exactly one bounded step" in text:
                 payload = {
                     "step_result": "collected repository source evidence",

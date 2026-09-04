@@ -1526,6 +1526,58 @@ class ActionArtifactManager:
         return [cls._to_model_visible_record(record) for record in records]
 
     @classmethod
+    def to_model_planning_records(cls, records: list[ActionResult] | None) -> list[ActionResult]:
+        """Keep decision evidence while omitting host-only execution mechanics."""
+
+        if not isinstance(records, list):
+            return []
+        projected: list[ActionResult] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            item = cast(
+                ActionResult,
+                {
+                    "action_call_id": record.get("action_call_id", ""),
+                    "action_id": record.get("action_id", record.get("tool_name", "")),
+                    "purpose": cls._compact_text(record.get("purpose", ""), limit=800),
+                    "status": record.get("status", ""),
+                    "success": bool(record.get("success", record.get("ok", False))),
+                },
+            )
+            if record.get("error") not in (None, ""):
+                item["error"] = cls._compact_text(record.get("error"), limit=1200)
+            suggestion = record.get("todo_suggestion", record.get("next"))
+            if suggestion not in (None, ""):
+                item["todo_suggestion"] = cls._compact_text(suggestion, limit=800)
+            result = record.get("result", record.get("data"))
+            if isinstance(result, dict):
+                result = {
+                    str(key): value
+                    for key, value in result.items()
+                    if str(key) not in {"meta", "model_digest", "artifacts"}
+                }
+            if result not in (None, "", {}, []):
+                item["result"] = cls._compact_value(result, limit=3000)
+            artifact_refs = record.get("artifact_refs")
+            if isinstance(artifact_refs, list) and artifact_refs:
+                planning_refs = [
+                    cls._to_model_selection_candidate(ref)
+                    for ref in artifact_refs[:20]
+                    if isinstance(ref, dict)
+                ]
+                item["artifact_refs"] = planning_refs
+                result_item = item.get("result")
+                if isinstance(result_item, dict):
+                    # The generic bounded-value projection may compact nested
+                    # artifact refs into structural strings.  Selection refs
+                    # are an actionable model contract, so always restore the
+                    # bounded host-issued candidates after that projection.
+                    result_item["artifact_refs"] = planning_refs
+            projected.append(item)
+        return projected
+
+    @classmethod
     def _to_action_flow_return_records(
         cls,
         records: list[ActionResult] | None,

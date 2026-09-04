@@ -17,8 +17,14 @@ Policy:
 - Additive scripts may be proposed for new release claims, but selection should
   be recorded in the manifest before the script becomes a release gate.
 
-The current pinned set covers AgentExecution result readers, AgentExecution
-stream/key reader facades, and SkillLibrary-backed installation followed by
-AgentExecution exact-revision binding. It does not preserve the removed
-SkillsExecutor planning or prompt-injection engine. Model-owned business
-behavior is still checked by the model-backed examples named in the manifest.
+The current pinned set covers AgentExecution result readers and fluent
+`input().info().instruct().output()` identity, AgentExecution stream/key reader
+facades, SkillLibrary-backed installation followed by AgentExecution
+exact-revision binding, and the human-readable simple/detail debug console
+profiles while EventCenter keeps the complete event stream. It also locks
+`input().info().use_action()` to one execution and verifies that a terminal
+Action-or-Response round becomes the existing AgentExecution result without a
+redundant third model request. It does not
+preserve the removed SkillsExecutor planning or prompt-injection engine.
+Model-owned business behavior is still checked by the model-backed examples
+named in the manifest.

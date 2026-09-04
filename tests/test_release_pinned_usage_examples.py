@@ -57,3 +57,52 @@ def test_release_pinned_skill_usage_tracks_current_owner_boundaries() -> None:
     assert "resolve_skills_plan" not in source
     assert "prompt_bindings" not in source
     assert "guidance_injected" not in source
+
+
+def test_release_pinned_agent_execution_chain_and_debug_profiles_are_locked() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    lifecycle_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith("01_agent_execution_result_lifecycle.py")
+    )
+    debug_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith("04_debug_console_profiles.py")
+    )
+
+    lifecycle_source = (ROOT / lifecycle_gate["path"]).read_text(encoding="utf-8")
+    debug_source = (ROOT / debug_gate["path"]).read_text(encoding="utf-8")
+
+    assert "agent.input(...).info(...).instruct(...).output(...).get_result()" in lifecycle_gate[
+        "protected_usage"
+    ][1]
+    assert '.info("Release-pinned supporting context.")' in lifecycle_source
+    assert "debug=True remains the readable simple console profile" in debug_gate["protected_usage"]
+    assert 'runtime.progress.' in debug_source
+    assert "event_center_keeps_runtime_progress" in debug_source
+    assert "ExecutionResource self-check" in debug_gate["protected_usage"][-2]
+    assert "execution_resource_simple_self_check" in debug_source
+    assert "execution_resource_simple_pull_is_readable" in debug_source
+    assert "structured Action planning excludes" in debug_gate["protected_usage"][-1]
+    assert "action_planning_projection_is_compact" in debug_source
+
+
+def test_release_pinned_action_response_delivery_is_locked() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    action_response_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith("05_action_response_delivery.py")
+    )
+    source = (ROOT / action_response_gate["path"]).read_text(encoding="utf-8")
+
+    assert "agent.input(...).info(...).use_action(...) preserves one AgentExecution" in action_response_gate[
+        "protected_usage"
+    ]
+    assert "model_request_count=2" in source
+    assert "fluent_chain_same_execution" in source
+    assert "info_present_in_each_round" in source
+    assert "simple_action_decision_hidden" in source
+    assert "simple_response_once" in source
