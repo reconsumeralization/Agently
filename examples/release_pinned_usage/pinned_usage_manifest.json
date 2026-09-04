@@ -61,7 +61,10 @@
         "ConsoleSink suppresses duplicate AgentExecution model projections and runtime.progress mirrors",
         "EventCenter hooks retain the complete underlying RuntimeEvent stream",
         "ExecutionResource self-check and actionable failure use human-readable labels while repeated image-layer progress stays visible as compact lines",
-        "structured Action planning excludes host-only execution_resources metadata"
+        "structured Action planning excludes host-only execution_resources metadata",
+        "concurrent ModelRequests keep execution concurrency while ConsoleSink displays first-delta FIFO with bounded background buffers and final-result promotion",
+        "during foreground model streaming ConsoleSink shows one readable background notice, defers bounded Prompt/request/process/success diagnostics until all FIFO response displays finish, labels the deferred section, and keeps warnings, failures, cancellation, and approval-required events immediate",
+        "simple mode preserves at least one complete successful response projection: a complete live stream, a complete non-streamed result, or a complete terminal-result fallback after concurrent replay-buffer overflow"
       ],
       "model_dependency": "none; local multi-chunk ModelRequester probe",
       "requires_human_confirmation_for_edits": true,

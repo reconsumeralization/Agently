@@ -9,6 +9,8 @@ Expected key output:
     simple_stream_blocks=1
     simple_stream_not_repeated=True
     simple_stream_finishes_before_done=True
+    simple_result_without_stream_is_complete=True
+    simple_overflow_fallback_is_complete=True
     detail_request_json=True
     detail_stream_blocks=1
     detail_final_materialized=True
@@ -19,6 +21,12 @@ Expected key output:
     execution_resource_simple_pull_is_readable=True
     execution_resource_detail_probe=True
     action_planning_projection_is_compact=True
+    concurrent_fifo_stream_blocks=1
+    concurrent_background_notice_once=True
+    concurrent_completed_background_uses_final=True
+    concurrent_request_process_deferred=True
+    concurrent_deferred_details_after_results=True
+    concurrent_single_notice_no_resume_header=True
 """
 
 from __future__ import annotations
@@ -33,9 +41,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently, RuntimeEvent
-from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeConsoleSinkHooker
-from examples.release_pinned_usage._local_requesters import (
+from agently import Agently, RuntimeEvent  # noqa: E402
+from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeConsoleSinkHooker  # noqa: E402
+from examples.release_pinned_usage._local_requesters import (  # noqa: E402
     PinnedUsageDebugStreamRequester,
     create_debug_stream_agent,
 )
@@ -61,10 +69,212 @@ def _run(profile: bool | str, name: str) -> tuple[str, list[RuntimeEvent]]:
     return rendered, captured_events
 
 
+def _run_concurrent_fifo_probe() -> str:
+    output = io.StringIO()
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        with redirect_stdout(output):
+            for response_id, marker in (("fifo-a", "A"),):
+                RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="agent_execution.stream",
+                        source="BaseAgent",
+                        payload={
+                            "execution_id": f"exec-{marker}",
+                            "path": "route.selected",
+                            "source": "agent_execution",
+                            "route": "model_request",
+                            "value": {"diagnostic": f"{marker}-PROCESS-DIAGNOSTIC"},
+                        },
+                    ),
+                    "detail",
+                )
+                RuntimeConsoleSinkHooker._handle_generic_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="prompt.built",
+                        source="ModelRequest",
+                        payload={
+                            "agent_name": "release-pinned-concurrent",
+                            "response_id": response_id,
+                            "prompt_text": f"{marker}-PROMPT-DIAGNOSTIC",
+                        },
+                    ),
+                    "detail",
+                )
+                RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="model.requesting",
+                        source="ModelRequest",
+                        payload={
+                            "agent_name": "release-pinned-concurrent",
+                            "response_id": response_id,
+                            "request": {
+                                "model": f"{marker}-REQUEST-DIAGNOSTIC",
+                                "messages": [],
+                                "stream": True,
+                            },
+                        },
+                    ),
+                    "detail",
+                )
+            for response_id, delta in (
+                ("fifo-a", "A1"),
+                ("fifo-b", "B-buffered"),
+                ("fifo-a", "A2"),
+            ):
+                if response_id == "fifo-b":
+                    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+                        RuntimeEvent(
+                            event_type="agent_execution.stream",
+                            source="BaseAgent",
+                            payload={
+                                "execution_id": "exec-B",
+                                "path": "context.package",
+                                "source": "task_context",
+                                "route": "model_request",
+                                "value": {"diagnostic": "B-PROCESS-DIAGNOSTIC"},
+                            },
+                        ),
+                        "detail",
+                    )
+                    RuntimeConsoleSinkHooker._handle_generic_event(  # type: ignore[attr-defined]
+                        RuntimeEvent(
+                            event_type="prompt.built",
+                            source="ModelRequest",
+                            payload={
+                                "agent_name": "release-pinned-concurrent",
+                                "response_id": response_id,
+                                "prompt_text": "B-PROMPT-DIAGNOSTIC",
+                            },
+                        ),
+                        "detail",
+                    )
+                    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                        RuntimeEvent(
+                            event_type="model.requesting",
+                            source="ModelRequest",
+                            payload={
+                                "agent_name": "release-pinned-concurrent",
+                                "response_id": response_id,
+                                "request": {
+                                    "model": "B-REQUEST-DIAGNOSTIC",
+                                    "messages": [],
+                                    "stream": True,
+                                },
+                            },
+                        ),
+                        "detail",
+                    )
+                RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="model.streaming",
+                        source="AgentlyResponseParser",
+                        payload={
+                            "agent_name": "release-pinned-concurrent",
+                            "response_id": response_id,
+                            "delta": delta,
+                        },
+                    ),
+                    "detail",
+                )
+            for response_id, result in (("fifo-b", "B-final"), ("fifo-a", "A-final")):
+                RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="model.completed",
+                        source="AgentlyResponseParser",
+                        payload={
+                            "agent_name": "release-pinned-concurrent",
+                            "response_id": response_id,
+                            "result": result,
+                        },
+                    ),
+                    "detail",
+                )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+    return re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+
+
+def _run_simple_complete_output_probe() -> str:
+    output = io.StringIO()
+    nonstreamed_result = "NONSTREAM-HEAD\n" + ("n" * 5000) + "\nNONSTREAM-TAIL"
+    overflow_final_result = "OVERFLOW-HEAD\n" + ("f" * 66000) + "\nOVERFLOW-TAIL"
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        with redirect_stdout(output):
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.completed",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "release-pinned-complete",
+                        "response_id": "nonstreamed",
+                        "result": nonstreamed_result,
+                    },
+                ),
+                "simple",
+            )
+            for response_id, delta in (
+                ("foreground", "FOREGROUND"),
+                ("background", "b" * 66000),
+            ):
+                RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                    RuntimeEvent(
+                        event_type="model.streaming",
+                        source="AgentlyResponseParser",
+                        payload={
+                            "agent_name": "release-pinned-complete",
+                            "response_id": response_id,
+                            "delta": delta,
+                        },
+                    ),
+                    "simple",
+                )
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.completed",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "release-pinned-complete",
+                        "response_id": "foreground",
+                        "result": "FOREGROUND",
+                    },
+                ),
+                "simple",
+            )
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.completed",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "release-pinned-complete",
+                        "response_id": "background",
+                        "result": overflow_final_result,
+                    },
+                ),
+                "simple",
+            )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+    return re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+
+
 def main() -> None:
     simple, _simple_events = _run(True, "release-pinned-debug-simple")
     detail, detail_events = _run("detail", "release-pinned-debug-detail")
+    concurrent_fifo = _run_concurrent_fifo_probe()
+    simple_complete_output = _run_simple_complete_output_probe()
     final_text = "PINNED_DEBUG_APINNED_DEBUG_B"
+    simple_stream_finishes_before_done = (
+        simple.index(final_text) < simple.index("Stage: Done")
+        and "Stage: Streaming" not in simple[simple.index("Stage: Done") :]
+    )
+    simple_overflow_fallback_is_complete = (
+        "Full output pending" in simple_complete_output
+        and "OVERFLOW-HEAD" in simple_complete_output
+        and "OVERFLOW-TAIL" in simple_complete_output
+        and "buffered characters omitted by ConsoleSink" not in simple_complete_output
+    )
     event_center_keeps_runtime_progress = any(
         getattr(event, "event_type", None) in {"agent_execution.stream", "agent_execution.stream.delta"}
         and isinstance(getattr(event, "payload", None), dict)
@@ -147,7 +357,15 @@ def main() -> None:
     print(f"simple_stream_not_repeated={simple.count(final_text) == 1}")
     print(
         "simple_stream_finishes_before_done="
-        f"{simple.index(final_text) < simple.index('Stage: Done') and 'Stage: Streaming' not in simple[simple.index('Stage: Done') :]}"
+        f"{simple_stream_finishes_before_done}"
+    )
+    print(
+        "simple_result_without_stream_is_complete="
+        f"{'NONSTREAM-HEAD' in simple_complete_output and 'NONSTREAM-TAIL' in simple_complete_output}"
+    )
+    print(
+        "simple_overflow_fallback_is_complete="
+        f"{simple_overflow_fallback_is_complete}"
     )
     print(f"detail_request_json={'request_options' in detail and 'request_url' in detail}")
     print(f"detail_stream_blocks={detail.count('Stage: Streaming')}")
@@ -173,6 +391,42 @@ def main() -> None:
     print(
         "action_planning_projection_is_compact="
         f"{'execution_resources' not in planning_projection and 'executor_type' not in planning_projection}"
+    )
+    print(f"concurrent_fifo_stream_blocks={concurrent_fifo.count('Stage: Streaming')}")
+    print(
+        "concurrent_background_notice_once="
+        f"{concurrent_fifo.count('Another model response is running in the background') == 1}"
+    )
+    print(
+        "concurrent_completed_background_uses_final="
+        f"{'B-buffered' not in concurrent_fifo and concurrent_fifo.index('A-final') < concurrent_fifo.index('B-final')}"
+    )
+    first_done = concurrent_fifo.index("Stage: Done")
+    foreground_start = concurrent_fifo.index("A1")
+    foreground_end = concurrent_fifo.index("A2")
+    diagnostic_markers = (
+        "A-PROCESS-DIAGNOSTIC",
+        "A-PROMPT-DIAGNOSTIC",
+        "A-REQUEST-DIAGNOSTIC",
+        "B-PROCESS-DIAGNOSTIC",
+        "B-PROMPT-DIAGNOSTIC",
+        "B-REQUEST-DIAGNOSTIC",
+    )
+    single_notice_no_resume_header = (
+        concurrent_fifo.count("Another model response is running in the background") == 1
+        and "[Streaming continues]" not in concurrent_fifo
+    )
+    print(
+        "concurrent_request_process_deferred="
+        f"{all(marker not in concurrent_fifo[foreground_start:foreground_end] for marker in diagnostic_markers)}"
+    )
+    print(
+        "concurrent_deferred_details_after_results="
+        f"{all(concurrent_fifo.index(marker) > first_done for marker in diagnostic_markers)}"
+    )
+    print(
+        "concurrent_single_notice_no_resume_header="
+        f"{single_notice_no_resume_header}"
     )
 
 

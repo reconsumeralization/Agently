@@ -82,11 +82,34 @@ def test_release_pinned_agent_execution_chain_and_debug_profiles_are_locked() ->
     assert "debug=True remains the readable simple console profile" in debug_gate["protected_usage"]
     assert 'runtime.progress.' in debug_source
     assert "event_center_keeps_runtime_progress" in debug_source
-    assert "ExecutionResource self-check" in debug_gate["protected_usage"][-2]
+    assert any(
+        "ExecutionResource self-check" in item for item in debug_gate["protected_usage"]
+    )
     assert "execution_resource_simple_self_check" in debug_source
     assert "execution_resource_simple_pull_is_readable" in debug_source
-    assert "structured Action planning excludes" in debug_gate["protected_usage"][-1]
+    assert any(
+        "structured Action planning excludes" in item for item in debug_gate["protected_usage"]
+    )
     assert "action_planning_projection_is_compact" in debug_source
+    assert "concurrent_fifo_stream_blocks" in debug_source
+    assert "concurrent_background_notice_once" in debug_source
+    assert "concurrent_request_process_deferred" in debug_source
+    assert "concurrent_deferred_details_after_results" in debug_source
+    assert "concurrent_single_notice_no_resume_header" in debug_source
+    assert "simple_result_without_stream_is_complete" in debug_source
+    assert "simple_overflow_fallback_is_complete" in debug_source
+    assert any(
+        "concurrent ModelRequests keep execution concurrency" in item
+        for item in debug_gate["protected_usage"]
+    )
+    assert any(
+        "defers bounded Prompt/request/process/success diagnostics" in item
+        for item in debug_gate["protected_usage"]
+    )
+    assert any(
+        "simple mode preserves at least one complete successful response projection" in item
+        for item in debug_gate["protected_usage"]
+    )
 
 
 def test_release_pinned_action_response_delivery_is_locked() -> None:

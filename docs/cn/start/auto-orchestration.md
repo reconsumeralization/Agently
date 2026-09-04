@@ -1322,6 +1322,14 @@ result = await task.async_get_full_data()
 流，也不会替代业务输出：要查看可读的任务阶段和最终结果，仍需消费 `type="delta"` 或
 调用 `async_streaming_print()`；要完整审计、存储或重放则使用 EventCenter hook 或
 DevTools。问题定位后，应从示例和生产代码中移除 debug settings。
+并发模型响应仍然并发执行：ConsoleSink 只把最先产生 delta 的响应设为前台展示，将后到
+响应的展示按 FIFO 缓冲，并在前台终止后提升；这只影响展示，绝不阻塞或重排底层执行。
+前台流存在时，普通 Prompt/request/process/成功状态会有界延后到全部 FIFO 响应展示完成
+之后，正文间只插入一条精简后台提示。需要处理的 warning、failure、cancellation、interrupt
+与 approval 仍即时出现，EventCenter 与 DevTools 的事件时序不变。
+simple 模式会为每个成功模型响应保留一个完整投影：要么是完整展示的实时流，要么是完整
+终态结果。后台重放 buffer 若已满，控制台会在完成时用完整权威结果替代残缺重放，不会把
+部分正文当成全部输出。
 
 ## 提交式 DAG 输入
 
