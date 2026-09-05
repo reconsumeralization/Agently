@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agently import Agently
-from agently.core import AgentVerificationError, PluginManager
+from agently.core import AgentReviewError, PluginManager
 from agently.types.data import AgentlyRequestData, AgentReviewContext
 from agently.utils import Settings
 
@@ -14,6 +14,7 @@ class ReviewRequester:
     name = "ReviewRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
     requests: list[dict[str, Any]] = []
+    review_payload: dict[str, Any] | None = None
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -22,6 +23,7 @@ class ReviewRequester:
     @classmethod
     def reset(cls) -> None:
         cls.requests = []
+        cls.review_payload = None
 
     @staticmethod
     def _on_register() -> None:
@@ -33,11 +35,14 @@ class ReviewRequester:
 
     def generate_request_data(self) -> AgentlyRequestData:
         request_input = self.prompt.get("input")
-        is_review = isinstance(request_input, dict) and "verification_is_required" in request_input
+        is_review = isinstance(self.prompt.get("info"), dict) and "review_rules" in self.prompt.get("info")
         payload = {
             "is_review": is_review,
             "input": request_input,
             "output": self.prompt.get("output"),
+            "info": self.prompt.get("info"),
+            "prompt": self.prompt.get(),
+            "prompt_text": self.prompt.to_text(),
         }
         type(self).requests.append(payload)
         return AgentlyRequestData(
@@ -51,12 +56,14 @@ class ReviewRequester:
     async def request_model(self, request_data: AgentlyRequestData):
         if request_data.data["is_review"]:
             content = json.dumps(
-                {
+                type(self).review_payload or {
                     "passed": True,
-                    "score": 0.92,
+                    "quality_level": "strong",
+                    "checks": [{"rule_key": key, "status": "satisfied", "evidence": "Protocol fixture."}
+                               for key in request_data.data["info"]["review_rules"]],
                     "summary": "The candidate meets the supplied contract.",
                     "issues": [],
-                    "suggestions": ["Keep the answer concise."],
+                    "overall_suggestions": ["Keep the answer concise."],
                 }
             )
         else:
@@ -97,10 +104,11 @@ async def test_advisory_review_records_failure_without_changing_result(tmp_path)
         assert result == "candidate-result"
         return {
             "passed": False,
-            "score": 0.4,
+            "quality_level": "weak",
             "summary": "Useful but incomplete.",
-            "issues": ["Missing one requested detail."],
-            "suggestions": ["Add that detail."],
+            "issues": [{"criterion": "Requested detail", "finding": "Missing one requested detail.",
+                        "evidence": "Candidate", "suggestions": ["Add that detail."]}],
+            "overall_suggestions": [],
         }
 
     execution = agent.input("Produce a concise result.").review(reviewer)
@@ -108,15 +116,15 @@ async def test_advisory_review_records_failure_without_changing_result(tmp_path)
     assert await execution.async_get_data() == "candidate-result"
     assert execution.status == "success"
     assert len(contexts) == 1
-    assert contexts[0].required is False
+    assert contexts[0].on_fail == "warn"
     assert execution.review_results[0]["passed"] is False
-    assert execution.review_results[0]["required"] is False
+    assert execution.review_results[0]["on_fail"] == "warn"
     assert execution.diagnostics["review"] == {
         "declared": 1,
         "completed": 1,
         "passed": 0,
         "failed": 1,
-        "required_failed": 0,
+        "blocked": 0,
     }
     paths = [item.path for item in execution.stream.items]
     assert paths.index("review.started") < paths.index("review.completed") < paths.index("result")
@@ -125,41 +133,41 @@ async def test_advisory_review_records_failure_without_changing_result(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_required_verification_blocks_terminal_success(tmp_path):
+async def test_blocking_review_prevents_terminal_success(tmp_path):
     agent = create_review_agent(tmp_path, "required-verification")
-    execution = agent.input("Produce a result.").verify(lambda _result, _context: False)
+    execution = agent.input("Produce a result.").review(lambda _result, _context: False, on_fail="block")
 
-    with pytest.raises(AgentVerificationError, match="failed required verification") as raised:
+    with pytest.raises(AgentReviewError, match="Review did not pass") as raised:
         await execution.async_get_data()
 
-    assert raised.value.review["required"] is True
+    assert raised.value.review["on_fail"] == "block"
     assert raised.value.review["passed"] is False
     assert execution.status == "blocked"
     assert execution.result == "candidate-result"
     paths = [item.path for item in execution.stream.items]
-    assert "verification.failed" in paths
+    assert "review.blocked" in paths
     assert "result" not in paths
     meta = await execution.async_get_meta()
-    assert meta["diagnostics"].get("review", {}).get("required_failed") == 1
+    assert meta["diagnostics"].get("review", {}).get("blocked") == 1
 
 
 @pytest.mark.asyncio
 async def test_review_handlers_run_in_fluent_order_and_accept_async_handlers(tmp_path):
     agent = create_review_agent(tmp_path, "ordered-review")
-    calls: list[tuple[int, bool]] = []
+    calls: list[tuple[int, str]] = []
 
     def first(_result: Any, context: AgentReviewContext):
-        calls.append((context.index, context.required))
+        calls.append((context.index, context.on_fail))
         return True
 
     async def second(_result: Any, context: AgentReviewContext):
-        calls.append((context.index, context.required))
+        calls.append((context.index, context.on_fail))
         return {"passed": True, "summary": "Required check passed."}
 
-    execution = agent.input("Produce a result.").review(first).verify(second)
+    execution = agent.input("Produce a result.").review(first).review(second, on_fail="block")
 
     assert await execution.async_get_data() == "candidate-result"
-    assert calls == [(1, False), (2, True)]
+    assert calls == [(1, "warn"), (2, "block")]
     assert [item["passed"] for item in execution.review_results] == [True, True]
 
 
@@ -203,3 +211,112 @@ def test_review_rejects_non_callable_handler(tmp_path):
 
     with pytest.raises(TypeError, match="callable or None"):
         agent.input("Produce a result.").review("not-callable")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_default_review_reads_complete_transformed_artifact_and_isolates_prompt(tmp_path):
+    agent = create_review_agent(tmp_path, "artifact-content-review")
+    checked = []
+    agent.validate(lambda value, _: checked.append(value) or True)
+    body = "Complete artifact evidence.\n" * 1500
+    execution = (
+        agent.input("Produce a report.").instruct("Caller style constraint.")
+        .artifact("report.md", lambda *_: body)
+        .review(rules=["Check the supplied report."], on_fail="block")
+    )
+    assert await execution.async_get_data() == "candidate-result"
+    assert checked == [{"value": "candidate-result"}]
+    prompt = ReviewRequester.requests[-1]
+    assert prompt["info"]["evidence"][0]["content"] == body
+    assert prompt["info"]["evidence"][0]["coverage"] == "complete"
+    assert prompt["info"]["review_rules"] == {"r1": "Check the supplied report."}
+    assert "goals" not in prompt["info"]["request_contract"]
+    assert "success_criteria" not in prompt["info"]["request_contract"]
+    assert "Caller style constraint." not in str(prompt["prompt"]["instruct"])
+    assert "Caller style constraint." in str(prompt["info"]["request_contract"])
+    assert "[info.review_rules]" in prompt["prompt_text"]
+    assert "verification_is_required" not in prompt["prompt_text"]
+    assert "on_fail" not in prompt["prompt_text"]
+    assert "score" not in prompt["output"].model_fields
+
+
+@pytest.mark.asyncio
+async def test_identical_candidate_refers_to_artifact_without_duplicate_body(tmp_path):
+    agent = create_review_agent(tmp_path, "deduplicated-review")
+    execution = agent.input("Produce text.").artifact("result.txt").review()
+    await execution.async_get_data()
+    prompt = ReviewRequester.requests[-1]
+    assert prompt["input"]["candidate"] == {"same_content_as": "a1"}
+    assert prompt["info"]["evidence"][0]["content"] == "candidate-result"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_artifact_is_not_assessable_and_never_claims_model_review(tmp_path):
+    agent = create_review_agent(tmp_path, "binary-review")
+    execution = agent.input("Produce data.").artifact("image.png", lambda *_: b"\x00\xff").review()
+    await execution.async_get_data()
+    assert len(ReviewRequester.requests) == 1
+    assert execution.review_results[0]["quality_level"] == "not_assessable"
+    assert execution.review_results[0]["source"] == "host"
+    assert execution.review_results[0]["passed"] is False
+    assert execution.review_results[0]["issues"][0]["evidence"]
+
+
+@pytest.mark.asyncio
+async def test_handler_replaces_model_review_and_receives_frozen_rules(tmp_path):
+    agent = create_review_agent(tmp_path, "handler-rules")
+    rules = ["Check evidence."]
+    contexts = []
+    execution = agent.input("Produce text.").review(
+        lambda _, context: contexts.append(context) or True, rules=rules,
+    )
+    rules.append("Later mutation.")
+    await execution.async_get_data()
+    assert contexts[0].rules == ("Check evidence.",)
+    assert len(ReviewRequester.requests) == 1
+    assert execution.review_results[0]["quality_level"] is None
+    assert not hasattr(agent, "verify")
+    assert not hasattr(execution, "verify")
+
+
+@pytest.mark.parametrize("options", [{"on_fail": "retry"}, {"rules": " "}, {"rules": [""]}])
+def test_review_rejects_unsupported_behavior_and_empty_rules(tmp_path, options):
+    agent = create_review_agent(tmp_path, "invalid-rules")
+    with pytest.raises(ValueError):
+        agent.review(**options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checks,passed", [([], True), (
+    [{"rule_key": "r1", "status": "violated", "evidence": "Fixture"}], False,
+)])
+async def test_model_review_rejects_missing_rule_coverage_or_issue_support_without_retry(tmp_path, checks, passed):
+    agent = create_review_agent(tmp_path, "incomplete-model-report")
+    ReviewRequester.review_payload = {
+        "checks": checks, "passed": passed, "issues": [], "overall_suggestions": [],
+        "summary": "Protocol fixture.", "quality_level": "weak",
+    }
+    execution = agent.input("Produce a result.").review(rules="Check evidence.")
+    with pytest.raises(ValueError):
+        await execution.async_get_data()
+    assert len(ReviewRequester.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_changed_artifact_is_not_accepted_from_earlier_readback_metadata(tmp_path):
+    agent = create_review_agent(tmp_path, "changed-artifact")
+
+    def change_after_delivery(_result, context):
+        path = context.task_workspace.resolve_file_path(context.artifact_refs[0]["path"])
+        path.write_text("Changed after trusted delivery.", encoding="utf-8")
+        return True
+
+    execution = (
+        agent.input("Produce text.").artifact("result.txt")
+        .review(change_after_delivery).review(on_fail="block")
+    )
+    with pytest.raises(AgentReviewError, match="incomplete"):
+        await execution.async_get_data()
+    assert len(ReviewRequester.requests) == 1
+    assert execution.review_results[-1]["quality_level"] == "not_assessable"
+    assert "trusted content version" in execution.review_results[-1]["issues"][0]["evidence"]

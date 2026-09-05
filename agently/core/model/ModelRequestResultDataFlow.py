@@ -301,8 +301,8 @@ class ModelRequestResultDataFlow:
             }
         )
 
+    @staticmethod
     def normalize_validate_result(
-        self,
         raw_result: "OutputValidateResult",
         *,
         validator_name: str,
@@ -359,8 +359,8 @@ class ModelRequestResultDataFlow:
             "error": None,
         }
 
+    @staticmethod
     def normalize_validate_error(
-        self,
         error: BaseException,
         *,
         validator_name: str,
@@ -641,8 +641,9 @@ class ModelRequestResultDataFlow:
         except Exception:
             return None
 
-    def build_validation_failure_exception(self, outcome: dict[str, Any]):
-        explicit_error = self.exception_to_raise(cast(BaseException | str | None, outcome.get("raise_value")))
+    @staticmethod
+    def build_validation_failure_exception(outcome: dict[str, Any]):
+        explicit_error = ModelRequestResultDataFlow.exception_to_raise(cast(BaseException | str | None, outcome.get("raise_value")))
         if explicit_error is not None:
             return explicit_error
         validator_name = outcome.get("validator_name")

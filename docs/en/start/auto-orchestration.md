@@ -116,39 +116,61 @@ durable queues, webhooks, cross-process hosts, or application-wide routing;
 these advanced transport choices are intentionally not keyword arguments on
 `.interact(...)`.
 
-## Review And Verification
+## Review And Final Validation
 
-Use `.review(handler=None)` for an advisory quality judgment after the business
-result has been produced. Use `.verify(handler=None)` when the same judgment is
-a required terminal gate:
+Use `.review(handler=None, *, rules=None, on_fail="warn")` to assess the final
+result and its key artifacts. `rules` accepts one string or a sequence of strings.
+A sync/async handler receives `(result, context)` and replaces the whole evaluator;
+its context includes the rules, original contract, trusted artifact refs, and
+TaskWorkspace. Return a Boolean or a mapping with Boolean `passed`.
 
 ```python
-result = agent.input(task).output(contract).review().start()
+result = (
+    agent.input(task).output(contract)
+    .review(rules=["Check that conclusions are supported by the supplied evidence."])
+    .start()
+)
 
-def release_check(result, context):
-    return {
-        "passed": result["risk_level"] != "unknown",
-        "summary": "A release decision requires a known risk level.",
-        "issues": [],
-        "suggestions": [],
-    }
-
-result = agent.input(task).output(contract).verify(release_check).start()
+result = (
+    agent.input(task).output(contract)
+    .validate(release_check)  # (value, context) -> bool or {"ok": bool, ...}
+    .review(on_fail="block")
+    .start()
+)
 ```
 
-A handler receives `(result, context)`, may be synchronous or asynchronous, and
-returns either a Boolean or a mapping with Boolean `passed`. A failed review is
-recorded in execution metadata but leaves the accepted business result and run
-status unchanged. A failed verification records the same structured verdict,
-blocks terminal success, and raises `AgentVerificationError`. With no handler,
-Agently performs one additional structured model request.
+`on_fail="warn"` records a failed verdict without changing the result or success
+status. `"block"` raises `AgentReviewError` and prevents terminal success. This is
+host behavior, not a stronger model rubric. Neither mode revises or retries;
+`"retry"` is unsupported. There is no public Agent/AgentExecution `verify()`.
 
-These methods judge once; they do not revise, retry, or replan. Use
-ModelRequest `.validate(...)` for hard schema/value acceptance and its declared
-repair retries. Use goal pursuit or an explicit TriggerFlow when judgment must
-drive a multi-round reflection or repair loop. Review results are available in
-`(await execution.async_get_meta())["reviews"]` and through
-`review.started`, `review.completed`, and `verification.failed` stream events.
+Without a handler, the reviewer reads complete trusted text artifacts through
+TaskWorkspace, verifies their content version, and makes one structured model
+request. Identical text candidate/artifact content is sent once. Non-text,
+unreadable, changed, or incomplete artifacts produce `not_assessable`, not a
+successful metadata-only review. Use a suitable custom handler for other formats.
+No progressive or segmented model review is implied; context overflow is an
+explicit request failure. Plans are judged as plans, including accepted
+clarifications, not as already-executed tasks. Missing goals are not invented.
+
+Reports contain `passed`, `quality_level` (`strong`, `adequate`, `weak`, or
+`not_assessable`), `summary`, one `checks[]` entry per supplied rule, structured
+`issues[]` (`criterion`, `finding`, `evidence`, `suggestions[]`), and
+`overall_suggestions[]`. Boolean handlers leave `quality_level=None`; they do not
+manufacture a rating. Numeric model scores are not used. Read reports from
+`(await execution.async_get_meta())["reviews"]`; events include `review.started`,
+`review.completed`, `review.warning`, and `review.blocked`.
+
+`validate(handler)` is the hard gate for the **final output of the current call**:
+a direct response, final plan, host-assembled document, AgentTask final output,
+or custom Pattern's returned value. It never automatically checks intermediate
+Pattern/task outputs. Direct ModelRequest validation and `ensure_long_output`
+retain their existing controlled repair behavior. Other final checks run once
+without replaying internal steps or side effects. Their context uses
+`meta.scope="agent_execution_final"`, no provider response ID, and
+`max_retries=0`. Validation precedes declared artifact delivery and review;
+it does not undo side effects already performed by a task. Use explicit
+TriggerFlow orchestration for a safely designed repair loop.
 
 ## Artifact Delivery
 
@@ -189,7 +211,7 @@ Artifact delivery does not replace or wrap the business result. Trusted refs
 are exposed in `meta["logs"]["artifact_refs"]` and through
 `artifact.started` / `artifact.completed` stream events. Multiple calls create
 multiple independently verified files. Any declared delivery failure fails the
-run; artifact materialization completes before review and verification.
+run; artifact materialization completes before review.
 
 ## Request Patterns
 
@@ -201,7 +223,7 @@ run; artifact materialization completes before review and verification.
 > same name.
 
 The beta label applies only to Pattern here. `.interact(...)`, `.artifact(...)`,
-`.review(...)`, and `.verify(...)` are standard AgentExecution methods.
+`.review(...)` are standard AgentExecution methods.
 
 A Pattern is one reusable whole-request behavior with the same caller-facing
 shape as an ordinary Agent request: it consumes the existing AgentExecution
@@ -326,7 +348,7 @@ sections sequentially with bounded continuity notes. Host code adds headings
 and assembles the accepted bodies in plan order, so no final model pass recopies
 the full document. It returns text only: structured `.output(...)` and
 simultaneous `.ensure_long_output()` are rejected before the first model call.
-Use `.artifact(...)` for file delivery and `.review()` / `.verify()` for a
+Use `.artifact(...)` for file delivery and `.review()` for a
 terminal semantic judgment.
 
 The default section limit is 12 and the total predecessor-continuity projection
@@ -339,7 +361,7 @@ semantic document-composition Pattern.
 Runnable local Ollama/Qwen examples cover the standard terminal methods and
 both bundled beta Patterns:
 
-- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py): verified artifact delivery, model-backed advisory review, and handler-backed required verification;
+- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py): verified artifact delivery, model-backed advisory review, and blocking handler review;
 - [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py): connected clarification, structured plan validation, and artifact readback;
 - [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py): section planning/writing, host-ordered Markdown assembly, artifact readback, and review.
 

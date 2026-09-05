@@ -97,7 +97,7 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(agent.interact(lambda _exchange: "answer"), AgentExecution)
         assert_type(execution.interact(lambda _exchange: {"answer": "value"}), AgentExecution)
         assert_type(execution.review(), AgentExecution)
-        assert_type(execution.verify(), AgentExecution)
+        assert_type(execution.review(rules=["Check evidence."], on_fail="block"), AgentExecution)
         assert_type(execution.effort("high"), AgentExecution)
         assert_type(execution.effort({"name": "high", "planning": {"depth": "deep"}}), AgentExecution)
         assert_type(execution.effort("team_profile"), AgentExecution)

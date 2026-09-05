@@ -339,9 +339,18 @@ print(execution.get_prompt_text())  # 用于发送前审计的已渲染 executio
 
 ## 占位符
 
-prompt 槽位中：`{name}` 引用另一个槽位的 key；`${name}` 在加载时由 `mappings={"name": "value"}` 替换。常见用法：
+区分给模型看的字面引用和框架执行的变量替换：
 
-- `instruct: "Reply {input} politely."` — 把请求的 `input` 拉进 instruct。
+- `instruct: "依据 [info.rules] 审查 [input.candidate]，按 [output] 返回。"`
+  用字面提及引导模型关注已有内容。引用原样保留，不复制内容、不替换变量，
+  也不需要渲染器支持。使用普通字符串，不使用 Python f-string 或 `.format(...)`。
+  也可用反引号标记字段路径，或使用无歧义的字面花括号；关键是指向清楚，
+  不强制某一种分隔符。
+- 事实与审查规范放在 `info`，字段约束放在 `output`，行为规范放在 `instruct`。
+  后者引用前者，不重复定义。被引用内容必须实际存在；提及不会加载证据、
+  触发渐进式披露或校验路径。
+- `${name}` 配合显式 `mappings={"name": "value"}` 才是加载时的值替换，
+  与字面提及不同。
 - `${ENV.OPENAI_API_KEY}` 是**设置**层的环境变量替换，不是 prompt 的；prompt 用 `${name}` + 显式 mappings。
 - `${INPUT.customer}`、`${INFO.policy}`、`${INSTRUCT.step}` 是渲染时的 slot
   引用，会变成 `[INPUT > customer]` 这类 prompt 段落指针，而不是把另一个
@@ -354,6 +363,13 @@ prompt 槽位中：`{name}` 引用另一个槽位的 key；`${name}` 在加载�
 ```python
 agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 ```
+
+## 定性评价
+
+定性评审使用有明确含义和边界的评价档位，并约束输出标签；不要让模型凭空生成
+数字评分或概率。强制验收和证据充分性与质量档位分别定义。档位映射成数字只是
+排序或策略编码，不会因此成为精确质量度量。数值指标应基于记录的事实，按明确
+公式、单位和缺失数据规则确定性计算。
 
 ## 每层 prompt 的来源
 

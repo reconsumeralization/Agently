@@ -101,35 +101,55 @@ TriggerFlow 负责 pause/resume。durable queue、webhook、跨进程 host 或�
 继续使用已注册的 ExecutionExchange provider、routing handler 和 `interaction.*`
 settings；这些高级 transport 选择不会变成 `.interact(...)` 的 kwargs。
 
-## Review 与 Verification
+## Review 与最终结果校验
 
-业务结果生成后，使用 `.review(handler=None)` 做一次 advisory 质量判断；如果同一种
-判断必须成为终态硬门槛，则使用 `.verify(handler=None)`：
+使用 `.review(handler=None, *, rules=None, on_fail="warn")` 审查最终结果及其关键产物。
+`rules` 支持字符串或字符串序列。同步/异步 handler 接收 `(result, context)`，
+替换整个评估过程；context 包含规则、原始合同、可信产物引用与 TaskWorkspace。
+返回 Boolean，或包含 Boolean `passed` 的 mapping。
 
 ```python
-result = agent.input(task).output(contract).review().start()
+result = (
+    agent.input(task).output(contract)
+    .review(rules=["检查结论是否有输入证据支持。"])
+    .start()
+)
 
-def release_check(result, context):
-    return {
-        "passed": result["risk_level"] != "unknown",
-        "summary": "发布决策必须给出明确的风险等级。",
-        "issues": [],
-        "suggestions": [],
-    }
-
-result = agent.input(task).output(contract).verify(release_check).start()
+result = (
+    agent.input(task).output(contract)
+    .validate(release_check)  # (value, context) -> bool 或 {"ok": bool, ...}
+    .review(on_fail="block")
+    .start()
+)
 ```
 
-handler 接收 `(result, context)`，可以同步或异步执行，返回 Boolean，或返回包含 Boolean
-`passed` 的 mapping。review 未通过时只记录到 execution metadata，不改变已接受的业务
-结果和成功状态；verification 未通过时记录同样的结构化 verdict，阻止终态成功，并抛出
-`AgentVerificationError`。不传 handler 时，Agently 会追加一次结构化模型请求。
+`on_fail="warn"` 记录失败评价，不改变结果和成功状态；`"block"` 抛出
+`AgentReviewError`，阻止终态成功。它控制 Host 行为，不改变模型审查标准。
+两种模式都不会改写或重试；暂不支持 `"retry"`。
+Agent/AgentExecution 不提供公开 `verify()`。
 
-这两个方法只判断一次，不会隐式改写、重试或 replan。模型单次输出的 schema/value
-硬校验及其声明式 repair retry 仍使用 ModelRequest `.validate(...)`；如果判断需要驱动
-多轮 reflection 或 repair loop，应使用 goal pursuit 或显式 TriggerFlow。review 结果可从
-`(await execution.async_get_meta())["reviews"]` 读取，也会通过 `review.started`、
-`review.completed` 和 `verification.failed` stream event 暴露。
+不传 handler 时，默认审查器通过 TaskWorkspace 读取完整可信文本产物、核对内容版本，
+再发起一次结构化模型请求。结果文本与产物完全相同时仅发送一次正文。
+非文本、不可读、已变更或不完整产物得到 `not_assessable`，不会以元数据检查冒充
+内容审查；其他格式需使用合适的自定义 handler。此处不隐含渐进式或分段模型审查，
+上下文溢出会明确失败。plan 按计划产物及已接受的澄清回复审查，不要求已经执行计划；
+缺少 goals 时不会另行编造目标。
+
+报告包含 `passed`、描述档位 `quality_level`（`strong`、`adequate`、`weak`、
+`not_assessable`）、`summary`、逐条规则对应的 `checks[]`、
+结构化 `issues[]`（`criterion`、`finding`、`evidence`、`suggestions[]`），以及
+不重复问题局部建议的 `overall_suggestions[]`。Boolean handler 不虚构档位，
+`quality_level=None`。不使用模型生成的数字评分。
+通过 `(await execution.async_get_meta())["reviews"]` 读取报告；
+事件包括 `review.started`、`review.completed`、`review.warning`、`review.blocked`。
+
+`validate(handler)` 硬校验的是**当前调用的最终输出**：直接响应、最终计划、
+Host 组装的完整文档、AgentTask 最终输出或自定义 Pattern 返回值，
+不自动检查内部步骤。直接 ModelRequest 与 `ensure_long_output` 保留已有受控修复；
+其他最终校验仅执行一次，不重放内部步骤或副作用。后者的 context 使用
+`meta.scope="agent_execution_final"`，没有 provider response ID，`max_retries=0`。
+校验先于声明式产物交付及 review，但不会撤销任务已经产生的副作用。
+需要安全修复循环时，使用显式 TriggerFlow 编排。
 
 ## Artifact 交付
 
@@ -167,7 +187,7 @@ handler 只负责渲染内容。路径 containment、写权限、物理 digest �
 artifact 交付不会替换或包装业务结果。可信 refs 位于
 `meta["logs"]["artifact_refs"]`，并通过 `artifact.started` / `artifact.completed`
 stream event 暴露。连续调用可创建多个分别校验的文件；任一已声明交付失败都会使本次
-run 失败。artifact 物化总是在 review 和 verification 之前完成。
+run 失败。artifact 物化总是在 review 之前完成。
 
 ## 请求 Pattern
 
@@ -176,8 +196,7 @@ run 失败。artifact 物化总是在 review 和 verification 之前完成。
 > 才会启用；仅注册 Pattern 不会改变普通 Agent 请求。即使 Pattern plugin 使用了相同名称，
 > 既有 Agent 方法仍然是原方法。
 
-这里的 beta 标签只属于 Pattern；`.interact(...)`、`.artifact(...)`、`.review(...)` 和
-`.verify(...)` 都是 AgentExecution 标准方法。
+这里的 beta 标签只属于 Pattern；`.interact(...)`、`.artifact(...)`、`.review(...)` 都是 AgentExecution 标准方法。
 
 Pattern 是一个可复用的完整请求行为，对调用者保持与普通 Agent 请求相同的形态：消费
 现有 AgentExecution draft，返回业务结果。使用 `.pattern(pattern)` 选择一个：
@@ -286,7 +305,7 @@ report = (
 各个已校验 section。host 按计划顺序添加标题并组装已接受正文，不再用最后一次模型请求
 重抄整篇文档。它只返回文本：结构化 `.output(...)` 以及同时选择
 `.ensure_long_output()` 都会在第一次模型调用前被拒绝。使用 `.artifact(...)` 交付文件，
-使用 `.review()` / `.verify()` 做终态语义判断。
+使用 `.review()` 做终态语义判断。
 
 默认 section 上限为 12，前序 continuity 投影的总长度上限为 4,000 字符；高级配置位于
 `plugins.AgentPattern.long_content.max_sections` 与
@@ -295,7 +314,7 @@ transport truncation policy，不是语义长文拼装 Pattern。
 
 以下本地 Ollama/Qwen 可运行示例覆盖标准终态方法与两个内置 beta Pattern：
 
-- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py)：经过回读验证的 artifact、模型 advisory review，以及 handler 驱动的 required verification；
+- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py)：经过回读验证的 artifact、模型 advisory review，以及 handler 驱动的 blocking review；
 - [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py)：connected clarification、结构化计划校验与 artifact 回读；
 - [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py)：section plan/写作、Host 顺序组装 Markdown、artifact 回读与 review。
 

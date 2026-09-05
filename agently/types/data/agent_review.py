@@ -26,24 +26,42 @@ if TYPE_CHECKING:
     from agently.types.plugins import AgentExecution
 
 
+AgentReviewQuality: TypeAlias = Literal["strong", "adequate", "weak", "not_assessable"]
+AgentReviewFailureAction: TypeAlias = Literal["warn", "block"]
+
+
+class AgentReviewIssue(TypedDict):
+    criterion: str
+    finding: str
+    evidence: str
+    suggestions: list[str]
+
+
+class AgentReviewCheck(TypedDict):
+    rule_key: str
+    status: Literal["satisfied", "violated", "not_assessable"]
+    evidence: str
+
+
 class AgentReviewResult(TypedDict):
     """Normalized observation produced by one AgentExecution review handler."""
 
     review_id: str
     index: int
-    required: bool
-    source: Literal["handler", "model"]
+    on_fail: AgentReviewFailureAction
+    source: Literal["handler", "model", "host"]
     handler: str | None
     passed: bool
-    score: float | None
+    quality_level: AgentReviewQuality | None
     summary: str
-    issues: list[str]
-    suggestions: list[str]
+    checks: list[AgentReviewCheck]
+    issues: list[AgentReviewIssue]
+    overall_suggestions: list[str]
 
 
 @dataclass(frozen=True, slots=True)
 class AgentReviewContext:
-    """Read-only execution context exposed to review and verification handlers."""
+    """Execution context for a replacement reviewer, including trusted artifacts."""
 
     execution: "AgentExecution"
     prompt: Mapping[str, object]
@@ -51,8 +69,9 @@ class AgentReviewContext:
     success_criteria: tuple[str, ...]
     artifact_refs: tuple[AgentArtifactResult, ...]
     task_workspace: "TaskWorkspace"
-    required: bool
+    on_fail: AgentReviewFailureAction
     index: int
+    rules: tuple[str, ...] = ()
 
 
 AgentReviewHandlerResult: TypeAlias = bool | Mapping[str, object]
@@ -64,6 +83,10 @@ AgentReviewHandler: TypeAlias = Callable[
 
 __all__ = [
     "AgentReviewContext",
+    "AgentReviewCheck",
+    "AgentReviewIssue",
+    "AgentReviewQuality",
+    "AgentReviewFailureAction",
     "AgentReviewHandler",
     "AgentReviewHandlerResult",
     "AgentReviewResult",

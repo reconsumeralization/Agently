@@ -1,14 +1,14 @@
-"""AgentExecution artifact delivery, advisory review, and required verification.
+"""AgentExecution artifact delivery, advisory review, and blocking handler review.
 
 Run:
     python examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py
 
 Environment:
     Local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434/v1).
-    AGENT_PATTERN_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen3.5:9b).
+    AGENT_PATTERN_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
 
 The model produces a release-risk brief and performs the advisory review. The
-host-owned verification checks only the declared delivery invariant: the
+host-owned handler review checks only the declared delivery invariant: the
 TaskWorkspace artifact must have a trusted physical readback before the run can
 finish successfully.
 """
@@ -52,7 +52,7 @@ RELEASE_FACTS: dict[str, Any] = {
 }
 
 
-def verify_artifact_delivery(
+def check_artifact_delivery(
     _result: object,
     context: AgentReviewContext,
 ) -> dict[str, object]:
@@ -71,13 +71,18 @@ def verify_artifact_delivery(
             if passed
             else "The declared release brief is missing its trusted TaskWorkspace readback."
         ),
-        "issues": [] if passed else ["Expected exactly one readback-verified artifact."],
-        "suggestions": [],
+        "issues": [] if passed else [{
+            "criterion": "Exactly one readback-verified artifact.",
+            "finding": "The declared artifact is missing verified readback.",
+            "evidence": str(context.artifact_refs),
+            "suggestions": ["Inspect the artifact delivery failure."],
+        }],
+        "overall_suggestions": [],
     }
 
 
 async def main() -> None:
-    model = configure_ollama_qwen(max_tokens=1800)
+    model = configure_ollama_qwen(max_tokens=2600)
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
@@ -119,11 +124,11 @@ async def main() -> None:
             format="json",
         )
         .artifact("reports/release-risk.json")
-        .review()
-        .verify(verify_artifact_delivery)
+        .review(rules=["Check that observed risks are distinguished from proposed mitigations."])
+        .review(check_artifact_delivery, on_fail="block")
     )
 
-    data = await execution.async_get_data()
+    data = await execution.async_get_data(max_retries=0)
     meta = await execution.async_get_meta()
     artifact_ref = meta["logs"]["artifact_refs"][0]
     artifact_data = json.loads(
@@ -131,7 +136,7 @@ async def main() -> None:
     )
     reviews = meta.get("reviews", [])
     if len(reviews) != 2:
-        raise RuntimeError("Expected one model review and one handler verification.")
+        raise RuntimeError("Expected one model review and one blocking handler review.")
 
     print(f"model={model}")
     print(f"decision={data['decision']}")
@@ -143,24 +148,26 @@ async def main() -> None:
     print(f"artifact_preserves_business_result={artifact_data == data}")
     print(f"review_source={reviews[0]['source']}")
     print(f"review_passed={reviews[0]['passed']}")
-    print(f"verification_source={reviews[1]['source']}")
-    print(f"verification_passed={reviews[1]['passed']}")
+    print(f"handler_review_source={reviews[1]['source']}")
+    print(f"handler_review_passed={reviews[1]['passed']}")
+    print("result=" + json.dumps(data, ensure_ascii=False))
+    print("reviews=" + json.dumps(reviews, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Expected key output from one real local qwen3.5:9b run on 2026-09-05:
-# model=qwen3.5:9b
+# Expected key output from one real local qwen run on 2026-09-05:
+# model=qwen
 # decision=proceed_with_guardrails
 # artifact_path=reports/release-risk.json
 # artifact_readback_verified=True
 # artifact_preserves_business_result=True
 # review_source=model
 # review_passed=True
-# verification_source=handler
-# verification_passed=True
+# handler_review_source=handler
+# handler_review_passed=True
 #
-# The exact decision and prose remain model-owned. The artifact, source, and
-# verification lines are the stable framework evidence surface.
+# Decisions, prose, and quality judgments remain model-owned, not fixed answers.
+# This recorded run demonstrates delivery and review; it is not a real release approval.

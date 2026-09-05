@@ -41,9 +41,8 @@ async def run_model_stage(
     """Run one explicit ModelRequest under the owning AgentExecution.
 
     Pattern stages reuse the root request's model/settings/capability contract,
-    but internal schemas never inherit the root output validator. Only a
-    terminal stage that promises the caller's result may preserve those
-    request-local extension handlers.
+    but stage schemas never inherit caller final-output validators.
+    The outer execution validates the final returned value once.
     """
 
     request = execution.agent.create_request(
@@ -118,6 +117,8 @@ async def run_model_stage(
         local_handlers = execution.request.extension_handlers.get(inherit=False)
         if isinstance(local_handlers, dict):
             request.extension_handlers.update(local_handlers)
+    # StateData merges lists with the parent; None shadows inherited callbacks.
+    request.extension_handlers.set("validate_handlers", None)
 
     await execution.emit_stream(
         "pattern.stage.started",

@@ -21,7 +21,7 @@ import inspect
 import os
 import uuid
 from pathlib import Path
-from collections.abc import AsyncGenerator, Generator, Mapping
+from collections.abc import AsyncGenerator, Generator, Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING, cast, overload
 
 import json5
@@ -284,6 +284,7 @@ class AgentExecution:
         self.artifact_declarations: list["_AgentArtifactDeclaration"] = []
         self.artifact_results: list["AgentArtifactResult"] = []
         self.review_declarations: list["_AgentReviewDeclaration"] = []
+        self._review_contract: dict[str, object] = {}
         self.review_results: list["AgentReviewResult"] = []
         self.status: AgentExecutionStatus = "created"
         self._started = False
@@ -763,6 +764,11 @@ class AgentExecution:
         return target._refresh_prompt_snapshot()
 
     def validate(self, handler: "OutputValidateHandler") -> "AgentExecution":
+        """Hard-check this call's final output, not internal Pattern/task steps.
+
+        Direct request repair remains request-owned. Assembled/AgentTask
+        results are checked once without replaying steps or side effects.
+        """
         target = self._reconfiguration_target()
         target._draft.validate(handler)
         return target
@@ -1155,13 +1161,17 @@ class AgentExecution:
         """Bind one execution-local connected human-interaction handler."""
         return declare_interaction(self, handler)
 
-    def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
-        """Add an advisory post-run review; its verdict does not fail the run."""
-        return declare_review(self, required=False, handler=handler)
+    def review(
+        self, handler: "AgentReviewHandler | None" = None, *,
+        rules: str | Sequence[str] | None = None,
+        on_fail: Literal["warn", "block"] = "warn",
+    ) -> "AgentExecution":
+        """Review final output and artifacts using rules or a replacement handler.
 
-    def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
-        """Add a required post-run verification that can fail this execution."""
-        return declare_review(self, required=True, handler=handler)
+        on_fail warns by default or blocks delivery with AgentReviewError.
+        It does not change the evaluator's rubric or replay execution steps.
+        """
+        return declare_review(self, handler=handler, rules=rules, on_fail=on_fail)
 
     def artifact(
         self,

@@ -437,6 +437,10 @@ async def run_plan_pattern(
             snapshot.get("clarification_round", 0)
         )
         execution.diagnostics["pattern_run"] = diagnostic
+    execution._review_contract = {
+        "deliverable_role": "An actionable plan, not execution of the planned task.",
+        "clarifications": snapshot.get("clarifications", []),
+    }
     return snapshot["pattern_result"]
 
 

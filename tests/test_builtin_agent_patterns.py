@@ -1,13 +1,13 @@
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.types.data import AgentlyRequestData, ExecutionExchangeView
+from agently.types.data import AgentlyRequestData, ExecutionExchangeView, OutputValidateResultDict
 from agently.utils import Settings
 
 
@@ -274,6 +274,8 @@ async def test_plan_pattern_uses_execution_exchange_for_clarification(tmp_path):
             "environment": "staging"
         }
         assert execution.diagnostics["pattern_run"]["clarification_rounds"] == 1
+        assert cast(list[dict[str, Any]], execution._review_contract["clarifications"])[0]["response"] == {"environment": "staging"}
+        assert "not execution" in str(execution._review_contract["deliverable_role"])
         paths = [item.path for item in execution.stream.items]
         assert "exchange.pending" in paths
         assert "exchange.resolved" in paths
@@ -468,6 +470,71 @@ async def test_long_content_pattern_composes_with_artifact_and_review(tmp_path):
     paths = [item.path for item in execution.stream.items]
     assert paths.index("pattern.completed") < paths.index("artifact.completed")
     assert paths.index("artifact.completed") < paths.index("review.started")
+
+
+@pytest.mark.asyncio
+async def test_final_validator_checks_assembled_document_once_without_replay(tmp_path):
+    agent = create_pattern_agent(tmp_path, "document-validator", [
+        {"document_title": "Report", "sections": [
+            {"section_id": "s1", "title": "Summary", "brief": "Summarize."},
+        ]},
+        {"body": "Document body.", "continuity_note": ""},
+    ])
+    checked = []
+    agent.validate(lambda value, context: checked.append((value, context)) or False)
+    execution = agent.input("Write a report.").pattern("long_content").artifact("rejected.md")
+    with pytest.raises(ValueError, match="Output validation failed"):
+        await execution.async_get_data(max_retries=3)
+    assert len(checked) == 1
+    value, context = checked[0]
+    assert value["value"] == "# Report\n\n## Summary\n\nDocument body."
+    assert context.parsed_result == value["value"]
+    assert context.max_retries == 0
+    assert context.model_run_context is None
+    assert context.response_id == ""
+    assert len(ScriptedPatternRequester.requests) == 2
+    assert execution.artifact_results == []
+
+
+@pytest.mark.asyncio
+async def test_wrapper_validator_only_sees_transformed_default_result(tmp_path):
+    agent = create_pattern_agent(tmp_path, "wrapper-validator", ["raw"])
+    checked = []
+
+    async def wrapper(_execution, run_default):
+        return {"wrapped": await run_default()}
+
+    def validator(value, _context):
+        checked.append(value)
+        return value == {"wrapped": "raw"}
+
+    agent.validate(validator)
+    execution = agent.input("Produce text.").pattern(wrapper)
+    assert await execution.async_get_data() == {"wrapped": "raw"}
+    assert checked == [{"wrapped": "raw"}]
+    assert len(ScriptedPatternRequester.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_task_final_validation_does_not_replay_task(tmp_path, monkeypatch):
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules import route_execution
+    agent = create_pattern_agent(tmp_path, "task-validator", [])
+    calls, checked = [], []
+
+    async def task(_execution, _route_meta):
+        calls.append("task")
+        return {"final_response": "done"}
+
+    async def validator(value, _context) -> OutputValidateResultDict:
+        checked.append(value)
+        return {"ok": False, "no_retry": True, "reason": "Final business gate rejected."}
+
+    monkeypatch.setattr(route_execution, "run_agent_task_route", task)
+    execution = agent.goal("Complete a task.").strategy("flat")
+    with pytest.raises(ValueError, match="Final business gate"):
+        await execution.async_get_data(validate_handler=validator, max_retries=5)
+    assert calls == ["task"]
+    assert checked == [{"final_response": "done"}]
 
 
 @pytest.mark.asyncio

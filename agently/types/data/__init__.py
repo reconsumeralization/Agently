@@ -359,6 +359,10 @@ from .agent_execution import (
 )
 
 from .agent_review import (
+    AgentReviewQuality as AgentReviewQuality,
+    AgentReviewFailureAction as AgentReviewFailureAction,
+    AgentReviewIssue as AgentReviewIssue,
+    AgentReviewCheck as AgentReviewCheck,
     AgentReviewContext as AgentReviewContext,
     AgentReviewHandler as AgentReviewHandler,
     AgentReviewHandlerResult as AgentReviewHandlerResult,

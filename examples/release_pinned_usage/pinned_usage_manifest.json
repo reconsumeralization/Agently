@@ -134,7 +134,7 @@
     },
     {
       "path": "examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py",
-      "reason": "Real local Qwen AgentExecution result generation followed by TaskWorkspace artifact readback, model-backed advisory review, and handler-backed required verification.",
+      "reason": "Real local Qwen AgentExecution result generation followed by TaskWorkspace artifact readback, model-backed review rules, and handler-backed review blocking.",
       "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
     },
     {
@@ -183,7 +183,7 @@
       ]
     },
     {
-      "work": "stable AgentExecution artifact, review, verification, and optional handler typing",
+      "work": "stable AgentExecution artifact, review rules and failure actions, final-output validation, and optional handler typing",
       "examples": ["examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py"]
     },
     {

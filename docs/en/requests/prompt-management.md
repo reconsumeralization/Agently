@@ -387,9 +387,20 @@ not final-prompt evidence when runtime extensions can inject later.
 
 ## Placeholders
 
-Inside any prompt slot, `{name}` references another slot by key, and `${name}` is replaced by `mappings={"name": "value"}` at load time. Common patterns:
+Distinguish literal model-facing references from framework substitutions:
 
-- `instruct: "Reply {input} politely."` — pulls the request `input` into the instruct text.
+- `instruct: "Assess [input.candidate] using [info.rules]; return [output]."`
+  uses literal mentions to direct model attention to existing content. The
+  references stay unchanged; no copying, substitution, or renderer support is
+  required. Use an ordinary string, not a Python f-string or `.format(...)`.
+  Backticks around field paths or unambiguous literal braces also work as a
+  writing convention; clear reference matters, not a mandatory delimiter.
+- Keep facts/rubrics in `info`, field constraints in `output`, and behavior
+  in `instruct`. Refer to the owning section instead of repeating it.
+  The referenced content must be present; a mention does not load evidence,
+  trigger progressive disclosure, or validate a path.
+- `${name}` with explicit `mappings={"name": "value"}` performs value
+  substitution at load time. It is different from a literal mention.
 - `${ENV.OPENAI_API_KEY}` in *settings* (not prompts) is replaced by the env var; prompts use `${name}` with explicit mappings.
 - `${INPUT.customer}`, `${INFO.policy}`, and `${INSTRUCT.step}` are render-time
   slot references. They become prompt section pointers such as
@@ -403,6 +414,15 @@ To trigger placeholder substitution while loading, pass `mappings=...` explicitl
 ```python
 agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 ```
+
+## Qualitative evaluation
+
+For qualitative review, define descriptive levels and their boundaries in the
+rubric and constrain the output label. Do not ask the model to invent numeric
+quality scores or probabilities. Keep mandatory acceptance and evidence
+sufficiency separate from quality levels. Label-to-number mappings are ordinal
+policy codes, not measured quality; compute numeric metrics from recorded facts
+with an explicit formula, unit, and missing-data policy.
 
 ## Where each layer's prompt comes from
 

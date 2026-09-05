@@ -23,7 +23,7 @@ assert_type(execution.require_actions(lookup), AgentExecution)
 assert_type(execution.use_skills("writer"), AgentExecution)
 assert_type(execution.pattern("plan"), AgentExecution)
 assert_type(execution.review(), AgentExecution)
-assert_type(execution.verify(), AgentExecution)
+assert_type(execution.review(rules="Check the declared result contract.", on_fail="block"), AgentExecution)
 assert_type(execution.artifact("report.md"), AgentExecution)
 
 

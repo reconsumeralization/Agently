@@ -9,7 +9,7 @@ keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, Pattern, Action, Skill,
 Agently 4.1.4.8 is an execution-composition and developer-experience release.
 It makes one-run Agent code easier to read in an IDE while preserving the same
 runtime owner: a fluent chain keeps returning one `AgentExecution`, and its
-Actions, Skills, interaction handler, reviews, verification, and artifacts stay
+Actions, Skills, interaction handler, reviews and artifacts stay
 request-local unless the caller explicitly opts into Agent defaults.
 
 The release requires Python 3.10 or newer and `agently-stage >=0.3.8,<0.4.0`.
@@ -81,15 +81,15 @@ where the public contract permits them.
 | Action Runtime | `programmatic` planning can execute one bounded read-only Action micro-DAG; Actions declare `parallel` or `exclusive` concurrency. | Keep `structured_plan` as the default; opt into `programmatic` only with eligible Actions and an isolated code provider. | Explicit opt-in, policy-gated, no universal cost/latency promise. | Action runtime suites and `examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py`. |
 | Action delivery and debug | Terminal Action responses reuse the existing execution result; concurrent console streams display in first-delta FIFO order without serializing execution. | Use `debug=True` for readable output and EventCenter/DevTools for complete facts. | Display-only change; event and execution ordering remain authoritative. | Pinned examples 04 and 05 plus console/action tests. |
 | Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; script discovery returns inert candidates until explicit host authorization. | Use `always=True` for Agent defaults and execution methods for one-run additions. | Fail-closed scope; no implicit script actionization. | Pinned examples 03 and 07, Skills tests, Agently-Skills V2 guidance. |
-| Agent delivery policies | `interact`, advisory `review`, required `verify`, and verified TaskWorkspace `artifact` delivery are stable public methods. | Attach handlers to the execution that owns the result and artifact. | Additive; verification can fail a terminal run by design. | Examples 25 and 26 and AgentExecution handler/artifact tests. |
+| Agent delivery policies | `interact`, `review(rules=..., on_fail=...)`, and verified TaskWorkspace `artifact` delivery are stable public methods. | Attach handlers to the execution that owns the result and artifact. | Additive; blocking review can prevent terminal success. | Examples 25 and 26 and AgentExecution handler/artifact tests. |
 | Patterns | Bundled `plan` and `long_content` whole-request Patterns are available through `.pattern(...)`. | Opt in per execution and keep the final business value on AgentExecution. | Beta; bundled multi-request Patterns reject incompatible delivery contracts before dispatch. | Examples 26 and 27 plus Pattern isolation and contract tests. |
 | MCP | Playwright MCP examples cover local lifecycle and model-driven browser use. | Use ExecutionResource-owned MCP sessions and close them deterministically. | External runtime/browser dependency. | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` and `2_4_mcp_playwright_agent_qwen.py`. |
 
 ## Examples Added For This Release
 
 - `examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py`
-  proves real local-Qwen generation, model-backed review, required handler
-  verification, and physical artifact readback.
+  proves real local-Qwen generation, model-backed review, required blocking handler
+  review, and physical artifact readback.
 - `examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py`
   proves one connected clarification exchange and a validated plan artifact.
 - `examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py`

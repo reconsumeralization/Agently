@@ -19,7 +19,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.application.AgentExecution import (
     AgentExecutionLimitExceeded,
-    AgentVerificationError,
+    AgentReviewError,
     RuntimeStageStallError,
 )
 from agently.core.runtime.RuntimeContext import bind_runtime_context
@@ -28,6 +28,7 @@ from agently.utils import DataFormatter
 from .artifact import run_declared_artifacts
 from .long_output import LongOutputError
 from .pattern import run_selected_pattern
+from .output_validation import validate_final_output
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
 from .review import run_declared_reviews
@@ -56,20 +57,43 @@ async def async_execute_route(
     raise_ensure_failure: bool,
 ) -> tuple[str, object]:
     with bind_runtime_context(agent_execution_context=owner.execution_context):
+        selection = owner.pattern_selection
+        defer_validation = selection is not None and not (
+            isinstance(selection, str) and selection in {"request", "goal"}
+        )
+        registered = owner.request.extension_handlers.get("validate_handlers", [])
+        local_handlers = owner.request.extension_handlers.get(inherit=False)
+        handlers = list(registered) if isinstance(registered, list) else []
+        if validate_handler is not None:
+            handlers.extend(validate_handler if isinstance(validate_handler, list) else [validate_handler])
+        if defer_validation:
+            # Shield run_default() as well: an extension may transform its result.
+            # None shadows inherited callbacks; an empty list would merge them.
+            owner.request.extension_handlers.set("validate_handlers", None)
+
         async def run_default_route() -> tuple[str, object]:
             return await _execute_default_route(
                 owner,
                 type=type,
                 ensure_keys=ensure_keys,
                 ensure_all_keys=ensure_all_keys,
-                validate_handler=validate_handler,
+                validate_handler=None if defer_validation else validate_handler,
                 key_style=key_style,
                 max_retries=max_retries,
                 raise_ensure_failure=raise_ensure_failure,
             )
 
-        route, result = await run_selected_pattern(owner, run_default_route)
+        try:
+            route, result = await run_selected_pattern(owner, run_default_route)
+        finally:
+            if defer_validation:
+                if isinstance(local_handlers, dict) and "validate_handlers" in local_handlers:
+                    owner.request.extension_handlers.set("validate_handlers", local_handlers["validate_handlers"])
+                else:
+                    owner.request.extension_handlers.delete("validate_handlers")
         owner.result = result
+        if owner.status in {"running", "success", "completed"} and (defer_validation or route == "agent_task"):
+            await validate_final_output(owner, result, handlers)
         if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
             await run_declared_artifacts(owner, result)
         if owner.status in {"running", "success", "completed"} and owner.review_declarations:
@@ -257,7 +281,7 @@ async def start_execution(
             )
             await _finalize_terminal_execution(owner, terminal_status="failed")
             raise
-        except AgentVerificationError as error:
+        except AgentReviewError as error:
             owner.status = "blocked"
             owner._error = error
             error_projection = owner._record_error_diagnostic(error)

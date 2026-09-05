@@ -8,7 +8,7 @@ keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, Pattern, Action, Skill,
 
 Agently 4.1.4.8 聚焦执行组合与开发体验。单次 Agent 代码在 IDE 中更容易阅读：
 fluent chain 会持续返回同一个 `AgentExecution`，其 Actions、Skills、interaction
-handler、review、verification 与 artifact 均保持本轮局部。支持 `always` 参数的
+handler、review 与 artifact 均保持本轮局部。支持 `always` 参数的
 配置方法只有在显式使用 `always=True` 时才写入 Agent 默认配置。
 
 本版要求 Python 3.10 或更高版本以及 `agently-stage >=0.3.8,<0.4.0`；推荐
@@ -78,14 +78,14 @@ IDE 会为 `pattern`、`effort`、`strategy`、`planning_protocol` 和 Action
 | Action Runtime | `programmatic` planning 可执行一个有界、只读的 Action micro-DAG；Action 可声明 `parallel` / `exclusive`。 | 默认继续使用 `structured_plan`；仅在 Action 合格且有隔离 code provider 时显式启用。 | 显式 opt-in、受 policy 约束，不承诺普遍降低成本或延迟。 | Action runtime suites 与 `examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py`。 |
 | Action 交付与 debug | 终态 Action response 复用当前 execution result；并发 console stream 按 first-delta FIFO 展示且不串行化执行。 | `debug=True` 用于可读展示，EventCenter/DevTools 保存完整事实。 | 仅展示层改变；事件和执行顺序仍由运行时负责。 | Pinned examples 04、05 与 console/action tests。 |
 | Skills | Agent 默认与 execution-local 声明冻结一个 exact-revision scope；script discovery 只返回 inert candidate，等待 host 显式授权。 | Agent 默认使用 `always=True`，本轮增量使用 execution 方法。 | Scope fail-closed；无隐式 script actionization。 | Pinned examples 03、07、Skills tests、Agently-Skills V2 guidance。 |
-| Agent 交付策略 | `interact`、advisory `review`、required `verify` 与经 TaskWorkspace 校验的 `artifact` 成为稳定公开方法。 | 把 handler 绑定在拥有结果与 artifact 的 execution 上。 | 增量能力；verification 按设计可以使终态运行失败。 | Examples 25、26 与 AgentExecution handler/artifact tests。 |
+| Agent 交付策略 | `interact`、`review(rules=..., on_fail=...)` 与经 TaskWorkspace 校验的 `artifact` 成为稳定公开方法。 | 把 handler 绑定在拥有结果与 artifact 的 execution 上。 | 增量能力；blocking review 可以阻止终态成功。 | Examples 25、26 与 AgentExecution handler/artifact tests。 |
 | Patterns | 通过 `.pattern(...)` 提供内置 `plan` 与 `long_content` whole-request Pattern。 | 每次 execution 显式选择，最终业务值仍由 AgentExecution 交付。 | Beta；不兼容的 delivery contract 会在 dispatch 前失败。 | Examples 26、27 与 Pattern isolation/contract tests。 |
 | MCP | Playwright MCP examples 覆盖本地生命周期与模型驱动浏览器使用。 | 让 ExecutionResource 管理 MCP session 并确定性关闭。 | 依赖外部 runtime/browser。 | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` 与 `2_4_mcp_playwright_agent_qwen.py`。 |
 
 ## 本版补齐的 Examples
 
 - `25_agent_execution_delivery_review_ollama.py`：真实本地 Qwen 生成、模型 review、
-  required handler verification 与物理 artifact readback。
+  blocking handler review 与物理 artifact readback。
 - `26_plan_pattern_interaction_ollama.py`：一次 connected clarification exchange、
   host-validated plan 与 artifact 交付。
 - `27_long_content_pattern_artifact_ollama.py`：section planning/writing、host 顺序组装、

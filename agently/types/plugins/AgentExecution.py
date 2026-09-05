@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Sequence
 from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
 from typing_extensions import overload
 
@@ -64,6 +64,7 @@ class AgentExecution(Protocol):
     """Response-style contract for one bounded Agent execution object."""
 
     id: str
+    _review_contract: dict[str, object]
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
     options: Any
@@ -128,12 +129,16 @@ class AgentExecution(Protocol):
         """Bind one connected human-interaction handler to this execution."""
         ...
 
-    def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution":
-        """Add an advisory post-run review; its verdict does not fail the run."""
-        ...
+    def review(
+        self, handler: AgentReviewHandler | None = None, *,
+        rules: str | Sequence[str] | None = None,
+        on_fail: Literal["warn", "block"] = "warn",
+    ) -> "AgentExecution":
+        """Review final output and artifacts using rules or a replacement handler.
 
-    def verify(self, handler: AgentReviewHandler | None = None) -> "AgentExecution":
-        """Add a required post-run verification that can fail the execution."""
+        on_fail warns by default or blocks delivery with AgentReviewError.
+        It does not change the evaluator's rubric or replay execution steps.
+        """
         ...
 
     def artifact(
@@ -208,7 +213,9 @@ class AgentExecution(Protocol):
 
     def get_result(self) -> "AgentExecutionResult": ...
 
-    def validate(self, handler: OutputValidateHandler) -> "AgentExecution": ...
+    def validate(self, handler: OutputValidateHandler) -> "AgentExecution":
+        """Hard-check the final returned output; never intermediate task/Pattern steps."""
+        ...
 
     def create_dynamic_task(self, *args: Any, **kwargs: Any) -> Any: ...
 

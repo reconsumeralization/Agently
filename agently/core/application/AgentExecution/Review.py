@@ -19,13 +19,13 @@ from typing import cast
 from agently.types.data import AgentReviewResult
 
 
-class AgentVerificationError(RuntimeError):
-    """Raised when a required AgentExecution review rejects its candidate."""
+class AgentReviewError(RuntimeError):
+    """Raised when a blocking AgentExecution review rejects its candidate."""
 
     def __init__(self, review: AgentReviewResult) -> None:
         self.review = cast(AgentReviewResult, dict(review))
-        summary = str(review.get("summary") or "Candidate failed required verification.").strip()
-        super().__init__(summary or "Candidate failed required verification.")
+        summary = str(review.get("summary") or "Final result blocked by review.").strip()
+        super().__init__(summary or "Final result blocked by review.")
 
 
-__all__ = ["AgentVerificationError"]
+__all__ = ["AgentReviewError"]

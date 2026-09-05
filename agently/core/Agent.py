@@ -1305,6 +1305,11 @@ class BaseAgent:
         return agent_execution
 
     def validate(self, handler: "OutputValidateHandler") -> Self:
+        """Register a hard final-output validator for requests and executions.
+
+        Internal Pattern/AgentTask steps are not checked by this callback.
+        Use execution.validate(...) for a single execution-local declaration.
+        """
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
@@ -1833,13 +1838,17 @@ class BaseAgent:
         """Bind a connected human-interaction handler to a fresh execution."""
         return self.create_execution().interact(handler)
 
-    def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
-        """Add an advisory post-run review to a fresh execution."""
-        return self.create_execution().review(handler)
+    def review(
+        self, handler: "AgentReviewHandler | None" = None, *,
+        rules: str | Sequence[str] | None = None,
+        on_fail: Literal["warn", "block"] = "warn",
+    ) -> "AgentExecution":
+        """Review final output and artifacts using rules or a replacement handler.
 
-    def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
-        """Add a required post-run verification to a fresh execution."""
-        return self.create_execution().verify(handler)
+        on_fail warns by default or blocks delivery with AgentReviewError.
+        It does not change the evaluator's rubric or replay execution steps.
+        """
+        return self.create_execution().review(handler, rules=rules, on_fail=on_fail)
 
     def artifact(
         self,
