@@ -10,7 +10,7 @@ def configure_ollama_qwen(*, max_tokens: int, temperature: float = 0.0) -> str:
 
     model = os.getenv(
         "AGENT_PATTERN_OLLAMA_MODEL",
-        os.getenv("OLLAMA_DEFAULT_MODEL", "qwen3.5:9b"),
+        os.getenv("OLLAMA_DEFAULT_MODEL", "qwen"),
     )
     Agently.set_settings(
         "OpenAICompatible",

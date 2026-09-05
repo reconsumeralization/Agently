@@ -28,13 +28,7 @@ from examples.agent_auto_orchestration._ollama_qwen import (  # noqa: E402
     configure_ollama_qwen,
 )
 
-
-RUNTIME_ROOT = (
-    ROOT
-    / ".example_runtime"
-    / "agent_auto_orchestration"
-    / "long_content_pattern_artifact"
-)
+RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "long_content_pattern_artifact"
 
 SOURCE_FACTS = {
     "current_state": "three services each parse customer locale independently",
@@ -57,11 +51,12 @@ async def main() -> None:
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent(
-        "long-content-pattern-artifact-ollama"
-    ).use_task_workspace(RUNTIME_ROOT, mode="read_write")
+    agent = Agently.create_agent("long-content-pattern-artifact-ollama").use_task_workspace(
+        RUNTIME_ROOT, mode="read_write"
+    )
     agent.set_settings("plugins.AgentPattern.long_content.max_sections", 3)
     agent.set_settings("plugins.AgentPattern.long_content.continuity_chars", 800)
+    agent.set_settings("debug", True)
     execution = (
         agent.input({"migration_facts": SOURCE_FACTS})
         .instruct(
