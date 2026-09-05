@@ -96,32 +96,30 @@ pack = await Agently.skills_executor.async_build_context_pack(
 ```
 
 该方法创建临时 TaskContext，并使用与普通 execution 相同的 ContextReader
-contract。`actionize_scripts=True` 会返回 inert、状态为 `binding_required` 的
-Action candidates 和 diagnostic，但不会挂载或授权它们。宿主代码可以把可信精确
-revision 中的 script 显式绑定成普通 Workspace-backed
-`code_execution` Action，执行所有权仍属于 ActionRuntime 与 ExecutionResource。
+contract。仅为兼容保留的 `actionize_scripts=True` 仍把选中的 script 作为普通
+resource descriptor 返回，并发出 `skills.compat.actionize_scripts_ignored`；它不会发现、
+生成、挂载或授权 Action。
+
+普通 AgentExecution 应先准备 Skill scope，再显式为所需语言启用一个受限的 script-exec
+Action。模型只传相对 `script_path` 与有界 `args`；宿主根据本次 execution 已冻结的
+精确 revision bindings 解析路径，并把实际 revision、path、digest 写入 Action evidence。
+启用 Action 不会让已准备的 TaskContext 失效，也不会再次执行 Skill applicability
+selection。
 
 ```python
 from agently.types.data import SkillScriptAuthorization
 
 await execution.async_prepare_task_context()
-binding = next(
-    item
-    for item in execution.skill_bindings
-    if item.revision_ref == contract["revision_ref"]
-)
-bound = agent.bind_skill_script_action(
+exec_action_id = agent.enable_skill_script_exec(
     execution,
-    binding_id=binding.binding_id,
-    resource_path="scripts/check.py",
     authorization=SkillScriptAuthorization(
         auto_allow=True,
         expected_outputs=("output/report.json",),
     ),
 )
 action_result = await agent.action.async_execute_action(
-    bound.action_id,
-    {"args": []},
+    exec_action_id,
+    {"script_path": "scripts/check.py", "args": []},
 )
 artifact = next(
     item
@@ -131,12 +129,43 @@ artifact = next(
 readback = await execution.task_workspace.read_file(artifact["path"])
 ```
 
-binder 会根据有序 `code_execution.providers` setting 注册自己的窄 provider
-requirement。不要只为执行该脚本调用 `enable_code_runtime(...)`，否则会额外暴露一个
-通用代码 Action。trust 是 package provenance policy，不是脚本执行授权；只有成功
-Action 记录加 TaskWorkspace readback 才能证明副作用和实际回收的 bytes。发布后的
-artifact path 是 `.agently/files/.../code_execution/.../output/` 下的
-TaskWorkspace-relative 私有路径。
+`enable_skill_script_exec(...)` 为每个 Agent/语言复用一个稳定的普通 Action 定义，
+并只在当前 execution 的 Action scope 和 execution context 中绑定授权；它不会为每个
+script 或每个用户回合生成新 Action。若多个已绑定
+Skill 含有相同相对路径，应收窄本次 execution 的 Skill 声明；也可以用已发布的
+`bind_skill_script_action(...)` 兼容 API 显式绑定精确路径。不要只为执行 Skill script
+调用 `enable_code_runtime(...)`，否则会额外暴露一个通用代码 Action。trust 是 package
+provenance policy，不是脚本执行授权；只有成功 Action 记录加 TaskWorkspace readback
+才能证明副作用和实际回收的 bytes。发布后的 artifact path 是
+`.agently/files/.../code_execution/.../output/` 下的 TaskWorkspace-relative 私有路径。
+
+### 后续用户消息重新需要 Skill
+
+每个用户请求使用一个新的 AgentExecution。Session 只延续对话和 memory，不延续上一轮
+的 Skill bindings、Action scope 或脚本授权。把可能相关的 Skill 按普通 Action 组合语法
+声明为 Agent 默认候选；每个新 execution 都根据当前消息重新判断是否选择它：
+
+```python
+agent.use_skills([contract["skill_id"]], always=True)
+
+# 第一条消息不需要脚本：本次 selector 可以不选择该 Skill，也不启用 Action。
+first = agent.create_execution().input(first_user_message)
+first_result = await first.async_get_data()
+
+# 后续消息提出脚本任务：必须创建新的 execution。
+later = agent.create_execution().input(later_user_message)
+await later.async_prepare_task_context()
+if later.skill_bindings:  # 应用仍须执行自己的 allowlist / policy 判断
+    agent.enable_skill_script_exec(
+        later,
+        authorization=SkillScriptAuthorization(auto_allow=True),
+    )
+later_result = await later.async_get_data()
+```
+
+已经启动的 execution 和已经发出的 ModelRequest 都是快照，不能热注入新 Skill 或 Action。
+如果在启动前、授权后又修改 prompt 或 Skill 声明，框架会撤销依赖旧 TaskContext 的脚本
+授权和 Action 可见性；重新准备并再次显式授权即可。
 
 ## 已发布的执行便捷 adapter
 

@@ -154,13 +154,18 @@ A per-execution stream of items emitted by chunks via `data.put_into_stream(...)
 
 The owner of installed real-world Skill packages: discovery, validation,
 immutable revisions, trust state, resource graphs, and exact resource reads.
-Skill guidance reaches a task through a `TaskContext` source; authorized Skill
-scripts bind as ordinary Workspace-backed CodeExecution Actions. SkillLibrary
-does not select task routes or execute Skills. It is not automatically exposed
-as a model-visible candidate set. Skills compose like Actions:
+Skill guidance reaches a task through a `TaskContext` source. Authorized Skill
+scripts execute through one stable restricted CodeExecution Action definition
+per Agent/language, with authorization and visibility bound only to the current
+execution; scripts are resources, not separately
+discovered Action candidates. SkillLibrary does not select task routes or
+execute Skills. It is not automatically exposed as a model-visible candidate
+set. Skills compose like Actions:
 `agent.use_skills(..., always=True)` supplies Agent defaults and
 `execution.use_skills(...)` supplies one-run additions; AgentExecution freezes
-their exact revisions for that run. See
+their exact revisions for that run. A later user message creates a fresh
+AgentExecution and selects against its current task; Session carries only
+conversation and memory. See
 [SkillsExecutor Migration](../development/skills-executor.md).
 
 ## seal / sealed

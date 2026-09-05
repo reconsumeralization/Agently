@@ -242,6 +242,7 @@ class AgentExecutionContext:
         self._progress_callback: Callable[[dict[str, Any]], Any] | None = None
         self._exchange_callback: Callable[[str, list[dict[str, Any]], dict[str, Any]], Any] | None = None
         self.action_scope: dict[str, Any] = {}
+        self._skill_script_exec_authorizations: dict[str, dict[str, Any]] = {}
         self.action_artifact_recall_records: list[dict[str, Any]] = []
         self.action_records: list[dict[str, Any]] = []
         self._seen_action_record_keys: set[str] = set()
@@ -320,6 +321,20 @@ class AgentExecutionContext:
                 ]
             ],
             "action_scope": DataFormatter.sanitize(dict(self.action_scope)),
+            "skill_script_exec": {
+                "authorized_actions": [
+                    {
+                        "action_id": action_id,
+                        "language": str(value.get("language") or ""),
+                        "binding_ids": [
+                            str(getattr(binding, "binding_id", ""))
+                            for binding in value.get("bindings", ())
+                        ],
+                        "expected_outputs": list(value.get("expected_outputs", ())),
+                    }
+                    for action_id, value in self._skill_script_exec_authorizations.items()
+                ]
+            },
             "action_artifact_recall": {
                 "record_count": len(self.action_artifact_recall_records),
                 "artifact_ref_count": sum(
@@ -378,6 +393,62 @@ class AgentExecutionContext:
             return None
         normalized = {str(item).strip() for item in ids if str(item).strip()}
         return normalized or None
+
+    def set_skill_script_exec_authorization(
+        self,
+        action_id: str,
+        *,
+        language: str,
+        bindings: tuple[Any, ...],
+        expected_outputs: tuple[str, ...],
+    ) -> None:
+        """Bind one stable script Action to this execution's exact Skill scope."""
+
+        normalized_action_id = str(action_id or "").strip()
+        normalized_language = str(language or "").strip()
+        if not normalized_action_id or not normalized_language:
+            raise ValueError("Skill script authorization requires an Action id and language.")
+        if not bindings:
+            raise ValueError("Skill script authorization requires exact Skill bindings.")
+        for binding in bindings:
+            if str(getattr(binding, "task_id", "")) != self.execution_id:
+                raise PermissionError("Skill binding belongs to another AgentExecution.")
+        self._skill_script_exec_authorizations[normalized_action_id] = {
+            "execution_id": self.execution_id,
+            "language": normalized_language,
+            "bindings": tuple(bindings),
+            "expected_outputs": tuple(str(item) for item in expected_outputs),
+        }
+
+    def get_skill_script_exec_authorization(
+        self,
+        action_id: str,
+    ) -> dict[str, Any] | None:
+        value = self._skill_script_exec_authorizations.get(str(action_id or ""))
+        if value is None:
+            return None
+        return {
+            **value,
+            "bindings": tuple(value.get("bindings", ())),
+            "expected_outputs": tuple(value.get("expected_outputs", ())),
+        }
+
+    def clear_skill_script_exec_authorizations(
+        self,
+        action_ids: set[str] | tuple[str, ...] | list[str] | None = None,
+    ) -> tuple[str, ...]:
+        selected = (
+            set(self._skill_script_exec_authorizations)
+            if action_ids is None
+            else {str(item) for item in action_ids}
+        )
+        removed: list[str] = []
+        for action_id in tuple(self._skill_script_exec_authorizations):
+            if action_id not in selected:
+                continue
+            self._skill_script_exec_authorizations.pop(action_id, None)
+            removed.append(action_id)
+        return tuple(removed)
 
     def set_action_artifact_recall_records(
         self,

@@ -300,7 +300,13 @@ class ActionExtension(BaseAgent):
         if not allowed_ids:
             scoped_list = action_list
         else:
-            scoped_list = [item for item in action_list if self._action_item_id(item) in allowed_ids]
+            # Explicit execution scope is authoritative even for a stable Action
+            # definition that is deliberately not tagged as an Agent default.
+            scoped_list = [
+                item
+                for item in self.action.get_action_list()
+                if self._action_item_id(item) in allowed_ids
+            ]
         recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
         if callable(recall_records):
             scoped_list = self.action._with_action_artifact_recall_action(
