@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .Task import AgentTask
+from agently.builtins.plugins.AgentExecution.long_task import AgentTask as AgentTask
 
 __all__ = ["AgentTask"]

@@ -1,15 +1,15 @@
-"""Built-in beta plan Pattern with request-local connected clarification.
+"""Built-in plan Execution with request-local connected clarification.
 
 Run:
-    python examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py
+    python examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py
 
 Environment:
     Local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434/v1).
-    AGENT_PATTERN_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen3.5:9b).
+    AGENT_EXECUTION_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
 
 The readiness stage must ask for the deliberately omitted delivery format. The
 request-local interaction handler answers the resulting ExecutionExchange, and
-the Pattern then returns an actionable plan through the caller's output contract.
+the Execution then returns an actionable plan through the caller's output contract.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ RUNTIME_ROOT = (
     ROOT
     / ".example_runtime"
     / "agent_auto_orchestration"
-    / "plan_pattern_interaction"
+    / "plan_execution_interaction"
 )
 
 
@@ -148,12 +148,12 @@ async def main() -> None:
         }
 
     agent = Agently.create_agent(
-        "plan-pattern-interaction-ollama"
+        "plan-execution-interaction-ollama"
     ).use_task_workspace(RUNTIME_ROOT, mode="read_write")
-    agent.set_settings("plugins.AgentPattern.plan.max_questions_per_round", 2)
-    agent.set_settings("plugins.AgentPattern.plan.max_clarification_rounds", 2)
+    agent.set_settings("plugins.AgentExecution.plan.max_questions_per_round", 2)
+    agent.set_settings("plugins.AgentExecution.plan.max_clarification_rounds", 2)
     execution = (
-        agent.input({"workshop_request": WORKSHOP_FACTS})
+        agent.create_execution("plan").input({"workshop_request": WORKSHOP_FACTS})
         .instruct(
             "Create the implementation plan, not the workshop materials. Ask for any supplied "
             "constraint explicitly marked as materially missing before finalizing. Treat the "
@@ -201,15 +201,14 @@ async def main() -> None:
         )
         .validate(validate_plan)
         .interact(answer_clarification)
-        .pattern("plan")
         .artifact("reports/workshop-plan.json")
     )
 
     plan = await execution.async_get_data()
     meta = await execution.async_get_meta()
-    pattern_run = meta["diagnostics"].get("pattern_run")
-    if pattern_run is None:
-        raise RuntimeError("Expected plan Pattern diagnostics.")
+    execution_run = meta["diagnostics"].get("execution_run")
+    if execution_run is None:
+        raise RuntimeError("Expected plan Execution diagnostics.")
     artifact_ref = meta["logs"]["artifact_refs"][0]
     artifact_plan = json.loads(
         (RUNTIME_ROOT / artifact_ref["path"]).read_text(encoding="utf-8")
@@ -221,10 +220,10 @@ async def main() -> None:
         "interaction_kind="
         f"{clarification_views[0]['kind'] if clarification_views else None}"
     )
-    print(f"pattern_name={meta['pattern']['name']}")
-    print(f"pattern_status={meta['pattern']['status']}")
-    print(f"clarification_rounds={pattern_run['clarification_rounds']}")
-    print(f"model_request_count={pattern_run['model_request_count']}")
+    print(f"execution_name={meta['plugin']}")
+    print(f"execution_status={meta['status']}")
+    print(f"clarification_rounds={execution_run['clarification_rounds']}")
+    print(f"model_request_count={execution_run['model_request_count']}")
     print(f"plan_step_count={len(plan['steps'])}")
     print(f"delivery_format={plan['delivery_format']}")
     print(
@@ -239,15 +238,15 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Expected key output from one real local qwen3.5:9b run on 2026-09-05:
+# Recorded local qwen3.5:9b execution-plugin run (2026-09-05):
 # model=qwen3.5:9b
 # interaction_calls=1
 # interaction_kind=clarification
-# pattern_name=plan
-# pattern_status=completed
+# execution_name=plan
+# execution_status=success
 # clarification_rounds=1
 # model_request_count=3
-# plan_step_count=5
+# plan_step_count=8
 # delivery_format=remote_zoom
 # agenda_minutes=120
 # artifact_path=reports/workshop-plan.json
@@ -256,3 +255,6 @@ if __name__ == "__main__":
 # Plan wording and step count remain model-owned. The handler answers the
 # connected exchange; Host validation owns duration arithmetic and case-id
 # membership before TaskWorkspace accepts the artifact.
+
+# Semantic audit: the model invented a 16-of-18 attendance success threshold.
+# Framework checks passed; this run is not semantic release acceptance.

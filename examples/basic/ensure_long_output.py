@@ -39,12 +39,13 @@ import os
 from dotenv import find_dotenv, load_dotenv
 
 from agently import Agently
+from agently.types.data import OutputValidateResultDict
 
 
 EXPECTED_COMPONENT_COUNT = 75
 
 
-def validate_component_inventory(value, _context):
+def validate_component_inventory(value, _context) -> OutputValidateResultDict:
     components = value["components"]
     expected_indexes = list(range(1, EXPECTED_COMPONENT_COUNT + 1))
     expected_refdes = [f"C{index:03d}" for index in expected_indexes]

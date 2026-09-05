@@ -4,7 +4,7 @@ import pytest
 
 from agently import Agently
 from agently.core.application.AgentTask import AgentTask
-from agently.core.application.AgentTask.LifecycleState import (
+from agently.builtins.plugins.AgentExecution.long_task.LifecycleState import (
     AgentTaskLifecycleState,
     TerminalCarrier,
 )

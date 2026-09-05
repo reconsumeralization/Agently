@@ -58,12 +58,11 @@ from agently.types.data import (
     TaskBoardGraph,
     TaskBoardRevision,
 )
+from agently.types.data import AgentExecutionName, AgentExecutionLineage, AgentExecutionLimits, RunContext
+from agently.types.options import ExecutionOptions
 from agently.types.plugins import (
     ActionExecutor,
     AgentExecution,
-    AgentPatternContinuation,
-    AgentPatternHandler,
-    AgentPatternName,
     ExecutionResourceProvider,
 )
 
@@ -89,11 +88,15 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution.ensure_long_output(), AgentExecution)
         assert_type(execution.artifact("result.txt"), AgentExecution)
         assert_type(agent.goal("ship", ["tests pass"]), AgentExecution)
+        assert_type(agent.goal("explain", turn_on_long_task=False), AgentExecution)
+        assert_type(agent.goals(["explain"], turn_on_long_task=False), AgentExecution)
         assert_type(agent.goals(["ship", "document"], ("tests pass",)), AgentExecution)
         assert_type(execution.goal(["ship", "document"], ("tests pass",)), AgentExecution)
-        assert_type(agent.pattern("plan"), AgentExecution)
-        assert_type(execution.pattern("long_content"), AgentExecution)
-        assert_type(execution.pattern("custom"), AgentExecution)
+        assert_type(execution.goal("explain", turn_on_long_task=False), AgentExecution)
+        assert_type(execution.goals("explain", turn_on_long_task=False), AgentExecution)
+        assert_type(agent.create_execution("plan"), AgentExecution)
+        assert_type(agent.create_execution("long_content"), AgentExecution)
+        assert_type(agent.create_execution("custom"), AgentExecution)
         assert_type(agent.interact(lambda _exchange: "answer"), AgentExecution)
         assert_type(execution.interact(lambda _exchange: {"answer": "value"}), AgentExecution)
         assert_type(execution.review(), AgentExecution)
@@ -169,21 +172,18 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
 def test_public_handler_type_aliases():
     if TYPE_CHECKING:
-        class NamedPattern:
-            name: Literal["named_pattern"] = "named_pattern"
-
-            async def run(
-                self,
-                _execution: AgentExecution,
-                run_default: AgentPatternContinuation,
-            ) -> object:
-                return await run_default()
-
-        async def pattern_handler(
-            _execution: AgentExecution,
-            run_default: AgentPatternContinuation,
-        ) -> object:
-            return await run_default()
+        from agently.builtins.plugins.AgentExecution import (
+            AgentExecution as BundledExecution,
+            RequestExecution, LongTaskExecution, PlanExecution, LongContentExecution,
+        )
+        concrete = BundledExecution(Agently.create_agent())
+        plugin_contract: AgentExecution = concrete
+        producer_contracts: list[AgentExecution] = [
+            RequestExecution(Agently.create_agent()),
+            LongTaskExecution(Agently.create_agent()),
+            PlanExecution(Agently.create_agent()),
+            LongContentExecution(Agently.create_agent()),
+        ]
 
         def review_handler(_result: Any, _context: AgentReviewContext) -> bool:
             return True
@@ -206,16 +206,12 @@ def test_public_handler_type_aliases():
         agent_review_handler: AgentReviewHandler = review_handler
         agent_artifact_handler: AgentArtifactHandler = artifact_handler
         agent_interaction_handler: AgentInteractionHandler = interaction_handler
-        agent_pattern_handler: AgentPatternHandler = pattern_handler
         agent: BaseAgent = Agently.create_agent("typing-handler-contract")
-        assert_type(agent.pattern(NamedPattern()), AgentExecution)
-        assert_type(agent.pattern(pattern_handler), AgentExecution)
         assert callable(model_handler)
         assert callable(skills_handler)
         assert callable(agent_review_handler)
         assert callable(agent_artifact_handler)
         assert callable(agent_interaction_handler)
-        assert callable(agent_pattern_handler)
 
 
 def test_handler_context_members_are_concretely_typed():
@@ -241,9 +237,10 @@ def _literal_values(annotation: object) -> set[object]:
 
 
 def test_agent_execution_choice_aliases_keep_builtin_editor_candidates():
-    assert _literal_values(AgentPatternName) == {
+    assert _literal_values(AgentExecutionName) == {
+        "auto",
         "request",
-        "goal",
+        "long_task",
         "plan",
         "long_content",
     }
@@ -267,15 +264,18 @@ def test_agent_execution_choice_aliases_keep_builtin_editor_candidates():
     }
 
     expected_builtin_hints = {
-        "pattern": {"request", "goal", "plan", "long_content"},
         "effort": {"minimal", "low", "fast", "medium", "normal", "high", "max"},
         "strategy": {"auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"},
+    }
+    name_overload = get_overloads(BaseAgent.create_execution)[0]
+    assert _literal_values(get_type_hints(name_overload, localns=globals())["name"]) == {
+        "auto", "request", "long_task", "plan", "long_content",
     }
     for owner in (BaseAgent, AgentExecution):
         for method_name, expected in expected_builtin_hints.items():
             overloads = get_overloads(getattr(owner, method_name))
             assert len(overloads) == 2
-            parameter_name = "pattern" if method_name == "pattern" else "value"
+            parameter_name = "value"
             builtin_hint = get_type_hints(
                 overloads[0],
                 localns={"AgentExecution": AgentExecution},

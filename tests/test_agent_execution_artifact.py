@@ -1,3 +1,6 @@
+from typing import cast as typing_cast
+from agently.builtins.plugins.AgentExecution import AgentExecution as BundledAgentExecution
+
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import replace
@@ -84,7 +87,7 @@ async def test_text_artifact_uses_read_only_fallback_and_preserves_business_resu
     assert ref["complete_readback_verified"] is True
     assert (workspace_root / ref["path"]).read_text(encoding="utf-8") == "artifact body"
     assert execution.logs["artifact_refs"] == execution.artifact_results
-    assert execution._terminal_retained_refs == execution.artifact_results
+    assert typing_cast(BundledAgentExecution, execution)._terminal_retained_refs == execution.artifact_results
     paths = [item.path for item in execution.stream.items]
     assert paths.index("artifact.started") < paths.index("artifact.completed") < paths.index("result")
 

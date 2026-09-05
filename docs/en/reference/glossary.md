@@ -25,26 +25,21 @@ wait/resume lifecycle. ExecutionExchange remains the provider/envelope owner,
 TriggerFlow remains the pause/resume owner, and durable integrations continue
 to use registered ExecutionExchange providers and routing settings.
 
-## Agent Pattern
+## AgentExecution Plugin
 
-A beta reusable whole-request behavior selected with
-`AgentExecution.pattern(...)`.
-It consumes the existing AgentExecution draft and returns the same execution's
-business result; it does not create another input, result, or lifecycle facade.
-Its implementation may use one or many ModelRequests and may compile a
-TriggerFlow for branching, loops, HITL wait/resume, or recovery. Pattern is
-therefore an application behavior contract, not a synonym for TriggerFlow,
-TaskDAG, strategy, or route. `.goal(...)` selects the built-in `goal` Pattern;
-an ordinary request implicitly uses `request`. The bundled `plan` Pattern
-performs readiness/clarification before returning a plan, while
-`long_content` plans sections, writes them with bounded continuity, and uses
-host-ordered text assembly. These implementations live in the built-in
-`AgentPattern` plugin category rather than AgentOrchestrator.
+The registered execution class selected by `agent.create_execution(name)`.
+The returned object itself owns the draft, production, terminal policies and
+result readers; Agent owns reusable defaults and capabilities. Built-ins are
+`auto`, `request`, `long_task`, `plan`, and `long_content`. Components such as
+ModelRequest, task planning and TriggerFlow can be nested inside that owner.
 
-Registration alone never selects a Pattern, and Pattern names remain isolated
-from Agent method names. Agently may carry `.goal(...)` through the internal
-`goal` Pattern transparently; callers do not need to use the beta Pattern API
-to retain existing goal-pursuit behavior.
+`.goal(...)` declares goals and, by default, enables long-task convenience.
+Use `turn_on_long_task=False` for semantic goals without that switch. Explicit
+producer or strategy selection remains authoritative. The unreleased Pattern
+selector has been replaced; released AgentTask and AgentOrchestrator names
+remain compatibility entrypoints, not parallel default owners.
+
+See [Execution plugins](../start/auto-orchestration.md#execution-plugins).
 
 ## auto_close / auto_close_timeout
 

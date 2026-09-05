@@ -18,8 +18,8 @@ forced onto the new Blocks lifecycle.
 
 Run from the repository root. Earlier model examples need `DEEPSEEK_API_KEY` in
 the environment or `.env`; set `DYNAMIC_TASK_MODEL_PROVIDER=ollama` for local
-Ollama where supported. Examples 25-27 use local Ollama/Qwen directly and
-default to `qwen3.5:9b`; override it with `AGENT_PATTERN_OLLAMA_MODEL` or
+Ollama where supported. Examples 25-28 use local Ollama/Qwen directly and
+default to `qwen`; override it with `AGENT_EXECUTION_OLLAMA_MODEL` or
 `OLLAMA_DEFAULT_MODEL`.
 
 ```bash
@@ -32,8 +32,9 @@ python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
 python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
 python examples/agent_auto_orchestration/24_independent_dynamic_task_dag.py
 python examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py
-python examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py
-python examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py
+python examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py
+python examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py
+python examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` shows the released
@@ -60,13 +61,23 @@ python examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama
   `Agently.create_dynamic_task(...)` submitted-DAG execution.
 - **25 - AgentExecution Delivery And Review.** Local Qwen business result,
   verified TaskWorkspace artifact, model-backed advisory review, and a
-  host-owned required delivery verification.
-- **26 - Plan Pattern With Interaction.** Local Qwen readiness analysis,
+  host-owned blocking review handler.
+- **26 - Plan Execution With Interaction.** Local Qwen readiness analysis,
   request-local connected clarification, host-validated structured plan, and
   verified artifact delivery.
-- **27 - Long-Content Pattern Delivery.** Local Qwen section planning and
+- **27 - Long-Content Execution Delivery.** Local Qwen section planning and
   writing, host-ordered Markdown assembly, verified artifact delivery, and
   model-backed advisory review.
+
+- **28 - Missing Goal Preparation.** An explicitly selected long-task producer
+  asks the model to derive missing goal/criteria from the original request.
+  No Actions are authorized. The first recorded run prepared the contract but
+  timed out during subsequent production; this is not end-to-end acceptance.
+
+The latest 26/27 runs confirmed framework delivery and readback, but semantic
+inspection found an invented attendance threshold in 26 and an expanded Friday
+restriction in 27. These remain Prompt-audit findings, even though model review
+passed for 27.
 
 Model calls are real. Business data is mocked unless the example explicitly
 states that it uses a real external system such as MCP or GitHub CLI.

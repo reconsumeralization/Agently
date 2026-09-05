@@ -178,6 +178,7 @@ def _action_log_key(log: dict[str, Any]) -> str:
 def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
     meta = {
         "execution_id": owner.id,
+        "plugin": owner.name,
         "status": owner.status,
         "strategy": owner.strategy_name,
         "goals": DataFormatter.sanitize(owner.goal_items),
@@ -198,8 +199,6 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "reviews": DataFormatter.sanitize(getattr(owner, "review_results", [])),
         "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }
-    if owner.pattern_info.get("selected_by") == "pattern":
-        meta["pattern"] = DataFormatter.sanitize(owner.pattern_info)
     if getattr(owner, "_ensure_long_output_enabled", False):
         meta["long_output"] = DataFormatter.sanitize(
             getattr(owner, "_long_output_meta", {})

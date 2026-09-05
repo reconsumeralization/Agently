@@ -17,14 +17,14 @@ from agently.core import PluginManager, SkillLibrary, TaskBoardGraph, TaskBoardR
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.core.application.AgentTask import AgentTask
-from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
-from agently.core.application.AgentTask.TaskShared import _AgentTaskDeadlineExceeded
+from agently.builtins.plugins.AgentExecution.long_task.BlockCarrier import WorkUnitResult
+from agently.builtins.plugins.AgentExecution.long_task.TaskShared import _AgentTaskDeadlineExceeded
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.types.data import AgentExecutionStreamData, AgentlyRequestData
 from agently.types.options import ExecutionOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.result_views import (
+from agently.builtins.plugins.AgentExecution.modules.result_views import (
     get_async_generator as agent_execution_get_async_generator,
 )
 
@@ -6937,7 +6937,7 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
 
 @pytest.mark.asyncio
 async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_path):
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view
 
     agent = _create_agent("execution-taskboard-final-targeted-readback").use_task_workspace(
         tmp_path / "task_workspace",
@@ -6986,7 +6986,7 @@ async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_
 
 
 def test_taskboard_final_artifact_evidence_survives_taskboard_view_cap():
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view
 
     existing_items = [
         {
@@ -9278,7 +9278,7 @@ async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
 async def test_route_policy_block_and_deterministic_fallback():
     """ISSUE-017: on_violation='block' surfaces a blocked route; fallback is deterministic."""
     from types import SimpleNamespace
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import (
+    from agently.builtins.plugins.AgentExecution.modules.routing import (
         HybridRoutePlanner,
     )
 
@@ -9619,7 +9619,7 @@ async def test_agent_execution_context_progress_is_published_to_stream():
 @pytest.mark.asyncio
 async def test_agent_execution_rejects_removed_mode_argument():
     agent = _create_agent("removed-mode-argument")
-    removed_mode_kwargs = {"mode": "removed"}
+    removed_mode_kwargs: dict[str, Any] = {"mode": "removed"}
 
     with pytest.raises(TypeError):
         (

@@ -335,6 +335,7 @@ from .record_store import (
 )
 
 from .agent_execution import (
+    AgentExecutionName,
     ActionArtifactReleaseDiagnostic,
     ActionArtifactReleaseDiagnostics,
     AgentExecutionDiagnostics,
@@ -342,7 +343,6 @@ from .agent_execution import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
-    AgentExecutionPatternInfo,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
     AgentExecutionRecordPurpose,

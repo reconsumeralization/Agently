@@ -70,11 +70,9 @@ an extra final-generation request is used only for legacy/custom fallback or a
 separate delivery policy such as `ensure_long_output`. Skills never create a
 route or planner capability.
 
-The public Agent API stays in core, but route planning and execution are owned
-by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
-protocol. This keeps Skill context, the DAG substrate, and future route
-implementations replaceable without teaching core about builtin plugin
-internals.
+The public Agent API stays in core. Its factory directly constructs the selected
+AgentExecution plugin, which owns production and final policies. Skill Context
+and the DAG substrate remain replaceable components within that execution.
 
 ## Human Interaction
 
@@ -88,10 +86,9 @@ def handle_exchange(exchange):
     return {"audience": "framework developers"}
 
 result = (
-    agent
+    agent.create_execution("plan")
     .input("Plan the release.")
     .interact(handle_exchange)
-    .pattern("plan")
     .start()
 )
 ```
@@ -163,8 +160,8 @@ manufacture a rating. Numeric model scores are not used. Read reports from
 
 `validate(handler)` is the hard gate for the **final output of the current call**:
 a direct response, final plan, host-assembled document, AgentTask final output,
-or custom Pattern's returned value. It never automatically checks intermediate
-Pattern/task outputs. Direct ModelRequest validation and `ensure_long_output`
+or custom Execution's returned value. It never automatically checks intermediate
+producer/task outputs. Direct ModelRequest validation and `ensure_long_output`
 retain their existing controlled repair behavior. Other final checks run once
 without replaying internal steps or side effects. Their context uses
 `meta.scope="agent_execution_final"`, no provider response ID, and
@@ -213,211 +210,119 @@ are exposed in `meta["logs"]["artifact_refs"]` and through
 multiple independently verified files. Any declared delivery failure fails the
 run; artifact materialization completes before review.
 
-## Request Patterns
+## Execution Plugins
 
-> **Beta:** `.pattern(...)`, the `AgentPattern` extension protocol, and the
-> bundled `plan` / `long_content` implementations are still evolving. The beta
-> caller-facing path is isolated behind explicit `.pattern(...)` selection:
-> merely registering a Pattern does not change an ordinary Agent request.
-> Existing Agent methods remain methods even when a Pattern plugin uses the
-> same name.
+An Agent owns reusable configuration and capabilities. An AgentExecution plugin
+owns one isolated draft, production lifecycle, result, and final policies.
+`agent.create_execution(name)` returns an instance of the registered class.
 
-The beta label applies only to Pattern here. `.interact(...)`, `.artifact(...)`,
-`.review(...)` are standard AgentExecution methods.
+| Name | Production behavior | Explicit strategies |
+| --- | --- | --- |
+| `auto` (default) | Select the existing request/task/DAG route when execution starts | Existing route strategies |
+| `request` | One request, including request-local parsing and repair | `auto`, `direct` |
+| `long_task` | Retained multi-step goal work | `auto`, `task`, `task_loop`, `long_task`, `flat`, `taskboard` |
+| `plan` | Readiness, connected clarification when needed, then a final plan | `auto` |
+| `long_content` | Section planning, dependent writing, and host-ordered assembly | `auto` |
 
-A Pattern is one reusable whole-request behavior with the same caller-facing
-shape as an ordinary Agent request: it consumes the existing AgentExecution
-draft and returns its business result. Select one with `.pattern(pattern)`:
-
-```python
-async def annotate(execution, run_default):
-    result = await run_default()
-    return {"result": result, "review_state": "pending"}
-
-result = agent.input(task).output(contract).pattern(annotate).start()
-```
-
-`pattern` accepts one registered `AgentPattern` name, one Pattern instance, or
-one callable. `run_default()` invokes the existing route at most once. A
-Pattern may instead own its explicit model requests and return their assembled
-value. It does not get another input bag, output schema, settings tree, result
-wrapper, or lifecycle: it reads the same execution prompt, capabilities,
-TaskWorkspace, and policy already configured on AgentExecution. Artifact and
-review declarations run afterward on the Pattern result.
-
-The existing `.output(...)` remains the external result contract. The ordinary
-route honors it when the Pattern calls `run_default()`; a Pattern that owns all
-of its stages must consume and honor that same declaration itself. There is no
-separate `pattern.input(...)` or `pattern.output(...)` API.
-
-Reusable Patterns use the `AgentPattern` plugin family:
+Explicit selection takes precedence over the configured default. Incompatible
+strategy combinations fail before model or Action dispatch. A route policy
+cannot silently replace an explicitly selected plugin with another producer.
+The ordinary fluent API keeps deferred `auto` selection; registration alone
+does not add model calls, review, or planning.
 
 ```python
-class AnnotatePattern:
-    name = "annotate"
-    DEFAULT_SETTINGS = {}
-
-    def __init__(self, *, plugin_manager, settings):
-        self.plugin_manager = plugin_manager
-        self.settings = settings
-
-    async def run(self, execution, run_default, /):
-        result = await run_default()
-        return {"result": result, "review_state": "pending"}
-
-agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
-result = agent.input(task).pattern("annotate").start()
-```
-
-Registration never selects a Pattern, including when the generic plugin
-manager's `activate` argument is left at its default. Selection belongs only to
-`.pattern(...)`; Pattern names stay in the `AgentPattern` plugin namespace and
-are not copied onto Agent or AgentExecution.
-
-Only one Pattern is selected; a later `.pattern(...)` replaces the earlier
-selection rather than forming an implicit chain. Put Pattern-specific tuning in
-the plugin instance or plugin settings instead of adding keyword options to the
-fluent method.
-
-Pattern is not another name for a DAG. It is the behavior contract; its internal
-implementation may be linear, branching, concurrent, or cyclic. Use
-TriggerFlow inside a complex Pattern for branches, joins, retries, loops,
-pause/resume, and recovery. HITL clarification uses the existing
-ExecutionExchange routing/provider seam with TriggerFlow wait/resume. A caller
-may supply the connected response mechanism through the standard
-`.interact(handler)` method.
-
-When plan -> TaskBoard -> task loop is one request whose terminal result is task
-completion, one Pattern owns that topology and its explicit handoffs. If the
-plan or board is itself an independently consumed deliverable, start separate
-AgentExecutions and pass the result explicitly.
-
-Agently distributes two concrete AgentPattern plugins under
-`agently.builtins.plugins.AgentPattern`: `plan` and `long_content`. They use the
-same plugin protocol as application Patterns; AgentOrchestrator only resolves
-and invokes them.
-
-### Built-in `plan`
-
-```python
-plan = agent.input(task).interact(handle_exchange).pattern("plan").start()
-```
-
-`plan` first makes a structured readiness decision. If required facts are
-missing, its internal TriggerFlow raises a `clarification` ExecutionExchange,
-waits through `.interact(handler)` or another configured connected provider,
-and analyzes the request again after the reply. Once ready, a final
-ModelRequest returns the plan, not the requested end deliverable. A
-caller-provided `.output(...)` therefore describes the plan result:
-
-```python
-plan = (
-    agent
-    .input(task)
-    .output({"steps": [str], "risks": [str]}, format="json")
-    .pattern("plan")
-    .start()
+execution = (
+    agent.create_execution("plan")
+    .input("Plan a workshop using the supplied facts.")
+    .info(workshop_facts)
+    .interact(handle_exchange)
+    .output(plan_schema)
+    .validate(validate_plan)
 )
+plan = execution.start()
+meta = execution.get_meta()
+print(meta["plugin"], meta["route"]["selected_route"])
 ```
 
-The default limits are three questions per round and three clarification
-rounds. Advanced configuration stays in
-`plugins.AgentPattern.plan.max_questions_per_round` and
-`plugins.AgentPattern.plan.max_clarification_rounds`; `.pattern(...)` itself
-does not grow extra parameters. This first built-in supports connected HITL.
-If interaction routing selects a durable/disconnected wait, it fails closed
-because AgentExecution cannot yet return a resumable Pattern handle. It also
-rejects `.ensure_long_output()` because that policy currently belongs to the
-ordinary direct route rather than the Pattern's terminal plan request.
+A caller's `validate(...)` hard-checks the producer's final returned value,
+not an intermediate readiness response, section plan, or task step. Direct
+request repair remains request-owned. Artifact materialization/readback and
+optional review follow final validation on the same execution.
 
-### Built-in `long_content`
+`plan` uses bounded readiness and planning requests. A connected handler
+receives an `ExecutionExchangeView` when clarification is required.
+Missing/rejected answers and exhausted clarification attempts produce an
+explicit blocked outcome; they are not fabricated as accepted answers.
+This built-in connected flow does not yet promise durable plan restoration.
+Its settings are `plugins.AgentExecution.plan.max_clarification_rounds` (default 3) and
+`max_questions_per_round` (default 3).
+
+`long_content` plans sections, writes them with bounded continuity context,
+and assembles full section bodies in plan order without a model recopy pass.
+Its settings are `plugins.AgentExecution.long_content.max_sections`
+(default 12) and `continuity_chars` (default 4000). It produces plain text:
+structured `output(...)` and `ensure_long_output()` cannot be combined with
+this producer. Native truncation recovery and multi-section writing are
+different behaviors.
+
+Custom implementations register in the same `AgentExecution` category.
+Subclass a bundled implementation to reuse its lifecycle and specialize the
+protected, typed production hook on the same instance:
 
 ```python
-report = (
-    agent
-    .input(task)
-    .pattern("long_content")
-    .artifact("reports/report.md")
-    .review()
-    .start()
-)
+from agently.builtins.plugins.AgentExecution import RequestExecution, ProductionOptions
+
+class AuditedRequest(RequestExecution):
+    name = "audited_request"
+
+    async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        route, value = await super()._async_produce(options)
+        self.logs["audit"] = {"produced": True}
+        return route, value
+
+agent.plugin_manager.register("AgentExecution", AuditedRequest, activate=False)
+execution = agent.create_execution("audited_request").input("Explain the migration.")
+result = execution.start()
 ```
 
-`long_content` uses one structured section-plan request, then writes validated
-sections sequentially with bounded continuity notes. Host code adds headings
-and assembles the accepted bodies in plan order, so no final model pass recopies
-the full document. It returns text only: structured `.output(...)` and
-simultaneous `.ensure_long_output()` are rejected before the first model call.
-Use `.artifact(...)` for file delivery and `.review()` for a
-terminal semantic judgment.
+Use `activate=True` only to change the configured default. A complete custom
+implementation can instead implement the public protocol. `run/async_run`
+and compatible `start/async_start` readers share once-only production;
+captured result readers do not dispatch a second execution.
 
-The default section limit is 12 and the total predecessor-continuity projection
-is bounded to 4,000 characters. Configure these under
-`plugins.AgentPattern.long_content.max_sections` and
-`plugins.AgentPattern.long_content.continuity_chars`. `ensure_long_output()`
-remains the separate transport-truncation policy for one request; it is not a
-semantic document-composition Pattern.
+Metadata exposes `plugin`; multi-request producers emit
+`execution.stage.started/completed` and record stages under
+`diagnostics.execution_run`. Types are available from
+`agently.types.plugins` and `agently.types.data`, not added as root exports.
+The released AgentOrchestrator activation path is a compatibility adapter;
+the default no longer needs it. The unreleased `pattern()` selector and
+AgentPattern plugin category have been replaced, not kept as parallel APIs.
 
-Runnable local Ollama/Qwen examples cover the standard terminal methods and
-both bundled beta Patterns:
+Local Ollama Qwen examples:
 
-- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py): verified artifact delivery, model-backed advisory review, and blocking handler review;
-- [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py): connected clarification, structured plan validation, and artifact readback;
-- [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py): section planning/writing, host-ordered Markdown assembly, artifact readback, and review.
-
-The implicit simple behavior is `request`. Agently may transparently carry
-`.goal(...)` through the built-in `goal` Pattern, but goal callers continue to
-use the existing API and AgentTask behavior without Pattern setup.
-`.strategy(...)` remains the lower-level execution mechanism override.
-
-For executions explicitly configured with `.pattern(...)`, Pattern identity is
-exposed in execution metadata and the run emits `pattern.started` /
-`pattern.completed` / `pattern.failed`; model-backed built-ins additionally
-emit bounded `pattern.stage.started` / `pattern.stage.completed` facts.
-Ordinary requests and `.goal(...)` do not add this beta metadata or stream
-surface. Pattern selection belongs before `.start()`; `start(mode=...)` is not
-a Pattern API. Invalid or unknown Pattern selections fail explicitly rather
-than silently falling back to an ordinary request.
-
-### Typing And IDE Completion
-
-Ordinary fluent use requires no Agently type imports. Editors can suggest the
-built-in values for `.pattern(...)`, `.effort(...)`, and `.strategy(...)`
-directly at the call site, and every configuration method keeps the chain typed
-as the same `AgentExecution`:
-
-```python
-result = agent.input(task).pattern("long_content").artifact("report.md").review().start()
-```
-
-Pattern names remain open for registered `AgentPattern` plugins. Strategy names
-also remain open for alternate `AgentOrchestrator` implementations, although
-the bundled orchestrator assigns behavior only to its documented built-in
-strategies. By contrast, `create_task(execution=...)` is a host-validated finite
-choice, so type checkers reject unknown values before runtime.
-
-`use_actions` / `use_action`, `require_actions`, `use_skills`, `require_skills`,
-and `use_skills_packs` return a one-run `AgentExecution` by default. Passing
-`always=True` on the Agent returns the Agent and configures future runs.
-The `use_tools` / `use_tool` compatibility aliases also retain execution return
-types. Action `planning_protocol` and `concurrency_mode` expose finite IDE
-choices, while Action/Skill inputs retain their existing plugin boundaries.
-
-Type imports are optional at extension boundaries. Import only
-`ExecutionExchangeView`, `AgentReviewContext`, or `AgentArtifactContext` from
-`agently.types.data` when a named handler needs completion for its input or
-context. A Pattern author can optionally import `AgentExecution` and
-`AgentPatternContinuation` from `agently.types.plugins`. Inline handlers and
-ordinary calls need none of these, and the advanced types are intentionally not
-copied into the `agently` package root.
+- [Plan with connected clarification](../../../examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py)
+- [Long content with artifact readback and review](../../../examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py)
 
 ## Goal Pursuit
 
-Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal
-needs a bounded plan, execution, evidence, verification, and replan loop. This
-selects the built-in `goal` Pattern while retaining the existing AgentTask
-implementation.
-`agent.goals(...)` is only a plural alias for the same entrypoint.
+`agent.goal(goal_or_goals, success_criteria=None, *, turn_on_long_task=True)`
+declares semantic goals and criteria. The default also enables bounded long-task
+execution in the ordinary auto route. `turn_on_long_task=False` contributes the
+same Prompt declarations without enabling that convenience path; it does not
+disable an independently selected long_task plugin or strategy. Explicit
+`direct` strategy and explicit plugin selection remain authoritative.
+`agent.goals(...)` is a plural alias. Neither declaration automatically enables
+review. Repeating goal() before starting replaces its convenience switch.
+
+If an already selected long-task producer lacks goals or success criteria, it
+asks the model to interpret only the missing fields before constructing its
+task state. Explicit declarations and the original Prompt stay unchanged;
+metadata records model provenance. Derived criteria cannot authorize new work
+or invent business thresholds. Insufficient facts produce a blocked outcome.
+Complete/restored contracts skip this node. Ordinary requests and review do
+not gain a preflight call; plan/long-content keep their own planning stages.
+See [missing-goal preparation](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
+for a real-model example and its recorded timeout limitation.
 
 When task-specific options are assembled separately, attach them through the
 task strategy:

@@ -15,6 +15,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently, TaskWorkspace
+from agently.builtins.plugins.AgentExecution import AgentExecution as BundledAgentExecution
 from agently.core import PluginManager, SkillLibrary
 from agently.core.orchestration import (
     TaskBoard,
@@ -24,14 +25,14 @@ from agently.core.orchestration import (
     resolve_task_board_planning_policy,
     task_board_planning_output_schema,
 )
-from agently.core.application.AgentTask.BlockCarrier import (
+from agently.builtins.plugins.AgentExecution.long_task.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
     scoped_retrieval_policy,
     select_carrier_output_policy,
 )
 from agently.core.application.AgentTask import AgentTask
-from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.core.application.AgentExecution.Stream import (
     AgentExecutionTextDeltaProjector,
@@ -53,7 +54,7 @@ from examples.agent_task.interview_question_preparation import judge_interview_s
 
 def test_task_shared_star_export_includes_evidence_ledger_helpers():
     namespace: dict[str, Any] = {}
-    exec("from agently.core.application.AgentTask.TaskShared import *", namespace)
+    exec("from agently.builtins.plugins.AgentExecution.long_task.TaskShared import *", namespace)
 
     for helper_name in (
         "acceptance_locator_view_from_ledger",
@@ -125,10 +126,10 @@ def test_agent_task_process_summary_is_compact_and_not_evidence():
 
 def test_agent_task_prompts_do_not_expose_task_workspace_streaming_mechanics():
     source_files = [
-        "agently/core/application/AgentTask/TaskBoardCardExecution.py",
-        "agently/core/application/AgentTask/ArtifactDelivery.py",
-        "agently/core/application/AgentTask/FlatStrategy.py",
-        "agently/core/application/AgentTask/TaskBoardFinalization.py",
+        "agently/builtins/plugins/AgentExecution/long_task/TaskBoardCardExecution.py",
+        "agently/builtins/plugins/AgentExecution/long_task/ArtifactDelivery.py",
+        "agently/builtins/plugins/AgentExecution/long_task/FlatStrategy.py",
+        "agently/builtins/plugins/AgentExecution/long_task/TaskBoardFinalization.py",
     ]
     forbidden_phrases = [
         "AgentTask will stream",
@@ -150,10 +151,10 @@ def test_agent_task_prompts_do_not_expose_task_workspace_streaming_mechanics():
 
 def test_taskboard_prompts_keep_model_contract_surface_simple():
     source_files = [
-        "agently/core/application/AgentTask/TaskBoardCardExecution.py",
-        "agently/core/application/AgentTask/TaskBoardStrategy.py",
+        "agently/builtins/plugins/AgentExecution/long_task/TaskBoardCardExecution.py",
+        "agently/builtins/plugins/AgentExecution/long_task/TaskBoardStrategy.py",
         "agently/core/orchestration/TaskBoard/TaskBoardPlanning.py",
-        "agently/core/application/AgentTask/ArtifactDelivery.py",
+        "agently/builtins/plugins/AgentExecution/long_task/ArtifactDelivery.py",
     ]
     forbidden_phrases = [
         "AgentExecution step",
@@ -1068,7 +1069,7 @@ def test_taskboard_control_projection_keeps_state_and_dependency_identity_withou
 
 
 def test_verifier_prompt_keeps_optional_risk_sections_optional():
-    source_path = Path(__file__).resolve().parents[1] / "agently/core/application/AgentTask/Verification.py"
+    source_path = Path(__file__).resolve().parents[1] / "agently/builtins/plugins/AgentExecution/long_task/Verification.py"
     text = source_path.read_text(encoding="utf-8")
 
     assert "Do not require risk, uncertainty, limitation, or caveat sections" in text
@@ -1575,7 +1576,7 @@ def test_agent_task_action_observation_delta_projects_safe_progress_text():
 
 
 def test_evidence_ledger_guard_rejects_structurally_invalid_support():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -1603,7 +1604,7 @@ def test_evidence_ledger_guard_rejects_structurally_invalid_support():
 
 
 def test_evidence_ledger_acceptance_locator_is_ref_pointer_only():
-    from agently.core.application.AgentTask.EvidenceLedger import (
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import (
         acceptance_locator_view_from_ledger,
         evidence_ledger_view,
         validate_evidence_use,
@@ -1663,7 +1664,7 @@ def test_evidence_ledger_acceptance_locator_is_ref_pointer_only():
 
 
 def test_acceptance_locator_matches_unicode_dash_heading_variants():
-    from agently.core.application.AgentTask.AcceptanceLocator import (
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import (
         build_task_workspace_artifact_acceptance_locator_items,
     )
 
@@ -1706,7 +1707,7 @@ def test_acceptance_locator_matches_unicode_dash_heading_variants():
 
 
 def test_acceptance_locator_projects_every_actual_markdown_heading_for_progressive_readback():
-    from agently.core.application.AgentTask.AcceptanceLocator import (
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import (
         build_task_workspace_artifact_acceptance_locator_items,
     )
 
@@ -1737,7 +1738,7 @@ def test_acceptance_locator_projects_every_actual_markdown_heading_for_progressi
 
 
 def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
-    from agently.core.application.AgentTask.AcceptanceLocator import (
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import (
         build_task_workspace_artifact_acceptance_locator_items,
     )
 
@@ -1772,7 +1773,7 @@ def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
 
 
 def test_acceptance_locator_uses_manifest_outline_ordinal_for_heading_label_variants():
-    from agently.core.application.AgentTask.AcceptanceLocator import (
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import (
         build_task_workspace_artifact_acceptance_locator_items,
     )
 
@@ -1809,7 +1810,7 @@ def test_acceptance_locator_uses_manifest_outline_ordinal_for_heading_label_vari
 
 
 def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -1876,7 +1877,7 @@ def test_evidence_ledger_guard_reconciles_visible_aliases_to_canonical_ids():
 
 
 def test_evidence_ledger_guard_uses_item_declared_aliases():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -1909,7 +1910,7 @@ def test_evidence_ledger_guard_uses_item_declared_aliases():
 
 def test_blocks_action_evidence_declares_generic_action_ref_aliases():
     from agently.builtins.plugins.Blocks.AgentlyBlocks import EvidenceMapperRegistry
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     graph = ExecutionBlockGraph.from_value({"graph_id": "graph-generic-alias", "source_plan_id": "plan-generic-alias"})
     envelope = EvidenceMapperRegistry().map_evidence(
@@ -1967,7 +1968,7 @@ def test_blocks_action_evidence_declares_generic_action_ref_aliases():
 
 
 def test_evidence_ledger_guard_blocks_ambiguous_basename_aliases():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2001,7 +2002,7 @@ def test_evidence_ledger_guard_blocks_ambiguous_basename_aliases():
 
 
 def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2031,7 +2032,7 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
 
 def test_evidence_binding_repair_resolves_missing_id_from_unique_claim_body():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2080,7 +2081,7 @@ def test_evidence_binding_repair_resolves_missing_id_from_unique_claim_body():
 
 def test_evidence_binding_repair_resolves_missing_unavailability_id_from_failed_action_body():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2124,7 +2125,7 @@ def test_evidence_binding_repair_resolves_missing_unavailability_id_from_failed_
 
 def test_evidence_binding_repair_leaves_missing_id_unresolved_when_claim_body_is_ambiguous():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2160,7 +2161,7 @@ def test_evidence_binding_repair_leaves_missing_id_unresolved_when_claim_body_is
 
 def test_evidence_binding_repair_prunes_incompatible_auxiliary_ids_when_valid_support_remains():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2223,7 +2224,7 @@ def test_evidence_binding_repair_prunes_incompatible_auxiliary_ids_when_valid_su
 
 def test_evidence_binding_repair_keeps_fail_closed_when_no_compatible_support_remains():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2260,7 +2261,7 @@ def test_evidence_binding_repair_keeps_fail_closed_when_no_compatible_support_re
 
 def test_evidence_binding_repair_does_not_hide_unknown_id_while_pruning_incompatible_support():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2306,7 +2307,7 @@ def test_evidence_binding_repair_does_not_hide_unknown_id_while_pruning_incompat
 
 def test_evidence_binding_repair_legacy_candidate_path_does_not_hide_mixed_blocker():
     from agently.core.application import AgentTask
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -2351,7 +2352,7 @@ def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
     # The cumulative ledger re-renders sub-ledger items that each carried their own
     # e1..eN handle. The view must own cite_as and reassign unique handles so a single
     # view never exposes duplicate cite_as (which would read as ambiguous aliases).
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view
 
     merged = {
         "evidence_items": [
@@ -2391,7 +2392,7 @@ def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
 
 
 def test_cite_as_handle_resolves_unambiguously_after_remerge():
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view, validate_evidence_use
 
     merged = {
         "evidence_items": [
@@ -2435,8 +2436,8 @@ def test_cite_as_handle_resolves_unambiguously_after_remerge():
 
 
 def test_task_reference_identity_survives_ledger_reordering_and_normalizes_live_alias():
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
-    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
     catalog = TaskReferenceCatalog("agent_task_stable_refs")
     report = {
@@ -2475,7 +2476,7 @@ def test_task_reference_identity_survives_ledger_reordering_and_normalizes_live_
 
 
 def test_task_reference_identity_rejoins_compact_projection_but_changes_for_new_snapshot():
-    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
     catalog = TaskReferenceCatalog("agent_task_projection_rejoin")
     full = catalog.add_evidence(
@@ -2659,7 +2660,7 @@ def test_task_workspace_deliverable_readback_remains_transport_evidence():
 
 
 def test_request_local_cite_as_is_not_guessed_from_a_new_ledger_render():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     guard = validate_evidence_use(
         [{"claim": "The report was read.", "evidence_ids": ["e1"], "support_type": "content"}],
@@ -2684,7 +2685,7 @@ def test_request_local_cite_as_is_not_guessed_from_a_new_ledger_render():
 
 
 def test_task_reference_tokens_and_host_joins_fail_closed():
-    from agently.core.application.AgentTask.TaskReferences import (
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import (
         TaskReferenceCatalog,
         validate_reference_tokens,
     )
@@ -2750,7 +2751,7 @@ def test_task_reference_tokens_and_host_joins_fail_closed():
 
 
 def test_task_reference_catalog_is_shared_and_zero_state_until_persisted(tmp_path: Path):
-    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
     catalog = TaskReferenceCatalog("agent_task_siblings")
     first = catalog.add_evidence(
@@ -2766,7 +2767,7 @@ def test_task_reference_catalog_is_shared_and_zero_state_until_persisted(tmp_pat
 
 
 def test_task_reference_catalog_snapshot_preserves_tokens_and_rejects_stale_targets():
-    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
     catalog = TaskReferenceCatalog("agent_task_resume_refs")
     evidence = catalog.add_evidence(
@@ -2812,7 +2813,7 @@ def test_task_reference_catalog_snapshot_preserves_tokens_and_rejects_stale_targ
 
 
 def test_task_reference_catalog_preserves_identity_across_lossy_view_projection():
-    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+    from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
     catalog = TaskReferenceCatalog("agent_task_lossy_projection")
     evidence = catalog.add_evidence(
@@ -2898,7 +2899,7 @@ def test_repeated_task_context_delivery_does_not_retarget_canonical_evidence_blo
 
 
 def test_terminal_convergence_uses_stable_issue_keys_and_structured_state_digest():
-    from agently.core.application.AgentTask.TerminalConvergence import (
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import (
         TerminalIssue,
         relevant_state_digest,
     )
@@ -2955,7 +2956,7 @@ def test_terminal_convergence_uses_stable_issue_keys_and_structured_state_digest
 
 
 def test_terminal_convergence_stops_third_same_issue_without_a_fourth_repair():
-    from agently.core.application.AgentTask.TerminalConvergence import (
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import (
         TerminalConvergenceState,
         TerminalIssue,
     )
@@ -3003,7 +3004,7 @@ def test_terminal_convergence_stops_third_same_issue_without_a_fourth_repair():
 
 
 def test_terminal_convergence_resets_unchanged_count_when_relevant_state_changes():
-    from agently.core.application.AgentTask.TerminalConvergence import (
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import (
         TerminalConvergenceState,
         TerminalIssue,
     )
@@ -3024,7 +3025,7 @@ def test_terminal_convergence_resets_unchanged_count_when_relevant_state_changes
 
 
 def test_terminal_convergence_does_not_merge_different_issue_codes_for_the_same_gate_subject():
-    from agently.core.application.AgentTask.TerminalConvergence import (
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import (
         TerminalConvergenceState,
         TerminalIssue,
     )
@@ -3055,7 +3056,7 @@ def test_terminal_convergence_does_not_merge_different_issue_codes_for_the_same_
 
 
 def test_terminal_convergence_keeps_resolved_and_independent_issue_counts():
-    from agently.core.application.AgentTask.TerminalConvergence import (
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import (
         TerminalConvergenceState,
         TerminalIssue,
     )
@@ -3084,7 +3085,7 @@ def test_terminal_convergence_keeps_resolved_and_independent_issue_counts():
 async def test_successful_terminal_gate_refreshes_resolved_convergence_diagnostics(
     tmp_path,
 ):
-    from agently.core.application.AgentTask.TerminalConvergence import TerminalIssue
+    from agently.builtins.plugins.AgentExecution.long_task.TerminalConvergence import TerminalIssue
 
     agent = _create_agent("terminal-convergence-diagnostics").use_task_workspace(
         tmp_path / "task_workspace"
@@ -4271,7 +4272,7 @@ async def test_flat_task_stops_third_unchanged_material_claim_issue_with_partial
 def test_evidence_guard_binds_composite_file_locator_to_matching_readback():
     # A composite/locator reference ("<file> <sub-locator>") that exact-alias cannot
     # match must bind to the readback whose path anchor it names -- and never another.
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -4311,7 +4312,7 @@ def test_evidence_guard_binds_composite_file_locator_to_matching_readback():
 
 
 def test_evidence_guard_narrows_composite_section_locator_by_heading():
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     ledger = {
         "evidence_items": [
@@ -4352,7 +4353,7 @@ def test_evidence_guard_narrows_composite_section_locator_by_heading():
 
 
 def test_resolve_evidence_reference_reports_tiers():
-    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import resolve_evidence_reference
 
     ledger = {
         "evidence_items": [
@@ -4383,7 +4384,7 @@ def test_resolve_evidence_reference_reports_tiers():
 
 
 def test_resolve_evidence_reference_reports_ambiguous_basename():
-    from agently.core.application.AgentTask.EvidenceLedger import resolve_evidence_reference
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import resolve_evidence_reference
 
     ledger = {
         "evidence_items": [
@@ -4449,7 +4450,7 @@ def test_execution_meta_action_results_enter_canonical_evidence_ledger():
     assert "action_result_market_quotes" in item["aliases"]
     assert "NVDA" in json.dumps(item.get("body") or item.get("preview"), ensure_ascii=False)
 
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     guard = validate_evidence_use(
         [
@@ -4505,7 +4506,7 @@ def test_access_blocked_action_preview_is_unavailability_evidence_only():
     assert item["supports"]["unavailability"] is True
     assert item["diagnostics"][0]["code"] == "agent_task.action_result.access_blocked_preview"
 
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     guard = validate_evidence_use(
         [
@@ -13975,7 +13976,7 @@ async def test_taskboard_action_card_repairs_binding_without_repeating_business_
 
 @pytest.mark.asyncio
 async def test_taskboard_finalizer_repairs_binding_before_terminal_verifier(tmp_path, monkeypatch):
-    from agently.core.application.AgentTask.EvidenceLedger import collect_evidence_use, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import collect_evidence_use, validate_evidence_use
 
     task = AgentTask(
         _create_agent("taskboard-finalizer-binding-repair").use_task_workspace(tmp_path / "task_workspace"),
@@ -20133,7 +20134,7 @@ async def test_terminal_verification_uses_one_semantic_request_without_grounding
     tmp_path,
     monkeypatch,
 ):
-    verification_module = importlib.import_module("agently.core.application.AgentTask.Verification")
+    verification_module = importlib.import_module("agently.builtins.plugins.AgentExecution.long_task.Verification")
     agent = _create_agent("agent-single-terminal-verifier").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -20913,7 +20914,7 @@ async def test_agent_task_loop_progress_model_omits_developer_diagnostics(tmp_pa
     async def noisy_descriptors(*_args, **_kwargs):
         raise RuntimeError('fts5: syntax error near "."; no such column: question')
 
-    source = task.task_context._binding_source(task._task_workspace_context_binding_id)
+    source = task.task_context._binding_source(cast(BundledAgentExecution, task)._task_workspace_context_binding_id)
     monkeypatch.setattr(source, "async_enumerate_descriptors", noisy_descriptors)
 
     stream_items = [item async for item in task.get_async_generator(type="instant")]
@@ -23716,7 +23717,7 @@ def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(t
 
 
 def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_overflow(tmp_path):
-    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import validate_evidence_use
 
     agent = _create_agent("agent-task-current-evidence-priority").use_task_workspace(tmp_path / "task-workspace")
     task = AgentTask(

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .AgentlyAgentOrchestrator import AgentlyAgentOrchestrator
-from .modules.execution import AgentExecution
+from agently.builtins.plugins.AgentExecution import AgentExecution
 
 __all__ = [
     "AgentlyAgentOrchestrator",

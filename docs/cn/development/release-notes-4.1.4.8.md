@@ -1,7 +1,7 @@
 ---
 title: Agently 4.1.4.8 发布说明
-description: Fluent AgentExecution typing、review 与 artifact 交付、beta Patterns、execution-scoped Skills、Action runtime 改进及发布证据。
-keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, Pattern, Action, Skill, Ollama
+description: Fluent AgentExecution typing、review 与 artifact 交付、Execution plugins、execution-scoped Skills、Action runtime 改进及发布证据。
+keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, plugin, Action, Skill, Ollama
 ---
 
 # Agently 4.1.4.8 发布说明
@@ -58,14 +58,14 @@ Pylance 与 Pyright 现在能在 Action/Skill 链之后继续推断 `AgentExecut
 ```python
 agent.use_actions(load_account, always=True)
 
-one_run = agent.input("起草上线计划。").pattern("plan")
+one_run = agent.create_execution("plan").input("起草上线计划。")
 ```
 
 Skills 采用同样的返回类型规则；Skill 注册与 exact-revision 绑定参见
 [release-pinned Skill 示例](../../../examples/release_pinned_usage/03_skill_library_agent_binding.py)。
 
-IDE 会为 `pattern`、`effort`、`strategy`、`planning_protocol` 和 Action
-`concurrency_mode` 显示内置候选；公开合同允许扩展的位置仍接受插件 Pattern 名或
+IDE 会为 `create_execution`、`effort`、`strategy`、`planning_protocol` 和 Action
+`concurrency_mode` 显示内置候选；公开合同允许扩展的位置仍接受插件 Execution 名或
 替代 orchestrator strategy 名。
 
 ## 核心变动
@@ -79,22 +79,27 @@ IDE 会为 `pattern`、`effort`、`strategy`、`planning_protocol` 和 Action
 | Action 交付与 debug | 终态 Action response 复用当前 execution result；并发 console stream 按 first-delta FIFO 展示且不串行化执行。 | `debug=True` 用于可读展示，EventCenter/DevTools 保存完整事实。 | 仅展示层改变；事件和执行顺序仍由运行时负责。 | Pinned examples 04、05 与 console/action tests。 |
 | Skills | Agent 默认与 execution-local 声明冻结一个 exact-revision scope；script discovery 只返回 inert candidate，等待 host 显式授权。 | Agent 默认使用 `always=True`，本轮增量使用 execution 方法。 | Scope fail-closed；无隐式 script actionization。 | Pinned examples 03、07、Skills tests、Agently-Skills V2 guidance。 |
 | Agent 交付策略 | `interact`、`review(rules=..., on_fail=...)` 与经 TaskWorkspace 校验的 `artifact` 成为稳定公开方法。 | 把 handler 绑定在拥有结果与 artifact 的 execution 上。 | 增量能力；blocking review 可以阻止终态成功。 | Examples 25、26 与 AgentExecution handler/artifact tests。 |
-| Patterns | 通过 `.pattern(...)` 提供内置 `plan` 与 `long_content` whole-request Pattern。 | 每次 execution 显式选择，最终业务值仍由 AgentExecution 交付。 | Beta；不兼容的 delivery contract 会在 dispatch 前失败。 | Examples 26、27 与 Pattern isolation/contract tests。 |
+| Execution 插件 | `create_execution(name)` 直接返回注册的执行实例；内置 `auto`、`request`、`long_task`、`plan`、`long_content`。 | 按需显式选择生产方；`.goal(..., turn_on_long_task=False)` 只声明语义目标。 | 替换未发布的 Pattern；已发布 Orchestrator/AgentTask 入口保留为兼容适配。 | Examples 26–28 及插件身份、目标补全、最终策略与 typing tests。 |
 | MCP | Playwright MCP examples 覆盖本地生命周期与模型驱动浏览器使用。 | 让 ExecutionResource 管理 MCP session 并确定性关闭。 | 依赖外部 runtime/browser。 | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` 与 `2_4_mcp_playwright_agent_qwen.py`。 |
 
 ## 本版补齐的 Examples
 
 - `25_agent_execution_delivery_review_ollama.py`：真实本地 Qwen 生成、模型 review、
   blocking handler review 与物理 artifact readback。
-- `26_plan_pattern_interaction_ollama.py`：一次 connected clarification exchange、
+- `26_plan_execution_interaction_ollama.py`：一次 connected clarification exchange、
   host-validated plan 与 artifact 交付。
-- `27_long_content_pattern_artifact_ollama.py`：section planning/writing、host 顺序组装、
+- `27_long_content_execution_artifact_ollama.py`：section planning/writing、host 顺序组装、
   artifact 校验与 advisory review。
+- `28_missing_goal_preparation_ollama.py`：为显式选定的长任务按需推导缺失目标。
 - Release-pinned examples 06、07：无模型依赖地锁定 accepted retry stream 与
   execution-scoped Skill composition。
 
-Ollama examples 默认使用 `qwen3.5:9b`；可通过
-`AGENT_PATTERN_OLLAMA_MODEL` 或 `OLLAMA_DEFAULT_MODEL` 切换其他本地 Qwen。
+Ollama examples 默认使用 `qwen`；可通过
+`AGENT_EXECUTION_OLLAMA_MODEL` 或 `OLLAMA_DEFAULT_MODEL` 切换其他本地 Qwen。
+
+重构检查点：最新 26/27 实跑完成了框架交付，但语义检查分别发现虚构参与人数门槛、
+扩大部署限制；28 完成目标补全后在后续生产阶段超时。这些问题保留为 Prompt 审查项，
+不算语义发布验收通过。统一 rework、控制与快照接口仍未完成，当前候选尚不可发版。
 
 ## 兼容性与发布门禁
 

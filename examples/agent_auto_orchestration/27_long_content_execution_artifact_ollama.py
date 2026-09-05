@@ -1,13 +1,13 @@
-"""Built-in beta long-content Pattern with verified artifact delivery.
+"""Built-in long-content Execution with verified artifact delivery.
 
 Run:
-    python examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py
+    python examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py
 
 Environment:
     Local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434/v1).
-    AGENT_PATTERN_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen3.5:9b).
+    AGENT_EXECUTION_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
 
-The Pattern owns one section-plan request plus one request per planned section.
+The Execution owns one section-plan request plus one request per planned section.
 The host assembles the Markdown in plan order, then TaskWorkspace writes and
 physically reads back the declared artifact before the advisory review runs.
 """
@@ -28,7 +28,7 @@ from examples.agent_auto_orchestration._ollama_qwen import (  # noqa: E402
     configure_ollama_qwen,
 )
 
-RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "long_content_pattern_artifact"
+RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "long_content_execution_artifact"
 
 SOURCE_FACTS = {
     "current_state": "three services each parse customer locale independently",
@@ -51,38 +51,37 @@ async def main() -> None:
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent("long-content-pattern-artifact-ollama").use_task_workspace(
+    agent = Agently.create_agent("long-content-execution-artifact-ollama").use_task_workspace(
         RUNTIME_ROOT, mode="read_write"
     )
-    agent.set_settings("plugins.AgentPattern.long_content.max_sections", 3)
-    agent.set_settings("plugins.AgentPattern.long_content.continuity_chars", 800)
+    agent.set_settings("plugins.AgentExecution.long_content.max_sections", 3)
+    agent.set_settings("plugins.AgentExecution.long_content.continuity_chars", 800)
     agent.set_settings("debug", True)
     execution = (
-        agent.input({"migration_facts": SOURCE_FACTS})
+        agent.create_execution("long_content").input({"migration_facts": SOURCE_FACTS})
         .instruct(
             "Write a concise migration runbook with exactly three complementary sections: "
             "scope and invariants, rollout and rollback, and acceptance evidence. Use only the "
             "supplied facts; label any necessary assumption and do not invent observed results."
         )
-        .pattern("long_content")
         .artifact("reports/locale-migration-runbook.md")
         .review()
     )
 
     document = await execution.async_get_data()
     meta = await execution.async_get_meta()
-    pattern_run = meta["diagnostics"].get("pattern_run")
-    if pattern_run is None:
-        raise RuntimeError("Expected long-content Pattern diagnostics.")
+    execution_run = meta["diagnostics"].get("execution_run")
+    if execution_run is None:
+        raise RuntimeError("Expected long-content Execution diagnostics.")
     artifact_ref = meta["logs"]["artifact_refs"][0]
     artifact_text = (RUNTIME_ROOT / artifact_ref["path"]).read_text(encoding="utf-8")
 
     print(f"model={model}")
-    print(f"pattern_name={meta['pattern']['name']}")
-    print(f"pattern_status={meta['pattern']['status']}")
-    print(f"section_count={pattern_run['section_count']}")
-    print(f"model_request_count={pattern_run['model_request_count']}")
-    print(f"assembly={pattern_run['assembly']}")
+    print(f"execution_name={meta['plugin']}")
+    print(f"execution_status={meta['status']}")
+    print(f"section_count={execution_run['section_count']}")
+    print(f"model_request_count={execution_run['model_request_count']}")
+    print(f"assembly={execution_run['assembly']}")
     print(f"artifact_path={artifact_ref['path']}")
     print(f"artifact_readback_matches={artifact_text == document}")
     reviews = meta.get("reviews", [])
@@ -96,10 +95,10 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Expected key output from one real local qwen3.5:9b run on 2026-09-05:
+# Recorded local qwen3.5:9b execution-plugin run (2026-09-05):
 # model=qwen3.5:9b
-# pattern_name=long_content
-# pattern_status=completed
+# execution_name=long_content
+# execution_status=success
 # section_count=3
 # model_request_count=4
 # assembly=host_ordered
@@ -110,3 +109,6 @@ if __name__ == "__main__":
 #
 # Document prose remains model-owned. Section count, host ordering, verified
 # artifact readback, and review source are the stable framework evidence.
+
+# Semantic audit: a billing-only Friday restriction became a general ban.
+# Model review passed but missed this deviation; Prompt audit remains open.

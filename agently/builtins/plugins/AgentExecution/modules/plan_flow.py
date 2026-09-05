@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import asyncio
 from collections.abc import Mapping
 from contextlib import suppress
@@ -30,13 +32,13 @@ from .model_stage import run_model_stage
 
 if TYPE_CHECKING:
     from agently.core.orchestration import TriggerFlowExecution
-    from agently.types.plugins import AgentExecution
+    from .execution import AgentExecution
 
 
-_ANALYZE_EVENT = "agent_pattern.plan.analyze"
-_CLARIFY_EVENT = "agent_pattern.plan.clarify"
-_FINALIZE_EVENT = "agent_pattern.plan.finalize"
-_RUNTIME_RESOURCE = "agent_pattern_plan_runtime"
+_ANALYZE_EVENT = "agent_execution.plan.analyze"
+_CLARIFY_EVENT = "agent_execution.plan.clarify"
+_FINALIZE_EVENT = "agent_execution.plan.finalize"
+_RUNTIME_RESOURCE = "agent_execution_plan_runtime"
 
 
 class _PlanQuestionData(TypedDict):
@@ -71,16 +73,16 @@ class _PlanReadiness(BaseModel):
 
 
 @dataclass(frozen=True)
-class PlanPatternConfig:
+class PlanExecutionConfig:
     max_questions_per_round: int = 3
     max_clarification_rounds: int = 3
 
 
-class _PlanPatternRuntime:
+class _PlanExecutionRuntime:
     def __init__(
         self,
         execution: "AgentExecution",
-        config: PlanPatternConfig,
+        config: PlanExecutionConfig,
     ) -> None:
         self.execution = execution
         self.config = config
@@ -93,7 +95,7 @@ class _PlanPatternRuntime:
     ) -> _PlanReadinessData:
         value = await run_model_stage(
             self.execution,
-            pattern="plan",
+            producer="plan",
             stage=f"readiness_{clarification_round + 1}",
             stage_input={
                 "clarification_round": clarification_round,
@@ -117,7 +119,7 @@ class _PlanPatternRuntime:
             output=_PlanReadiness,
         )
         return _normalize_readiness(
-            value,
+            value.value,
             max_questions=self.config.max_questions_per_round,
         )
 
@@ -127,9 +129,9 @@ class _PlanPatternRuntime:
         readiness: _PlanReadinessData,
         clarifications: list[_PlanClarificationData],
     ) -> object:
-        return await run_model_stage(
+        result = await run_model_stage(
             self.execution,
-            pattern="plan",
+            producer="plan",
             stage="final_plan",
             stage_input={
                 "validated_readiness": readiness,
@@ -152,12 +154,13 @@ class _PlanPatternRuntime:
             ],
             preserve_external_output=True,
         )
+        return result.value
 
 
-def _require_runtime(data: TriggerFlowRuntimeData) -> _PlanPatternRuntime:
+def _require_runtime(data: TriggerFlowRuntimeData) -> _PlanExecutionRuntime:
     runtime = data.require_resource(_RUNTIME_RESOURCE)
-    if not isinstance(runtime, _PlanPatternRuntime):
-        raise TypeError("Plan Pattern TriggerFlow runtime resource is invalid.")
+    if not isinstance(runtime, _PlanExecutionRuntime):
+        raise TypeError("Plan Execution TriggerFlow runtime resource is invalid.")
     return runtime
 
 
@@ -199,7 +202,7 @@ async def _route_readiness(data: TriggerFlowRuntimeData) -> None:
     clarification_round = raw_round if isinstance(raw_round, int) else 0
     if clarification_round >= runtime.config.max_clarification_rounds:
         raise RuntimeError(
-            "Plan Pattern exhausted its clarification safety limit before the request became plan-ready."
+            "Plan Execution exhausted its clarification safety limit before the request became plan-ready."
         )
     await data.async_emit(_CLARIFY_EVENT, readiness)
 
@@ -214,7 +217,7 @@ async def _request_clarification(data: TriggerFlowRuntimeData) -> object:
     )
     questions = readiness.get("questions")
     if not isinstance(questions, list) or not questions:
-        raise ValueError("Plan Pattern can pause only with at least one validated clarification question.")
+        raise ValueError("Plan Execution can pause only with at least one validated clarification question.")
     raw_round = data.get_state("clarification_round", 0)
     clarification_round = raw_round if isinstance(raw_round, int) else 0
     exchange_payload = {
@@ -227,7 +230,7 @@ async def _request_clarification(data: TriggerFlowRuntimeData) -> object:
         {
             "exchange_kind": "clarification",
             "audit_metadata": {
-                "source": "AgentPattern:plan",
+                "source": "AgentExecution:plan",
                 "subject": "Plan clarification",
             },
         },
@@ -271,7 +274,7 @@ async def _request_clarification(data: TriggerFlowRuntimeData) -> object:
             ]
         },
         audit_metadata={
-            "source": "AgentPattern:plan",
+            "source": "AgentExecution:plan",
             "subject": "Plan clarification",
             "clarification_round": clarification_round + 1,
         },
@@ -281,7 +284,7 @@ async def _request_clarification(data: TriggerFlowRuntimeData) -> object:
 async def _accept_clarification(data: TriggerFlowRuntimeData) -> None:
     response = DataFormatter.sanitize(data.value)
     if response is None or response == "" or response == [] or response == {}:
-        raise ValueError("Plan Pattern clarification response cannot be empty.")
+        raise ValueError("Plan Execution clarification response cannot be empty.")
     readiness = data.get_state("readiness", {})
     questions = readiness.get("questions", []) if isinstance(readiness, Mapping) else []
     raw_clarifications = data.get_state("clarifications", [])
@@ -322,19 +325,17 @@ async def _finalize_plan(data: TriggerFlowRuntimeData) -> None:
             else [],
         ),
     )
-    await data.async_set_state("pattern_result", result, emit=False)
+    await data.async_set_state("execution_result", result, emit=False)
 
 
+@lru_cache(maxsize=1)
 def _build_plan_flow() -> TriggerFlow[Any, Any, Any]:
-    flow: TriggerFlow[Any, Any, Any] = TriggerFlow(name="agent-pattern-plan")
+    flow: TriggerFlow[Any, Any, Any] = TriggerFlow(name="agent-execution-plan")
     flow.to(_initialize_plan)
     flow.when(_ANALYZE_EVENT).to(_analyze_plan).to(_route_readiness)
     flow.when(_CLARIFY_EVENT).to(_request_clarification).to(_accept_clarification)
     flow.when(_FINALIZE_EVENT).to(_finalize_plan)
     return flow
-
-
-_PLAN_FLOW = _build_plan_flow()
 
 
 async def _drive_connected_exchanges(
@@ -360,11 +361,11 @@ async def _drive_connected_exchanges(
             await parent_execution.execution_context.async_notify_exchange(
                 "pending",
                 normalized_views,
-                meta={"pattern": "plan", "interrupt_id": interrupt_id},
+                meta={"execution": "plan", "interrupt_id": interrupt_id},
             )
             raise RuntimeError(
-                "Plan Pattern reached a durable clarification pause, but AgentExecution "
-                "cannot yet return a resumable Pattern handle. Configure connected interaction."
+                "Plan Execution reached a durable clarification pause, but AgentExecution "
+                "cannot yet return a resumable Execution handle. Configure connected interaction."
             )
 
         wait_task = asyncio.create_task(
@@ -374,12 +375,12 @@ async def _drive_connected_exchanges(
         await parent_execution.execution_context.async_notify_exchange(
             "pending",
             normalized_views,
-            meta={"pattern": "plan", "interrupt_id": interrupt_id},
+            meta={"execution": "plan", "interrupt_id": interrupt_id},
         )
         resolved = await wait_task
         if not resolved:
             raise TimeoutError(
-                "Plan Pattern clarification timed out before a connected response arrived."
+                "Plan Execution clarification timed out before a connected response arrived."
             )
         resolved_interrupt = flow_execution.get_interrupt(interrupt_id)
         resolved_views = (
@@ -397,21 +398,21 @@ async def _drive_connected_exchanges(
         await parent_execution.execution_context.async_notify_exchange(
             "resolved",
             resolved_views,
-            meta={"pattern": "plan", "interrupt_id": interrupt_id},
+            meta={"execution": "plan", "interrupt_id": interrupt_id},
         )
 
 
-async def run_plan_pattern(
+async def run_plan_execution(
     execution: "AgentExecution",
-    config: PlanPatternConfig,
+    config: PlanExecutionConfig,
 ) -> object:
     if bool(getattr(execution, "_ensure_long_output_enabled", False)):
         raise ValueError(
-            "Plan Pattern cannot be combined with ensure_long_output(); the Pattern's "
+            "Plan Execution cannot be combined with ensure_long_output(); the Execution's "
             "terminal plan stage does not use direct-route transport continuation."
         )
-    runtime = _PlanPatternRuntime(execution, config)
-    flow_execution = _PLAN_FLOW.create_execution(
+    runtime = _PlanExecutionRuntime(execution, config)
+    flow_execution = _build_plan_flow().create_execution(
         auto_close=False,
         runtime_resources={_RUNTIME_RESOURCE: runtime},
         parent_run_context=execution.agent_execution_run_context,
@@ -420,28 +421,28 @@ async def run_plan_pattern(
     try:
         await flow_execution.async_start(None)
         await _drive_connected_exchanges(execution, flow_execution)
-        snapshot = await flow_execution.async_close(reason="agent_pattern_completed")
+        snapshot = await flow_execution.async_close(reason="agent_execution_completed")
     except BaseException:
         if not flow_execution.is_closed():
             with suppress(BaseException):
                 await flow_execution.async_close(
-                    reason="agent_pattern_failed",
+                    reason="agent_execution_failed",
                     pending_interrupts="cancel",
                 )
         raise
-    if not isinstance(snapshot, Mapping) or "pattern_result" not in snapshot:
-        raise RuntimeError("Plan Pattern completed without a terminal plan result.")
-    diagnostic = execution.diagnostics.get("pattern_run", {})
+    if not isinstance(snapshot, Mapping) or "execution_result" not in snapshot:
+        raise RuntimeError("Plan Execution completed without a terminal plan result.")
+    diagnostic = execution.diagnostics.get("execution_run", {})
     if isinstance(diagnostic, dict):
         diagnostic["clarification_rounds"] = int(
             snapshot.get("clarification_round", 0)
         )
-        execution.diagnostics["pattern_run"] = diagnostic
+        execution.diagnostics["execution_run"] = diagnostic
     execution._review_contract = {
         "deliverable_role": "An actionable plan, not execution of the planned task.",
         "clarifications": snapshot.get("clarifications", []),
     }
-    return snapshot["pattern_result"]
+    return snapshot["execution_result"]
 
 
 def _normalize_readiness(
@@ -450,34 +451,34 @@ def _normalize_readiness(
     max_questions: int,
 ) -> _PlanReadinessData:
     if not isinstance(value, Mapping):
-        raise TypeError("Plan Pattern readiness stage must return a mapping.")
+        raise TypeError("Plan Execution readiness stage must return a mapping.")
     plan_ready = value.get("plan_ready")
     if not isinstance(plan_ready, bool):
-        raise TypeError("Plan Pattern readiness field `plan_ready` must be Boolean.")
+        raise TypeError("Plan Execution readiness field `plan_ready` must be Boolean.")
     normalized_text: dict[str, str] = {}
     for key in ("planning_goal", "final_deliverable", "readiness_summary"):
         item = str(value.get(key) or "").strip()
         if not item:
-            raise ValueError(f"Plan Pattern readiness field `{key}` cannot be empty.")
+            raise ValueError(f"Plan Execution readiness field `{key}` cannot be empty.")
         normalized_text[key] = item
     raw_questions = value.get("questions", [])
     if not isinstance(raw_questions, list):
-        raise TypeError("Plan Pattern readiness field `questions` must be a list.")
+        raise TypeError("Plan Execution readiness field `questions` must be a list.")
     if len(raw_questions) > max_questions:
         raise ValueError(
-            f"Plan Pattern readiness returned more than {max_questions} questions."
+            f"Plan Execution readiness returned more than {max_questions} questions."
         )
     questions: list[_PlanQuestionData] = []
     for index, item in enumerate(raw_questions, start=1):
         if not isinstance(item, Mapping):
             raise TypeError(
-                f"Plan Pattern readiness question {index} must be a mapping."
+                f"Plan Execution readiness question {index} must be a mapping."
             )
         question = str(item.get("question") or "").strip()
         why_needed = str(item.get("why_needed") or "").strip()
         if not question or not why_needed:
             raise ValueError(
-                f"Plan Pattern readiness question {index} requires question and why_needed."
+                f"Plan Execution readiness question {index} requires question and why_needed."
             )
         questions.append({"question": question, "why_needed": why_needed})
     if plan_ready and questions:
@@ -493,4 +494,4 @@ def _normalize_readiness(
     }
 
 
-__all__ = ["PlanPatternConfig", "run_plan_pattern"]
+__all__ = ["PlanExecutionConfig", "run_plan_execution"]

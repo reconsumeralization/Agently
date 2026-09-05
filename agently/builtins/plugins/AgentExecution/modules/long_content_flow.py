@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,10 +29,10 @@ from agently.types.trigger_flow import TriggerFlowRuntimeData
 from .model_stage import run_model_stage
 
 if TYPE_CHECKING:
-    from agently.types.plugins import AgentExecution
+    from .execution import AgentExecution
 
 
-_RUNTIME_RESOURCE = "agent_pattern_long_content_runtime"
+_RUNTIME_RESOURCE = "agent_execution_long_content_runtime"
 
 
 class _DocumentSectionData(TypedDict):
@@ -77,16 +79,16 @@ class _SectionDraft(BaseModel):
 
 
 @dataclass(frozen=True)
-class LongContentPatternConfig:
+class LongContentExecutionConfig:
     max_sections: int = 12
     continuity_chars: int = 4_000
 
 
-class _LongContentPatternRuntime:
+class _LongContentExecutionRuntime:
     def __init__(
         self,
         execution: "AgentExecution",
-        config: LongContentPatternConfig,
+        config: LongContentExecutionConfig,
     ) -> None:
         self.execution = execution
         self.config = config
@@ -94,7 +96,7 @@ class _LongContentPatternRuntime:
     async def plan_document(self) -> _DocumentPlanData:
         value = await run_model_stage(
             self.execution,
-            pattern="long_content",
+            producer="long_content",
             stage="section_plan",
             stage_input={
                 "result_role": "one coherent long-form text document",
@@ -113,7 +115,7 @@ class _LongContentPatternRuntime:
             ],
             output=_DocumentPlan,
         )
-        return _normalize_document_plan(value, max_sections=self.config.max_sections)
+        return _normalize_document_plan(value.value, max_sections=self.config.max_sections)
 
     async def write_section(
         self,
@@ -125,7 +127,7 @@ class _LongContentPatternRuntime:
     ) -> _SectionDraftData:
         value = await run_model_stage(
             self.execution,
-            pattern="long_content",
+            producer="long_content",
             stage=f"section_{index + 1}",
             stage_input={
                 "section_index": index,
@@ -152,15 +154,15 @@ class _LongContentPatternRuntime:
             output=_SectionDraft,
         )
         return _normalize_section_draft(
-            value,
+            value.value,
             continuity_chars=self.config.continuity_chars,
         )
 
 
-def _require_runtime(data: TriggerFlowRuntimeData) -> _LongContentPatternRuntime:
+def _require_runtime(data: TriggerFlowRuntimeData) -> _LongContentExecutionRuntime:
     runtime = data.require_resource(_RUNTIME_RESOURCE)
-    if not isinstance(runtime, _LongContentPatternRuntime):
-        raise TypeError("Long Content Pattern TriggerFlow runtime resource is invalid.")
+    if not isinstance(runtime, _LongContentExecutionRuntime):
+        raise TypeError("Long Content Execution TriggerFlow runtime resource is invalid.")
     return runtime
 
 
@@ -175,7 +177,7 @@ async def _plan_document(data: TriggerFlowRuntimeData) -> list[_DocumentSectionD
 async def _write_section(data: TriggerFlowRuntimeData) -> _WrittenSectionData:
     runtime = _require_runtime(data)
     if not isinstance(data.value, Mapping):
-        raise TypeError("Long Content Pattern section input must be a mapping.")
+        raise TypeError("Long Content Execution section input must be a mapping.")
     section: _DocumentSectionData = {
         "section_id": str(data.value.get("section_id") or ""),
         "title": str(data.value.get("title") or ""),
@@ -183,11 +185,11 @@ async def _write_section(data: TriggerFlowRuntimeData) -> _WrittenSectionData:
     }
     raw_plan = data.get_state("document_plan", {})
     if not isinstance(raw_plan, Mapping):
-        raise RuntimeError("Long Content Pattern document plan is unavailable.")
+        raise RuntimeError("Long Content Execution document plan is unavailable.")
     plan = cast(_DocumentPlanData, dict(raw_plan))
     sections = plan.get("sections", [])
     if not isinstance(sections, list):
-        raise RuntimeError("Long Content Pattern document sections are unavailable.")
+        raise RuntimeError("Long Content Execution document sections are unavailable.")
     index = next(
         (
             item_index
@@ -199,7 +201,7 @@ async def _write_section(data: TriggerFlowRuntimeData) -> _WrittenSectionData:
     )
     if index < 0:
         raise RuntimeError(
-            f"Long Content Pattern section {section['section_id']!r} is not in the validated plan."
+            f"Long Content Execution section {section['section_id']!r} is not in the validated plan."
         )
     raw_notes = data.get_state("continuity_notes", [])
     notes = cast(
@@ -238,16 +240,17 @@ async def _write_section(data: TriggerFlowRuntimeData) -> _WrittenSectionData:
 async def _assemble_document(data: TriggerFlowRuntimeData) -> None:
     plan = data.get_state("document_plan", {})
     if not isinstance(plan, Mapping):
-        raise RuntimeError("Long Content Pattern completed without a document plan.")
+        raise RuntimeError("Long Content Execution completed without a document plan.")
     drafts = data.value
     if not isinstance(drafts, list):
-        raise TypeError("Long Content Pattern section writers must return an ordered list.")
+        raise TypeError("Long Content Execution section writers must return an ordered list.")
     result = _assemble_markdown(cast(_DocumentPlanData, dict(plan)), drafts)
-    await data.async_set_state("pattern_result", result, emit=False)
+    await data.async_set_state("execution_result", result, emit=False)
 
 
+@lru_cache(maxsize=1)
 def _build_long_content_flow() -> TriggerFlow[Any, Any, Any]:
-    flow: TriggerFlow[Any, Any, Any] = TriggerFlow(name="agent-pattern-long-content")
+    flow: TriggerFlow[Any, Any, Any] = TriggerFlow(name="agent-execution-long-content")
     (
         flow.to(_plan_document)
         .for_each(concurrency=1)
@@ -258,30 +261,27 @@ def _build_long_content_flow() -> TriggerFlow[Any, Any, Any]:
     return flow
 
 
-_LONG_CONTENT_FLOW = _build_long_content_flow()
-
-
-async def run_long_content_pattern(
+async def run_long_content_execution(
     execution: "AgentExecution",
-    config: LongContentPatternConfig,
+    config: LongContentExecutionConfig,
 ) -> str:
     if execution.prompt_snapshot.get("output") not in (None, {}, []):
         raise ValueError(
-            "Long Content Pattern returns assembled text and cannot be combined "
+            "Long Content Execution returns assembled text and cannot be combined "
             "with a structured .output(...) contract."
         )
     if execution.prompt_snapshot.get("output_format") not in (None, "", "text"):
         raise ValueError(
-            "Long Content Pattern returns assembled text and cannot be combined with a structured output format."
+            "Long Content Execution returns assembled text and cannot be combined with a structured output format."
         )
     if bool(getattr(execution, "_ensure_long_output_enabled", False)):
         raise ValueError(
-            "Long Content Pattern cannot be combined with ensure_long_output(); "
+            "Long Content Execution cannot be combined with ensure_long_output(); "
             "choose semantic composition or transport continuation explicitly."
         )
 
-    runtime = _LongContentPatternRuntime(execution, config)
-    flow_execution = _LONG_CONTENT_FLOW.create_execution(
+    runtime = _LongContentExecutionRuntime(execution, config)
+    flow_execution = _build_long_content_flow().create_execution(
         auto_close=False,
         record_store=False,
         runtime_resources={_RUNTIME_RESOURCE: runtime},
@@ -290,27 +290,27 @@ async def run_long_content_pattern(
     )
     try:
         await flow_execution.async_start(None)
-        snapshot = await flow_execution.async_close(reason="agent_pattern_completed")
+        snapshot = await flow_execution.async_close(reason="agent_execution_completed")
     except BaseException:
         if not flow_execution.is_closed():
             with suppress(BaseException):
                 await flow_execution.async_close(
-                    reason="agent_pattern_failed",
+                    reason="agent_execution_failed",
                     pending_interrupts="cancel",
                 )
         raise
     if not isinstance(snapshot, Mapping):
-        raise RuntimeError("Long Content Pattern completed without terminal state.")
-    result = snapshot.get("pattern_result")
+        raise RuntimeError("Long Content Execution completed without terminal state.")
+    result = snapshot.get("execution_result")
     if not isinstance(result, str) or not result.strip():
-        raise RuntimeError("Long Content Pattern completed without assembled text.")
+        raise RuntimeError("Long Content Execution completed without assembled text.")
     plan = snapshot.get("document_plan", {})
     section_count = (
         len(plan.get("sections", []))
         if isinstance(plan, Mapping) and isinstance(plan.get("sections"), list)
         else 0
     )
-    diagnostic = execution.diagnostics.get("pattern_run", {})
+    diagnostic = execution.diagnostics.get("execution_run", {})
     if isinstance(diagnostic, dict):
         diagnostic.update(
             {
@@ -319,7 +319,7 @@ async def run_long_content_pattern(
                 "assembly": "host_ordered",
             }
         )
-        execution.diagnostics["pattern_run"] = diagnostic
+        execution.diagnostics["execution_run"] = diagnostic
     return result
 
 
@@ -329,34 +329,34 @@ def _normalize_document_plan(
     max_sections: int,
 ) -> _DocumentPlanData:
     if not isinstance(value, Mapping):
-        raise TypeError("Long Content Pattern document plan must be a mapping.")
+        raise TypeError("Long Content Execution document plan must be a mapping.")
     document_title = str(value.get("document_title") or "").strip()
     if not document_title:
-        raise ValueError("Long Content Pattern document title cannot be empty.")
+        raise ValueError("Long Content Execution document title cannot be empty.")
     raw_sections = value.get("sections")
     if not isinstance(raw_sections, list) or not raw_sections:
-        raise ValueError("Long Content Pattern requires at least one planned section.")
+        raise ValueError("Long Content Execution requires at least one planned section.")
     if len(raw_sections) > max_sections:
         raise ValueError(
-            f"Long Content Pattern plan exceeds max_sections={max_sections}."
+            f"Long Content Execution plan exceeds max_sections={max_sections}."
         )
     sections: list[_DocumentSectionData] = []
     section_ids: set[str] = set()
     for index, item in enumerate(raw_sections, start=1):
         if not isinstance(item, Mapping):
             raise TypeError(
-                f"Long Content Pattern section {index} must be a mapping."
+                f"Long Content Execution section {index} must be a mapping."
             )
         section_id = str(item.get("section_id") or "").strip()
         title = str(item.get("title") or "").strip()
         brief = str(item.get("brief") or "").strip()
         if not section_id or not title or not brief:
             raise ValueError(
-                f"Long Content Pattern section {index} requires section_id, title, and brief."
+                f"Long Content Execution section {index} requires section_id, title, and brief."
             )
         if section_id in section_ids:
             raise ValueError(
-                f"Long Content Pattern section_id {section_id!r} is duplicated."
+                f"Long Content Execution section_id {section_id!r} is duplicated."
             )
         section_ids.add(section_id)
         sections.append(
@@ -371,10 +371,10 @@ def _normalize_section_draft(
     continuity_chars: int,
 ) -> _SectionDraftData:
     if not isinstance(value, Mapping):
-        raise TypeError("Long Content Pattern section writer must return a mapping.")
+        raise TypeError("Long Content Execution section writer must return a mapping.")
     body = str(value.get("body") or "").strip()
     if not body:
-        raise ValueError("Long Content Pattern section body cannot be empty.")
+        raise ValueError("Long Content Execution section body cannot be empty.")
     continuity_note = str(value.get("continuity_note") or "").strip()
     if len(continuity_note) > continuity_chars:
         continuity_note = continuity_note[:continuity_chars].rstrip()
@@ -412,36 +412,36 @@ def _assemble_markdown(
     sections = plan.get("sections")
     if not isinstance(sections, list) or len(drafts) != len(sections):
         raise RuntimeError(
-            "Long Content Pattern cannot assemble an incomplete section set."
+            "Long Content Execution cannot assemble an incomplete section set."
         )
     drafted_by_id: dict[str, Mapping[str, object]] = {}
     for item in drafts:
         if not isinstance(item, Mapping):
-            raise TypeError("Long Content Pattern section draft must be a mapping.")
+            raise TypeError("Long Content Execution section draft must be a mapping.")
         section_id = str(item.get("section_id") or "")
         if not section_id or section_id in drafted_by_id:
             raise RuntimeError(
-                "Long Content Pattern section drafts contain a missing or duplicate section_id."
+                "Long Content Execution section drafts contain a missing or duplicate section_id."
             )
         drafted_by_id[section_id] = item
 
     parts = [f"# {str(plan.get('document_title') or '').strip()}"]
     for section in sections:
         if not isinstance(section, Mapping):
-            raise TypeError("Long Content Pattern validated section must be a mapping.")
+            raise TypeError("Long Content Execution validated section must be a mapping.")
         section_id = str(section.get("section_id") or "")
         draft = drafted_by_id.get(section_id)
         if draft is None:
             raise RuntimeError(
-                f"Long Content Pattern is missing draft for section {section_id!r}."
+                f"Long Content Execution is missing draft for section {section_id!r}."
             )
         body = str(draft.get("body") or "").strip()
         if not body:
             raise ValueError(
-                f"Long Content Pattern section {section_id!r} has an empty body."
+                f"Long Content Execution section {section_id!r} has an empty body."
             )
         parts.extend([f"## {str(section.get('title') or '').strip()}", body])
     return "\n\n".join(parts).strip()
 
 
-__all__ = ["LongContentPatternConfig", "run_long_content_pattern"]
+__all__ = ["LongContentExecutionConfig", "run_long_content_execution"]

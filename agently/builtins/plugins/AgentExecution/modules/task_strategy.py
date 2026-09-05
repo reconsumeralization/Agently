@@ -21,6 +21,7 @@ from agently.utils import DataFormatter
 from agently.utils.LanguagePolicy import language_policy_from_prompt_snapshot
 
 from .runtime_guidance import drain_pending_guidance_to_task
+from .goal_preparation import PreparedGoal, prepare_missing_goal, retain_prepared_goal
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -165,7 +166,7 @@ async def _run_agent_task_route_impl(
     execution: "AgentExecution",
     route_meta: dict[str, Any],
 ) -> Any:
-    from agently.core.application import AgentTask
+    from ..long_task import AgentTask
 
     if execution.limits.get("allow_create_task") is False:
         reason = "AgentExecution limits disallow task creation (allow_create_task=False)."
@@ -206,27 +207,9 @@ async def _run_agent_task_route_impl(
         )
         execution.task_record = task
 
-    if isinstance(task, AgentTask):
-        goal = task.goal
-        success_criteria = list(task.success_criteria)
-        execution_strategy = task.execution_strategy
-    else:
-        generated_before = list(getattr(execution, "generated_success_criteria", []) or [])
-        goal = execution.task_goal()
-        success_criteria = execution.task_success_criteria()
-        execution_strategy = AgentTask.normalize_execution_strategy(task_options.get("execution", "auto"))
-        generated_after = list(getattr(execution, "generated_success_criteria", []) or [])
-        if generated_after and generated_after != generated_before:
-            await execution.emit_stream(
-                "success_criteria.generated",
-                {"goal": goal, "success_criteria": generated_after},
-                route="agent_task",
-                source="agent_execution",
-            )
-
     resolved_required_skills, required_skill_failure = await _resolve_required_skill_availability(
         execution,
-        goal=goal,
+        goal=task.goal if isinstance(task, AgentTask) else execution.task_goal(),
     )
     if required_skill_failure is not None:
         reason = _required_skill_block_reason(required_skill_failure)
@@ -260,10 +243,27 @@ async def _run_agent_task_route_impl(
             "required_capabilities": required_capabilities,
         }
 
+    if isinstance(task, AgentTask):
+        goal = task.goal
+        success_criteria = list(task.success_criteria)
+        execution_strategy = task.execution_strategy
+        retained_goal = task.options.get("goal_preparation")
+        if retained_goal is not None:
+            retain_prepared_goal(execution, PreparedGoal.from_record(retained_goal))
+    else:
+        execution_strategy = AgentTask.normalize_execution_strategy(task_options.get("execution", "auto"))
+        blocked = await prepare_missing_goal(execution)
+        if blocked is not None:
+            return blocked
+        goal = execution.task_goal()
+        success_criteria = execution.task_success_criteria()
+
     effort_strategy = execution.effective_options.get("effort_strategy")
     effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
     max_iterations = task_options.get("max_iterations")
     agent_task_options = dict(task_options.get("options") or {})
+    if execution._prepared_goal is not None:
+        agent_task_options["goal_preparation"] = execution._prepared_goal.to_record()
     if effort_strategy:
         agent_task_options.setdefault("agent_task", {})
         if isinstance(agent_task_options["agent_task"], dict):

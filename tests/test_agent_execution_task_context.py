@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast as typing_cast
+from agently.builtins.plugins.AgentExecution import AgentExecution as BundledAgentExecution
+
 from pathlib import Path
 from typing import Any, cast
 
@@ -80,7 +83,7 @@ def test_agent_execution_creates_task_context_before_route_selection(tmp_path: P
     assert execution.task_context.task_id == execution.id
     assert execution.task_context.context_id == f"agent_execution:{execution.id}:context"
     assert execution.route_info == {}
-    assert execution._selected_route is None
+    assert typing_cast(BundledAgentExecution, execution)._selected_route is None
     snapshot = execution.task_context.snapshot()
     assert len(snapshot.bindings) == 2
     assert {binding.source_id.split(":", 1)[0] for binding in snapshot.bindings} == {

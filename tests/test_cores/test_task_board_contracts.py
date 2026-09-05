@@ -495,7 +495,7 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
 
 
 def test_task_board_evidence_view_preserves_action_result_ledger_items():
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view, validate_evidence_use
 
     revision = _revision()
     action_ledger = AgentTask._evidence_ledger_from_execution_meta(
@@ -589,7 +589,7 @@ def test_taskboard_agent_card_status_does_not_duplicate_terminal_evidence_gate()
 
 
 def test_taskboard_card_evidence_repair_rebinds_unique_action_result_labels():
-    from agently.core.application.AgentTask.EvidenceLedger import collect_evidence_use, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import collect_evidence_use, validate_evidence_use
 
     ledger = AgentTask._evidence_ledger_from_execution_meta(
         {
@@ -651,7 +651,7 @@ def test_taskboard_card_evidence_repair_rebinds_unique_action_result_labels():
 
 
 def test_taskboard_card_evidence_repair_prefers_direct_artifact_ref_alias():
-    from agently.core.application.AgentTask.EvidenceLedger import (
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import (
         collect_evidence_use,
         evidence_ledger_view,
         validate_evidence_use,
@@ -704,7 +704,7 @@ def test_taskboard_card_evidence_repair_prefers_direct_artifact_ref_alias():
 
 
 def test_taskboard_card_evidence_repair_uses_unique_task_workspace_readback_for_numeric_ids():
-    from agently.core.application.AgentTask.EvidenceLedger import (
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import (
         collect_evidence_use,
         evidence_ledger_view,
         validate_evidence_use,
@@ -752,7 +752,7 @@ def test_taskboard_card_evidence_repair_uses_unique_task_workspace_readback_for_
 
 
 def test_taskboard_card_evidence_repair_uses_unique_action_result_body_snippets():
-    from agently.core.application.AgentTask.EvidenceLedger import (
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import (
         collect_evidence_use,
         evidence_ledger_view,
         validate_evidence_use,
@@ -809,7 +809,7 @@ def test_taskboard_card_evidence_repair_uses_unique_action_result_body_snippets(
 
 
 def test_taskboard_card_evidence_repair_uses_unique_search_result_titles():
-    from agently.core.application.AgentTask.EvidenceLedger import (
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import (
         collect_evidence_use,
         evidence_ledger_view,
         validate_evidence_use,
@@ -1254,7 +1254,7 @@ def test_evidence_binding_repair_prefers_acceptance_coverage_for_aggregate_artif
 
 
 def test_task_workspace_artifact_output_contract_sections_are_required_acceptance_points():
-    from agently.core.application.AgentTask.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
 
     task = AgentTask.__new__(AgentTask)
     task.options = {
@@ -1306,7 +1306,7 @@ def test_output_contract_sections_apply_only_to_declared_deliverable_path():
 
 
 def test_acceptance_locator_matches_equivalent_heading_connectors():
-    from agently.core.application.AgentTask.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
+    from agently.builtins.plugins.AgentExecution.long_task.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
 
     locators = build_task_workspace_artifact_acceptance_locator_items(
         path="final.md",
@@ -1605,7 +1605,7 @@ def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
 
 
 def test_evidence_binding_repair_candidates_include_bounded_facts_and_one_stable_selection_id():
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view
 
     ledger = evidence_ledger_view(
         {
@@ -2952,7 +2952,7 @@ def test_evidence_ledger_view_budget_keeps_content_items_over_ref_only_flood():
     """A bounded ledger view must not evict read source content in favor of
     ref-only locator spam — that is how an already-read PDF preview gets
     re-judged as unread by a later verifier turn."""
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view
 
     locator_flood = [
         {
@@ -3027,7 +3027,7 @@ def test_evidence_ledger_view_budget_keeps_content_items_over_ref_only_flood():
 def test_validate_evidence_use_resolves_overflow_key_evidence_points():
     """A cited id whose body did not fit the view budget is still valid: the
     key evidence point (id/status/body_state) is the record, not the body."""
-    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+    from agently.builtins.plugins.AgentExecution.long_task.EvidenceLedger import evidence_ledger_view, validate_evidence_use
 
     filler = [
         {

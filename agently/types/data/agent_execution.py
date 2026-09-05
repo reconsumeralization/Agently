@@ -22,6 +22,9 @@ from .record_store import RecordRef
 from .agent_review import AgentReviewResult
 
 
+AgentExecutionName: TypeAlias = Literal["auto", "request", "long_task", "plan", "long_content"] | str
+
+
 AgentExecutionStatus: TypeAlias = Literal[
     "created",
     "running",
@@ -91,7 +94,7 @@ class AgentExecutionDiagnostics(TypedDict):
     artifact: NotRequired[dict[str, Any]]
     long_output: NotRequired[dict[str, Any]]
     review: NotRequired[dict[str, Any]]
-    pattern_run: NotRequired[dict[str, object]]
+    execution_run: NotRequired[dict[str, object]]
 
 
 class ActionArtifactReleaseDiagnostic(TypedDict):
@@ -112,19 +115,12 @@ class AgentExecutionRouteInfo(TypedDict):
         "model_request",
         "agent_task",
         "route_policy_blocked",
-        "agent_pattern",
+        "plan",
+        "long_content",
     ] | str
     selected_by: str | None
     options: dict[str, Any]
     reusable: bool
-
-
-class AgentExecutionPatternInfo(TypedDict):
-    name: Literal["request", "goal", "plan", "long_content"] | str
-    source: Literal["builtin", "plugin", "instance", "handler"]
-    selected_by: Literal["default", "pattern", "goal"]
-    status: Literal["selected", "running", "completed", "failed"]
-    used_default: bool
 
 
 class AgentExecutionActionLog(TypedDict, total=False):
@@ -155,7 +151,7 @@ class AgentExecutionMeta(TypedDict):
     consumed_options: dict[str, Any]
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
-    pattern: AgentExecutionPatternInfo
+    plugin: str
     close_snapshot: dict[str, Any]
     logs: dict[str, Any]
     diagnostics: AgentExecutionDiagnostics

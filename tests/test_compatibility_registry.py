@@ -247,15 +247,23 @@ def test_public_typing_contract_remains_explicit() -> None:
     assert "not a public-method allowlist" in public_typing["compatibility_policy"]
 
 
-def test_agent_execution_standard_methods_are_separate_from_beta_patterns() -> None:
+def test_agent_execution_plugins_and_terminal_policies_share_one_owner() -> None:
     contract = _development_manifest()["request_input"][
-        "agent_execution_terminal_policies_and_patterns"
+        "agent_execution_plugins_and_terminal_policies"
     ]
 
     assert "Agent.interact" in contract["surface"]
     assert "AgentExecution.interact" in contract["surface"]
     assert "stable AgentExecution methods" in contract["standard_methods_stability"]
-    assert contract["pattern_stability"] == "beta"
+    assert contract["builtin_plugins"] == ["auto", "request", "long_task", "plan", "long_content"]
+    assert "Agent.create_execution" in contract["surface"]
+    assert "Agent.pattern" not in contract["surface"]
+    assert "Agent.verify" not in contract["surface"]
+    assert "final_result projection" in contract["contract"]
+    assert "only missing fields" in contract["goal_contract"]
+    assert "not yet implemented" in contract["pending_control_contract"]
+    assert _development_manifest()["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v3"
+    assert _development_manifest()["companions"]["docs"]["public_surface_protocol"] == "agently-docs.public-surface.v2"
     assert "normalized ExecutionExchangeView" in contract["interaction_contract"]
     assert "TriggerFlow remains the only pause/resume owner" in contract[
         "interaction_contract"

@@ -287,7 +287,7 @@ async def test_resolve_skills_plan_is_binding_and_route_preview(tmp_path: Path) 
 async def test_required_skill_availability_joins_revision_selector_to_canonical_id(
     tmp_path: Path,
 ) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.task_strategy import (
+    from agently.builtins.plugins.AgentExecution.modules.task_strategy import (
         _resolve_required_skill_availability,
     )
 
@@ -387,7 +387,7 @@ def test_agent_skills_extension_has_no_second_execution_owner() -> None:
 
 
 def test_agent_task_planner_snapshot_contains_actions_not_skill_context(tmp_path: Path) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.task_strategy import (
+    from agently.builtins.plugins.AgentExecution.modules.task_strategy import (
         _planner_capability_snapshot,
     )
 
@@ -410,7 +410,7 @@ def test_agent_task_planner_snapshot_contains_actions_not_skill_context(tmp_path
 
 
 def test_agent_task_skill_lifecycle_event_names_do_not_claim_activation() -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules import (
+    from agently.builtins.plugins.AgentExecution.modules import (
         task_strategy,
     )
 

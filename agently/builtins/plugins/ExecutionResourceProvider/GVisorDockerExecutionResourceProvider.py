@@ -12,7 +12,7 @@ import subprocess
 import uuid
 from typing import TYPE_CHECKING, Any, Sequence
 
-from agently.core import ExecutionResourceError
+from agently.core.operation import ExecutionResourceError
 from agently.types.data import TaskWorkspaceAccessGrant
 
 from .DockerExecutionResourceProvider import (

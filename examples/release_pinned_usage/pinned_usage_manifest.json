@@ -138,13 +138,13 @@
       "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
     },
     {
-      "path": "examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py",
-      "reason": "Real local Qwen plan Pattern readiness, one connected clarification exchange, structured final plan validation, and verified TaskWorkspace delivery.",
+      "path": "examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py",
+      "reason": "Real local Qwen plan Execution readiness, one connected clarification exchange, structured final plan validation, and verified TaskWorkspace delivery.",
       "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
     },
     {
-      "path": "examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py",
-      "reason": "Real local Qwen long-content Pattern section planning and writing, host-ordered assembly, verified TaskWorkspace delivery, and model-backed advisory review.",
+      "path": "examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py",
+      "reason": "Real local Qwen long-content Execution section planning and writing, host-ordered assembly, verified TaskWorkspace delivery, and model-backed advisory review.",
       "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
     }
   ],
@@ -187,12 +187,12 @@
       "examples": ["examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py"]
     },
     {
-      "work": "beta plan Pattern and request-local connected interaction",
-      "examples": ["examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py"]
+      "work": "beta plan Execution and request-local connected interaction",
+      "examples": ["examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py"]
     },
     {
-      "work": "beta long-content Pattern, host-ordered assembly, artifact delivery, and review",
-      "examples": ["examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py"]
+      "work": "beta long-content Execution, host-ordered assembly, artifact delivery, and review",
+      "examples": ["examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py"]
     }
   ]
 }

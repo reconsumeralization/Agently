@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from agently.types.config import AgentlyConfigModel
     from agently.core.model import ModelRequestResult
     from agently.types.options import ExecutionOptions
-    from agently.types.plugins import AgentExecution, AgentPatternInput
+    from agently.types.plugins import AgentExecution
 
 
 class _AgentDefinitionBuilder:
@@ -1034,18 +1034,58 @@ class BaseAgent:
             raise_ensure_failure=raise_ensure_failure,
         )
 
+    @overload
     def create_execution(
         self,
+        name: Literal["auto", "request", "long_task", "plan", "long_content"] | None = None,
+        *,
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def create_execution(
+        self,
+        name: str | None = None,
+        *,
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "AgentExecution": ...
+
+    def create_execution(
+        self,
+        name: str | None = None,
         *,
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
         options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> "AgentExecution":
-        plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
-        plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", plugin_name))
-        orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
-        return orchestrator.create_execution(
+        """Create the selected execution plugin; no model work runs here.
+
+        Built-ins: auto, request, long_task, plan, long_content. Explicit names
+        take precedence over configured defaults and released creation adapters.
+        """
+        selected = name if name is not None else self.settings.get("plugins.AgentExecution.activate", "auto")
+        if not isinstance(selected, str) or not selected.strip():
+            raise ValueError("AgentExecution name must be a non-empty registered name.")
+        selected = selected.strip()
+        legacy = self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator")
+        if name is None and selected == "auto" and legacy != "AgentlyAgentOrchestrator":
+            plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", str(legacy)))
+            orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
+            return orchestrator.create_execution(
+                self, lineage=lineage, limits=limits, options=options, parent_run_context=parent_run_context,
+            )
+        try:
+            plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentExecution", selected))
+        except (KeyError, TypeError) as error:
+            raise ValueError(f"AgentExecution {selected!r} is not registered.") from error
+        return plugin_class(
             self,
             lineage=lineage,
             limits=limits,
@@ -1816,23 +1856,18 @@ class BaseAgent:
         self,
         goal: str | list[str] | tuple[str, ...] | set[str],
         success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        turn_on_long_task: bool = True,
     ) -> "AgentExecution":
-        return self.create_execution().goal(goal, success_criteria=success_criteria)
+        """Declare a goal, enabling long-task execution by default.
+
+        Use turn_on_long_task=False for a semantic Prompt declaration only.
+        """
+        return self.create_execution().goal(
+            goal, success_criteria=success_criteria, turn_on_long_task=turn_on_long_task,
+        )
 
     goals = goal
-
-    @overload
-    def pattern(
-        self,
-        pattern: Literal["request", "goal", "plan", "long_content"],
-    ) -> "AgentExecution": ...
-
-    @overload
-    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
-
-    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
-        """Select one beta whole-request Pattern for a fresh execution draft."""
-        return self.create_execution().pattern(pattern)
 
     def interact(self, handler: "AgentInteractionHandler") -> "AgentExecution":
         """Bind a connected human-interaction handler to a fresh execution."""

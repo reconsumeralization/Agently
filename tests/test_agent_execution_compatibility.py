@@ -1,3 +1,6 @@
+from typing import cast as typing_cast
+from agently.builtins.plugins.AgentExecution import AgentExecution as BundledAgentExecution
+
 import hashlib
 import json
 import sys
@@ -1306,11 +1309,11 @@ def test_agent_execution_ensure_long_output_is_opt_in_and_fluent():
     agent = _create_test_agent("ensure-long-output-policy")
     execution = agent.input("long answer")
 
-    assert execution._ensure_long_output_enabled is False
+    assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is False
     assert execution.ensure_long_output() is execution
-    assert execution._ensure_long_output_enabled is True
+    assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is True
     assert execution.ensure_long_output(False) is execution
-    assert execution._ensure_long_output_enabled is False
+    assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is False
 
 
 def test_agent_execution_ensure_long_output_rejects_reconfiguration_after_start():

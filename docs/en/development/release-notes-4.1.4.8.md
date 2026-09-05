@@ -1,7 +1,7 @@
 ---
 title: Agently 4.1.4.8 Release Notes
-description: Fluent AgentExecution typing, review and artifact delivery, beta Patterns, scoped Skills, Action runtime improvements, and release evidence.
-keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, Pattern, Action, Skill, Ollama
+description: Fluent AgentExecution typing, review and artifact delivery, Execution plugins, scoped Skills, Action runtime improvements, and release evidence.
+keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, plugin, Action, Skill, Ollama
 ---
 
 # Agently 4.1.4.8 Release Notes
@@ -60,15 +60,15 @@ links in this chain. `always=True` remains the explicit Agent-default form:
 ```python
 agent.use_actions(load_account, always=True)
 
-one_run = agent.input("Draft the launch plan.").pattern("plan")
+one_run = agent.create_execution("plan").input("Draft the launch plan.")
 ```
 
 Skills follow the same return-type rules. For registration and exact-revision
 binding, see the [release-pinned Skill example](../../../examples/release_pinned_usage/03_skill_library_agent_binding.py).
 
-The built-in values for `pattern`, `effort`, `strategy`,
+The built-in values for `create_execution`, `effort`, `strategy`,
 `planning_protocol`, and Action `concurrency_mode` are finite IDE suggestions.
-Plugin-extensible Pattern and alternate orchestrator strategy names remain open
+Plugin-extensible Execution and alternate orchestrator strategy names remain open
 where the public contract permits them.
 
 ## Core Changes
@@ -82,7 +82,7 @@ where the public contract permits them.
 | Action delivery and debug | Terminal Action responses reuse the existing execution result; concurrent console streams display in first-delta FIFO order without serializing execution. | Use `debug=True` for readable output and EventCenter/DevTools for complete facts. | Display-only change; event and execution ordering remain authoritative. | Pinned examples 04 and 05 plus console/action tests. |
 | Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; script discovery returns inert candidates until explicit host authorization. | Use `always=True` for Agent defaults and execution methods for one-run additions. | Fail-closed scope; no implicit script actionization. | Pinned examples 03 and 07, Skills tests, Agently-Skills V2 guidance. |
 | Agent delivery policies | `interact`, `review(rules=..., on_fail=...)`, and verified TaskWorkspace `artifact` delivery are stable public methods. | Attach handlers to the execution that owns the result and artifact. | Additive; blocking review can prevent terminal success. | Examples 25 and 26 and AgentExecution handler/artifact tests. |
-| Patterns | Bundled `plan` and `long_content` whole-request Patterns are available through `.pattern(...)`. | Opt in per execution and keep the final business value on AgentExecution. | Beta; bundled multi-request Patterns reject incompatible delivery contracts before dispatch. | Examples 26 and 27 plus Pattern isolation and contract tests. |
+| Execution plugins | `create_execution(name)` returns the registered execution instance; built-ins are `auto`, `request`, `long_task`, `plan`, and `long_content`. | Choose the producer explicitly when needed; `.goal(..., turn_on_long_task=False)` declares semantic goals only. | Replaces unreleased Pattern; released Orchestrator/AgentTask entrypoints remain compatibility adapters. | Examples 26–28 and plugin identity, goal-preparation, final-policy and typing tests. |
 | MCP | Playwright MCP examples cover local lifecycle and model-driven browser use. | Use ExecutionResource-owned MCP sessions and close them deterministically. | External runtime/browser dependency. | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` and `2_4_mcp_playwright_agent_qwen.py`. |
 
 ## Examples Added For This Release
@@ -90,17 +90,26 @@ where the public contract permits them.
 - `examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py`
   proves real local-Qwen generation, model-backed review, required blocking handler
   review, and physical artifact readback.
-- `examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py`
-  proves one connected clarification exchange and a validated plan artifact.
-- `examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py`
-  proves section planning/writing, host-ordered assembly, artifact verification,
+- `examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py`
+  demonstrates connected clarification and a host-validated plan artifact.
+- `examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py`
+  demonstrates section planning/writing, host-ordered assembly, artifact verification,
   and advisory review.
+- `examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py`
+  demonstrates conditional goal interpretation for an explicitly selected long task.
 - Release-pinned examples 06 and 07 protect accepted retry streams and
   execution-scoped Skill composition without requiring a model service.
 
-The Ollama examples default to `qwen3.5:9b`; set
-`AGENT_PATTERN_OLLAMA_MODEL` or `OLLAMA_DEFAULT_MODEL` to select another local
+The Ollama examples default to `qwen`; set
+`AGENT_EXECUTION_OLLAMA_MODEL` or `OLLAMA_DEFAULT_MODEL` to select another local
 Qwen model.
+
+Refactor checkpoint: the latest 26/27 runs completed framework delivery but
+semantic inspection found an invented attendance threshold and an expanded
+deployment restriction, respectively. Example 28 prepared its missing contract
+but timed out in later production. These are retained Prompt-audit findings,
+not semantic release acceptance. Unified rework and control/snapshot APIs also
+remain pending; this candidate is not yet ready for release.
 
 ## Compatibility And Release Gate
 

@@ -95,6 +95,29 @@ def create_review_agent(tmp_path, name: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("input_value", [None, "Source excerpt"])
+async def test_semantic_goal_reaches_producer_and_review_once(tmp_path, input_value):
+    agent = create_review_agent(tmp_path, "semantic-goal-review")
+    execution = agent.goal("Explain the mechanism", ["Name the assumption"], turn_on_long_task=False)
+    if input_value is not None:
+        execution.input(input_value)
+    execution.review()
+    assert await execution.async_get_data() == "candidate-result"
+    assert len(ReviewRequester.requests) == 2
+    production, review = ReviewRequester.requests
+    assert "Explain the mechanism" in production["prompt_text"]
+    assert "Name the assumption" in production["prompt_text"]
+    assert "turn_on_long_task" not in production["prompt_text"]
+    contract = review["info"]["request_contract"]
+    assert contract["goals"] == ["Explain the mechanism"]
+    assert contract["success_criteria"] == ["Name the assumption"]
+    assert review["prompt_text"].count("Explain the mechanism") == 1
+    assert review["prompt_text"].count("Name the assumption") == 1
+    with pytest.raises(RuntimeError, match="already started"):
+        execution.goal("Must not mutate a settled run", turn_on_long_task=False)
+
+
+@pytest.mark.asyncio
 async def test_advisory_review_records_failure_without_changing_result(tmp_path):
     agent = create_review_agent(tmp_path, "advisory-review")
     contexts: list[AgentReviewContext] = []
@@ -185,7 +208,7 @@ async def test_review_without_handler_uses_one_structured_model_request(tmp_path
 
 @pytest.mark.asyncio
 async def test_review_runs_after_successful_agent_task_route(tmp_path, monkeypatch):
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules import route_execution
+    from agently.builtins.plugins.AgentExecution.modules import route_execution
 
     agent = create_review_agent(tmp_path, "agent-task-review")
     reviewed: list[Any] = []

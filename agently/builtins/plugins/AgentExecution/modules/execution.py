@@ -47,6 +47,7 @@ from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
 from agently.types.data import (
     AgentExecutionStreamData,
     AgentExecutionEffort,
+    AgentExecutionMeta,
     AgentExecutionStatus,
     AgentExecutionStrategy,
     ContextBudget,
@@ -55,6 +56,7 @@ from agently.types.data import (
     SkillMode,
 )
 from agently.types.plugins import ContextSource
+from agently.types.options import ExecutionOptions
 from agently.utils import DataFormatter
 
 from .bridges import (
@@ -87,8 +89,9 @@ from .result_views import (
     sync_generator as sync_generator_entry,
 )
 from .review import declare_review
-from .pattern import declare_pattern, default_pattern_info, select_goal_pattern
-from .route_execution import async_execute_route, start_execution
+from .production import ProductionOptions
+from .goal_preparation import PreparedGoal
+from .route_execution import async_execute_route, produce_default_route, start_execution
 from .runtime_guidance import add_guidance as add_guidance_entry
 from .routing import HybridRoutePlanner
 from .state import (
@@ -120,6 +123,7 @@ from .record_store_records import (
 )
 
 if TYPE_CHECKING:
+    from agently.core.operation import Action
     from agently.core.Agent import BaseAgent
     from agently.types.data import (
         AgentExecutionLineage,
@@ -134,7 +138,6 @@ if TYPE_CHECKING:
         OutputValidateHandler,
         RunContext,
     )
-    from agently.types.plugins import AgentPatternInput
     from agently.core.application import DynamicTask
     from .artifact import _AgentArtifactDeclaration
     from .review import _AgentReviewDeclaration
@@ -142,6 +145,20 @@ if TYPE_CHECKING:
 
 class AgentExecution:
     """Unified execution draft, run owner, and result source for one Agent run."""
+
+    name: str = "auto"
+    producer_route: str | None = None
+    supported_strategies: frozenset[str] | None = None
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+    OPTIONS_SCHEMAS = {"execution": ExecutionOptions}
+
+    @staticmethod
+    def _on_register() -> None:
+        pass
+
+    @staticmethod
+    def _on_unregister() -> None:
+        pass
 
     def __init__(
         self,
@@ -154,6 +171,8 @@ class AgentExecution:
         request: Any = None,
     ):
         self.agent = getattr(agent, "_agent", agent)
+        self.plugin_manager = self.agent.plugin_manager
+        self.settings = self.agent.settings
         self.request = self._resolve_request(agent, request)
         self.request_prompt = self.request.prompt
         self.prompt = self.request_prompt
@@ -165,8 +184,7 @@ class AgentExecution:
         self.options: ExecutionOptionsState = normalize_options_state(self, options)
         self.task_refs: dict[str, Any] = {}
         self.task_record: Any = None
-        self.goal_items: list[str] = []
-        self.success_criteria_items: list[str] = []
+        self._goal_turn_on_long_task = False
         self.generated_success_criteria: list[str] = []
         self.local_action_ids: list[str] = []
         self.local_required_action_ids: list[str] = []
@@ -279,12 +297,11 @@ class AgentExecution:
         self._ensure_long_output_enabled = False
         self._long_output_result_object: Any = None
         self._long_output_meta: dict[str, Any] = {}
-        self.pattern_selection: "AgentPatternInput | None" = None
-        self.pattern_info = default_pattern_info()
         self.artifact_declarations: list["_AgentArtifactDeclaration"] = []
         self.artifact_results: list["AgentArtifactResult"] = []
         self.review_declarations: list["_AgentReviewDeclaration"] = []
         self._review_contract: dict[str, object] = {}
+        self._prepared_goal: PreparedGoal | None = None
         self.review_results: list["AgentReviewResult"] = []
         self.status: AgentExecutionStatus = "created"
         self._started = False
@@ -319,12 +336,9 @@ class AgentExecution:
         self.record_data = default_stage_call_bridge.as_sync(self.async_record_data)
         self.add_guidance = default_stage_call_bridge.as_sync(self.async_add_guidance)
         self.get_key_result = default_stage_call_bridge.as_sync(self.async_get_key_result)
-        self.start_waiter = default_stage_call_bridge.as_sync(self.async_start_waiter)
         self.streaming_print = default_stage_call_bridge.as_sync(self.async_streaming_print)
         self.when_key = self.on_key
         self.get_generator = self._get_generator
-        self.run = self._compat_run
-        self.async_run = self.async_start
         self.meta = self._compat_meta
 
     def __getattr__(self, name: str) -> Any:
@@ -403,6 +417,7 @@ class AgentExecution:
                 fork.request.extension_handlers.set(key, value)
         fork.goal_items = list(self.goal_items)
         fork.success_criteria_items = list(self.success_criteria_items)
+        fork._goal_turn_on_long_task = self._goal_turn_on_long_task
         fork.generated_success_criteria = list(self.generated_success_criteria)
         fork.local_action_ids = [
             action_id
@@ -414,8 +429,6 @@ class AgentExecution:
         fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
         fork.task_options = dict(self.task_options)
         fork.strategy_name = self.strategy_name
-        fork.pattern_selection = self.pattern_selection
-        fork.pattern_info = dict(self.pattern_info)
         if self._interaction_handler is not None:
             declare_interaction(fork, self._interaction_handler)
         fork.artifact_declarations = [
@@ -454,7 +467,9 @@ class AgentExecution:
     def _refresh_prompt_snapshot(self):
         self.prompt_snapshot = self._snapshot_prompt()
         self.execution_prompt_snapshot = self._snapshot_execution_prompt()
-        self.route_planner.prompt_snapshot = dict(self.prompt_snapshot)
+        # Option hydration can declare a goal before the planner is constructed.
+        if "route_planner" in self.__dict__:
+            self.route_planner.prompt_snapshot = dict(self.prompt_snapshot)
         self._selected_route = None
         return self
 
@@ -713,12 +728,29 @@ class AgentExecution:
             parent_run_context=parent_run_context,
         )
 
-    def _compat_run(self, *args: Any, **kwargs: Any) -> Any:
+    def run(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        kwargs: dict[str, Any] = dict(
+            type=type, ensure_keys=ensure_keys, ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler, key_style=key_style,
+            max_retries=max_retries, raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return self.start(*args, **kwargs)
-        return self.async_start(*args, **kwargs)
+            return self.start(**kwargs)
+        return self.async_run(**kwargs)
 
     def _compat_meta(self, *args: Any, **kwargs: Any) -> Any:
         if self.task_record is not None:
@@ -741,7 +773,7 @@ class AgentExecution:
         task_record = self.task_record
         if task_record is not None:
             return await task_record.async_meta()
-        return await self.async_get_meta()
+        return dict(await self.async_get_meta())
 
     async def async_add_guidance(
         self,
@@ -1092,6 +1124,12 @@ class AgentExecution:
         self._key_waiter_handlers.setdefault(key, []).append(handler)
         return self
 
+    def start_waiter(self, *, must_in_prompt: bool = False) -> list[tuple[str, Any, Any]]:
+        return cast(
+            list[tuple[str, Any, Any]],
+            default_stage_call_bridge.as_sync(self.async_start_waiter)(must_in_prompt=must_in_prompt),
+        )
+
     async def async_start_waiter(self, *, must_in_prompt: bool = False) -> list[tuple[str, Any, Any]]:
         if not self._key_waiter_handlers:
             raise NotImplementedError(
@@ -1125,37 +1163,63 @@ class AgentExecution:
         stream_kind = str(meta_map.get("stream_kind") or "")
         return stream_kind != "text_projection"
 
+    @property
+    def goal_items(self) -> list[str]:
+        """Compatibility projection of the authoritative semantic Prompt."""
+        if self._started and self.request_prompt.get("goal") is None:
+            declared = self._draft._goal_values(self.prompt_snapshot.get("goal"))
+        else:
+            declared = self._draft.goal_items
+        return declared or (list(self._prepared_goal.goals) if self._prepared_goal else [])
+
+    @property
+    def action(self) -> "Action":
+        """The carrying Agent's Action module; execution scope stays local."""
+        return cast("Action", getattr(self.agent, "action"))
+
+    @goal_items.setter
+    def goal_items(self, value: list[str]) -> None:
+        self.request_prompt.set("goal", list(value))
+
+    @property
+    def success_criteria_items(self) -> list[str]:
+        if self._started and self.request_prompt.get("success_criteria") is None:
+            declared = self._draft._goal_values(self.prompt_snapshot.get("success_criteria"))
+        else:
+            declared = self._draft.success_criteria_items
+        return declared or (list(self._prepared_goal.success_criteria) if self._prepared_goal else [])
+
+    @success_criteria_items.setter
+    def success_criteria_items(self, value: list[str]) -> None:
+        self.request_prompt.set("success_criteria", list(value))
+
     def goal(
         self,
         goal: str | list[str] | tuple[str, ...] | set[str],
         success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        turn_on_long_task: bool = True,
     ) -> "AgentExecution":
+        """Declare a goal; optionally enable the long-task convenience path.
+
+        False is Prompt-only: it neither forces direct execution nor disables
+        an independently selected task strategy. Explicit selection wins.
+        """
+        if not isinstance(turn_on_long_task, bool):
+            raise TypeError("turn_on_long_task must be bool.")
         target = self._reconfiguration_target()
-        select_goal_pattern(target)
-        if isinstance(goal, (list, tuple, set)):
-            set_execution_goals(target, tuple(goal))
-        else:
-            text = str(goal or "").strip()
-            if text:
-                set_execution_goals(target, (text,))
-        if success_criteria is not None:
-            set_success_criteria(target, success_criteria)
-        return target
+        target._draft.goal(goal, success_criteria)
+        target._goal_turn_on_long_task = turn_on_long_task
+        execution_options = dict(target.options.get("execution") or {})
+        execution_options["turn_on_long_task"] = turn_on_long_task
+        target.options["execution"] = execution_options
+        if target._draft._goal_values(success_criteria):
+            target.generated_success_criteria = []
+        target.effective_options = target._build_effective_options()
+        target._selected_route = None
+        return target._refresh_prompt_snapshot()
 
     goals = goal
-
-    @overload
-    def pattern(
-        self,
-        pattern: Literal["request", "goal", "plan", "long_content"],
-    ) -> "AgentExecution": ...
-
-    @overload
-    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
-
-    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
-        """Select one beta whole-request Pattern for this execution draft."""
-        return declare_pattern(self, pattern)
 
     def interact(self, handler: "AgentInteractionHandler") -> "AgentExecution":
         """Bind one execution-local connected human-interaction handler."""
@@ -1573,7 +1637,7 @@ class AgentExecution:
             apply_strategy_selection(target, value, source="explicit_strategy")
         if options:
             if "execution" in options:
-                from agently.core.application import AgentTask
+                from ..long_task import AgentTask
 
                 options = dict(options)
                 options["execution"] = AgentTask.normalize_execution_strategy(options.get("execution"))
@@ -1739,7 +1803,26 @@ class AgentExecution:
         self._refresh_prompt_snapshot()
         route: str
         route_meta: dict[str, Any]
-        if self.strategy_name == "direct":
+        if self.producer_route is not None:
+            if (
+                self.strategy_name is not None
+                and self.supported_strategies is not None
+                and self.strategy_name not in self.supported_strategies
+            ):
+                raise ValueError(
+                    f"AgentExecution {self.name!r} does not support strategy {self.strategy_name!r}."
+                )
+            route, route_meta = self.producer_route, {
+                "selected_by": "execution_plugin", "plugin": self.name,
+                "strategy": self.strategy_name,
+            }
+            if not self.route_planner.route_allowed(route):
+                route, route_meta = "route_policy_blocked", {
+                    **route_meta,
+                    "route_policy": self.route_planner.route_policy(),
+                    "route_policy_warning": f"Selected execution plugin {self.name!r} is disallowed by route policy.",
+                }
+        elif self.strategy_name == "direct":
             required_actions = self.required_action_ids()
             required_skills = self.required_skill_ids()
             route, route_meta = "model_request", {
@@ -1806,6 +1889,15 @@ class AgentExecution:
             raise_ensure_failure=raise_ensure_failure,
         )
 
+    async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        """Produce on this instance; the shared lifecycle applies final policies.
+
+        Override this hook to reuse draft, budget, result and terminal handling.
+        Caller validators are withheld from overridden producers and applied
+        once to their final return value. Internal validators remain local.
+        """
+        return await produce_default_route(self, options)
+
     def record_model_response_id(self, response_id: str | None) -> None:
         record_model_response_id_entry(self, response_id)
 
@@ -1857,6 +1949,25 @@ class AgentExecution:
         )
 
     async def async_start(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        return await self.async_run(
+            type=type, ensure_keys=ensure_keys, ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler, key_style=key_style,
+            max_retries=max_retries, raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
+
+    async def async_run(
         self,
         *,
         type: Literal["original", "parsed", "all"] = "parsed",
@@ -1961,8 +2072,8 @@ class AgentExecution:
     ) -> str:
         return await async_get_text_entry(self, parent_run_context=parent_run_context, **kwargs)
 
-    async def async_get_meta(self) -> dict[str, Any]:
-        return await async_get_meta_entry(self)
+    async def async_get_meta(self) -> AgentExecutionMeta:
+        return cast(AgentExecutionMeta, await async_get_meta_entry(self))
 
     async def async_record_data(
         self,

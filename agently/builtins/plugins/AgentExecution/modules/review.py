@@ -100,8 +100,13 @@ async def run_declared_reviews(execution: "AgentExecution", result: object) -> N
         for ref in execution._terminal_task_handoff_refs:
             if ref.get("role") == "artifact" and not any(item.get("path") == ref.get("path") for item in refs):
                 refs.append(cast(AgentArtifactResult, ref))
+        review_prompt = deepcopy(execution.prompt_snapshot)
+        if execution.task_refs.get("resume") and execution.task_record is not None:
+            retained_prompt = execution.task_record.options.get("execution_prompt_snapshot")
+            if isinstance(retained_prompt, dict):
+                review_prompt = deepcopy(retained_prompt)
         context = AgentReviewContext(
-            execution=execution, prompt=deepcopy(execution.prompt_snapshot),
+            execution=execution, prompt=review_prompt,
             goals=tuple(execution.goal_items), success_criteria=tuple(execution.success_criteria_items),
             artifact_refs=tuple(refs), task_workspace=execution.task_workspace,
             on_fail=on_fail, index=index, rules=declaration["rules"],
@@ -178,8 +183,13 @@ async def _run_model_review(
         request.settings.update(deepcopy(local_settings))
     # Preserve the framework's readable schema and field constraints, not a
     # sanitized Python tuple/class representation of the caller's output DSL.
-    request.prompt.update(deepcopy(dict(context.prompt)))
-    original_contract = request.prompt.to_text()
+    original_prompt = deepcopy(dict(context.prompt))
+    # These semantic slots have their own structured projection below. Keep
+    # the approved review contract without repeating their bodies in text.
+    original_prompt.pop("goal", None)
+    original_prompt.pop("success_criteria", None)
+    request.prompt.update(original_prompt)
+    original_contract = request.prompt.to_text() if any(original_prompt.values()) else None
     request.prompt.clear()
     candidate: object = DataFormatter.sanitize(result)
     # Match the existing default artifact serialization exactly, without
@@ -195,7 +205,9 @@ async def _run_model_review(
             candidate = {"same_content_as": item["ref"]}
             break
     request.input({"candidate": candidate})
-    contract: dict[str, object] = {"original_request": original_contract}
+    contract: dict[str, object] = {}
+    if original_contract is not None:
+        contract["original_request"] = original_contract
     if context.goals:
         contract["goals"] = list(context.goals)
     if context.success_criteria:

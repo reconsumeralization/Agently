@@ -9,7 +9,7 @@ import pytest
 
 from agently import Agently
 from agently.builtins.plugins.ActionExecutor.CodeExecutionActionExecutor import CodeExecutionActionExecutor
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.execution import (
+from agently.builtins.plugins.AgentExecution.modules.execution import (
     AgentExecution as ConcreteAgentExecution,
 )
 from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
@@ -63,10 +63,14 @@ async def test_exec_registers_one_action_for_all_bound_python_scripts(tmp_path: 
     )
 
     assert action_id == "exec_skill_python"
-    assert execution._task_context_prepared is True
+    assert cast(ConcreteAgentExecution, execution)._task_context_prepared is True
     assert execution.local_action_ids == [action_id]
     spec = execution.action.action_registry.get_spec(action_id)
     assert spec is not None
+    assert "kwargs" in spec
+    assert "side_effect_level" in spec
+    assert "sandbox_required" in spec
+    assert "meta" in spec
     assert spec["kwargs"] == {
         "script_path": (str, "Relative executable script path.", True),
         "args": ("list[str]", "Optional bounded script arguments."),
@@ -76,6 +80,7 @@ async def test_exec_registers_one_action_for_all_bound_python_scripts(tmp_path: 
     assert spec["meta"]["component"] == "skill_script_exec"
     assert spec["meta"]["language"] == "python"
     assert callable(spec["meta"]["_execution_resource_requirements_factory"])
+    assert "tags" in spec
     assert f"agent-{agent.name}" not in spec["tags"]
     assert "skill_revision_ref" not in spec["meta"]
     assert "installed_path" not in spec["meta"]
@@ -114,7 +119,7 @@ def test_exec_rejects_unprepared_untrusted_or_unauthorized_scope(tmp_path: Path)
             mode="required",
         )
     ]
-    execution._task_context_prepared = True
+    cast(ConcreteAgentExecution, execution)._task_context_prepared = True
     with pytest.raises(PermissionError, match="trusted exact"):
         agent.enable_skill_script_exec(
             execution,
@@ -215,7 +220,7 @@ async def test_exec_preserves_prepared_scope_and_does_not_repeat_skill_selection
     await execution.async_prepare_task_context()
 
     assert selector.call_count == 1
-    assert execution._task_context_prepared is True
+    assert cast(ConcreteAgentExecution, execution)._task_context_prepared is True
     assert tuple(execution.skill_bindings) == frozen_bindings
 
 
@@ -324,7 +329,7 @@ async def test_reconfiguring_prepared_scope_revokes_dependent_action(
 
     execution.input("A changed request must be prepared again")
 
-    assert execution._task_context_prepared is False
+    assert cast(ConcreteAgentExecution, execution)._task_context_prepared is False
     assert action_id not in execution.local_action_ids
     assert execution.execution_context.get_skill_script_exec_authorization(action_id) is None
 
@@ -339,7 +344,7 @@ async def test_reconfiguring_prepared_scope_revokes_dependent_action(
     execution.create_execution(options={"effort": "low"})
 
     assert execution.execution_context is not previous_context
-    assert execution._task_context_prepared is False
+    assert cast(ConcreteAgentExecution, execution)._task_context_prepared is False
     assert action_id not in execution.local_action_ids
     assert previous_context.get_skill_script_exec_authorization(action_id) is None
     assert execution.execution_context.get_skill_script_exec_authorization(action_id) is None
@@ -471,14 +476,15 @@ async def test_agent_enables_exec_and_resolves_script_at_call_time(tmp_path: Pat
         authorization=SkillScriptAuthorization(auto_allow=True),
     )
     executor = execution.action.action_registry.get_executor(enabled)
-    assert executor is not None
+    assert isinstance(executor, CodeExecutionActionExecutor)
     spec = execution.action.action_registry.get_spec(enabled)
     assert spec is not None
+    assert "tags" in spec
     assert f"agent-{agent.name}" not in spec["tags"]
     assert enabled in (execution.execution_context.scoped_action_ids() or set())
     with bind_runtime_context(agent_execution_context=execution.execution_context):
         request = executor._request_from_action(
-            spec=spec,
+            spec=dict(spec),
             action_call={
                 "action_input": {
                     "script_path": "scripts/check.py",
@@ -498,7 +504,7 @@ async def test_agent_enables_exec_and_resolves_script_at_call_time(tmp_path: Pat
     with bind_runtime_context(agent_execution_context=execution.execution_context):
         with pytest.raises(PermissionError, match="one executable resource"):
             executor._request_from_action(
-                spec=spec,
+                spec=dict(spec),
                 action_call={
                     "action_input": {
                         "script_path": "scripts/not-bound.py",
@@ -507,7 +513,7 @@ async def test_agent_enables_exec_and_resolves_script_at_call_time(tmp_path: Pat
             )
         with pytest.raises(PermissionError, match="not an executable"):
             executor._request_from_action(
-                spec=spec,
+                spec=dict(spec),
                 action_call={
                     "action_input": {
                         "script_path": "references/notes.md",
@@ -534,13 +540,13 @@ async def test_exec_rejects_language_mismatch_and_digest_mismatch(
     )
     executor = execution.action.action_registry.get_executor(enabled)
     spec = execution.action.action_registry.get_spec(enabled)
-    assert executor is not None and spec is not None
+    assert isinstance(executor, CodeExecutionActionExecutor) and spec is not None
 
     monkeypatch.setitem(executor._SKILL_SCRIPT_LANGUAGES, ".py", "nodejs")
     with bind_runtime_context(agent_execution_context=execution.execution_context):
         with pytest.raises(ValueError, match="requires 'nodejs'"):
             executor._request_from_action(
-                spec=spec,
+                spec=dict(spec),
                 action_call={
                     "action_input": {
                         "script_path": "scripts/check.py",
@@ -559,7 +565,7 @@ async def test_exec_rejects_language_mismatch_and_digest_mismatch(
     with bind_runtime_context(agent_execution_context=execution.execution_context):
         with pytest.raises(ValueError, match="digest"):
             executor._request_from_action(
-                spec=spec,
+                spec=dict(spec),
                 action_call={
                     "action_input": {
                         "script_path": "scripts/check.py",
@@ -652,11 +658,11 @@ async def test_exec_fails_closed_when_script_path_is_ambiguous(
     )
     executor = execution.action.action_registry.get_executor(action_id)
     spec = execution.action.action_registry.get_spec(action_id)
-    assert executor is not None and spec is not None
+    assert isinstance(executor, CodeExecutionActionExecutor) and spec is not None
 
     with bind_runtime_context(agent_execution_context=execution.execution_context):
         with pytest.raises(PermissionError, match="narrow the Skill scope"):
             executor._request_from_action(
-                spec=spec,
+                spec=dict(spec),
                 action_call={"action_input": {"script_path": "scripts/check.py"}},
             )

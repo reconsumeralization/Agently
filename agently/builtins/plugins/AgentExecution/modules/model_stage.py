@@ -15,40 +15,48 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from agently.core.model import ModelRequestResult
-    from agently.types.plugins import AgentExecution
+    from .execution import AgentExecution
 
 
 _OUTPUT_PROMPT_KEYS = frozenset({"output", "output_format", "ensure_all_keys"})
 
 
+@dataclass(frozen=True)
+class ModelStageResult:
+    value: object
+    request_id: str
+
+
 async def run_model_stage(
     execution: "AgentExecution",
     *,
-    pattern: Literal["plan", "long_content"],
+    producer: Literal["plan", "long_content", "long_task"],
     stage: str,
     stage_input: object,
     stage_info: object,
     stage_instructions: list[str],
     output: object | None = None,
     preserve_external_output: bool = False,
-) -> object:
+    inherit_extension_handlers: bool = True,
+) -> ModelStageResult:
     """Run one explicit ModelRequest under the owning AgentExecution.
 
-    Pattern stages reuse the root request's model/settings/capability contract,
+    Execution stages reuse the root request's model/settings/capability contract,
     but stage schemas never inherit caller final-output validators.
     The outer execution validates the final returned value once.
     """
 
     request = execution.agent.create_request(
-        name=f"{execution.agent.name}-{pattern}-{stage}",
+        name=f"{execution.agent.name}-{producer}-{stage}",
         inherit_agent_prompt=False,
-        inherit_extension_handlers=True,
+        inherit_extension_handlers=inherit_extension_handlers,
         model_key=getattr(execution.request, "_model_key", None),
     )
     local_settings = execution.request.settings.get(inherit=False)
@@ -64,21 +72,21 @@ async def run_model_stage(
         "input",
         {
             "original_input": DataFormatter.sanitize(execution.prompt_snapshot.get("input")),
-            "pattern_stage_input": DataFormatter.sanitize(stage_input),
+            "execution_stage_input": DataFormatter.sanitize(stage_input),
         },
     )
     request.prompt.append(
         "info",
         {
-            "agent_pattern": pattern,
-            "pattern_stage": stage,
+            "execution_plugin": producer,
+            "execution_stage": stage,
             "stage_information": DataFormatter.sanitize(stage_info),
         },
     )
     request.prompt.append(
         "instruct",
         {
-            "agent_pattern_stage": [
+            "agent_execution_stage": [
                 *stage_instructions,
                 "Return only this stage's declared result; do not expose hidden chain-of-thought.",
             ]
@@ -86,7 +94,7 @@ async def run_model_stage(
     )
 
     context_package = await execution.async_read_task_context(
-        consumer_id=f"agent_pattern:{pattern}:{stage}:{execution.id}",
+        consumer_id=f"agent_execution:{producer}:{stage}:{execution.id}",
         phase=stage,
     )
     context_lanes: dict[str, list[dict[str, object]]] = {
@@ -121,11 +129,11 @@ async def run_model_stage(
     request.extension_handlers.set("validate_handlers", None)
 
     await execution.emit_stream(
-        "pattern.stage.started",
-        {"pattern": pattern, "stage": stage},
-        route="agent_pattern",
-        source="agent_pattern",
-        meta={"pattern": pattern, "stage": stage},
+        "execution.stage.started",
+        {"plugin": producer, "stage": stage},
+        route=execution._selected_route[0] if execution._selected_route else producer,
+        source="agent_execution",
+        meta={"plugin": producer, "stage": stage},
     )
     result = request.get_result(
         parent_run_context=execution.agent_execution_run_context,
@@ -151,18 +159,18 @@ async def run_model_stage(
         result._accepted_retry_result or result,
     )
     await execution.emit_stream(
-        "pattern.stage.completed",
+        "execution.stage.completed",
         {
-            "pattern": pattern,
+            "plugin": producer,
             "stage": stage,
             "response_id": str(accepted_result.response_id or accepted_result.id),
         },
-        route="agent_pattern",
-        source="agent_pattern",
-        meta={"pattern": pattern, "stage": stage},
+        route=execution._selected_route[0] if execution._selected_route else producer,
+        source="agent_execution",
+        meta={"plugin": producer, "stage": stage},
     )
-    _record_stage_diagnostic(execution, pattern=pattern, stage=stage)
-    return value
+    _record_stage_diagnostic(execution, producer=producer, stage=stage)
+    return ModelStageResult(value=value, request_id=response_id)
 
 
 async def _record_action_logs(
@@ -182,7 +190,7 @@ async def _record_action_logs(
         for item in action_logs:
             await execution.record_action_log(
                 item,
-                route="agent_pattern",
+                route=(execution._selected_route[0] if execution._selected_route else execution.producer_route or execution.name),
                 source="action",
             )
     tool_logs = extra.get("tool_logs", [])
@@ -190,7 +198,7 @@ async def _record_action_logs(
         for item in tool_logs:
             await execution.record_action_log(
                 item,
-                route="agent_pattern",
+                route=(execution._selected_route[0] if execution._selected_route else execution.producer_route or execution.name),
                 source="tool",
             )
 
@@ -198,22 +206,22 @@ async def _record_action_logs(
 def _record_stage_diagnostic(
     execution: "AgentExecution",
     *,
-    pattern: str,
+    producer: str,
     stage: str,
 ) -> None:
-    current = execution.diagnostics.get("pattern_run", {})
+    current = execution.diagnostics.get("execution_run", {})
     diagnostic = dict(current) if isinstance(current, dict) else {}
     stages = diagnostic.get("stages", [])
     normalized_stages = list(stages) if isinstance(stages, list) else []
     normalized_stages.append(stage)
     diagnostic.update(
         {
-            "name": pattern,
+            "name": producer,
             "model_request_count": int(diagnostic.get("model_request_count", 0)) + 1,
             "stages": normalized_stages,
         }
     )
-    execution.diagnostics["pattern_run"] = diagnostic
+    execution.diagnostics["execution_run"] = diagnostic
 
 
 __all__ = ["run_model_stage"]

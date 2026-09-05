@@ -41,11 +41,15 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.record_data",
       "positions": [
-        "param:kwargs"
+        "param:content",
+        "param:scope",
+        "param:source",
+        "param:meta",
+        "param:checkpoint_state"
       ],
       "owner": "AgentExecution",
-      "reason": "The synchronous RecordStore adapter forwards the typed async_record_data keyword contract.",
-      "narrowing_plan": "Mirror the explicit async_record_data signature when the sync adapter is next revised.",
+      "reason": "The explicit synchronous record signature mirrors async_record_data, including application-defined content and RecordStore metadata.",
+      "narrowing_plan": "Follow the async record projection types when that payload extension boundary is narrowed.",
       "expires": "review-before-4.2"
     },
     {
@@ -113,16 +117,6 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.create_execution",
-      "positions": [
-        "param:kwargs"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.create_dynamic_task",
       "positions": [
         "return",
@@ -169,21 +163,9 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.emit_stream",
-      "positions": [
-        "param:args",
-        "param:kwargs"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.start",
       "positions": [
-        "return",
-        "param:kwargs"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -193,8 +175,7 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_start",
       "positions": [
-        "return",
-        "param:parent_run_context"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -204,8 +185,7 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_get_data",
       "positions": [
-        "return",
-        "param:parent_run_context"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -215,8 +195,7 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_get_full_data",
       "positions": [
-        "return",
-        "param:parent_run_context"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -248,8 +227,7 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.get_data",
       "positions": [
-        "return",
-        "param:kwargs"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -259,8 +237,7 @@
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.get_full_data",
       "positions": [
-        "return",
-        "param:kwargs"
+        "return"
       ],
       "owner": "AgentExecution",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
@@ -758,6 +735,56 @@
       "owner": "AgentlyMain",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
       "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.run",
+      "positions": [
+        "return"
+      ],
+      "owner": "AgentExecution",
+      "reason": "The production entry returns the same application-defined final value as start/get_data; a whole custom producer can return an arbitrary domain object.",
+      "narrowing_plan": "Preserve the payload extension boundary while introducing generic execution result typing in the dedicated result-contract update.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_run",
+      "positions": [
+        "return"
+      ],
+      "owner": "AgentExecution",
+      "reason": "The production entry returns the same application-defined final value as start/get_data; a whole custom producer can return an arbitrary domain object.",
+      "narrowing_plan": "Preserve the payload extension boundary while introducing generic execution result typing in the dedicated result-contract update.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.meta",
+      "positions": [
+        "return"
+      ],
+      "owner": "AgentExecution compatibility",
+      "reason": "Released AgentTask compatibility returns task metadata, or an awaitable of it inside an event loop. Keep this loop-dependent legacy escape hatch until its announced 4.2 cleanup; get_meta/async_get_meta have the precise execution metadata contract.",
+      "narrowing_plan": "Remove the announced legacy adapter or supply the strategy-owned typed projection during the 4.2 compatibility cleanup; do not broaden the unified execution APIs.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_meta",
+      "positions": [
+        "return"
+      ],
+      "owner": "AgentExecution compatibility",
+      "reason": "Released task metadata includes strategy-owned nested iteration/verification records with open payloads. It is distinct from the typed unified async_get_meta contract.",
+      "narrowing_plan": "Remove the announced legacy adapter or supply the strategy-owned typed projection during the 4.2 compatibility cleanup; do not broaden the unified execution APIs.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.task_strategy_options",
+      "positions": [
+        "return"
+      ],
+      "owner": "AgentExecution compatibility",
+      "reason": "Released task creation forwards an open strategy-specific keyword projection. It does not define a closed task options schema.",
+      "narrowing_plan": "Remove the announced legacy adapter or supply the strategy-owned typed projection during the 4.2 compatibility cleanup; do not broaden the unified execution APIs.",
       "expires": "review-before-4.2"
     }
   ]

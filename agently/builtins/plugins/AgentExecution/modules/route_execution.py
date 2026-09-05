@@ -27,7 +27,8 @@ from agently.utils import DataFormatter
 
 from .artifact import run_declared_artifacts
 from .long_output import LongOutputError
-from .pattern import run_selected_pattern
+from .production import ProductionOptions
+from .result_views import _business_data_from_full_data
 from .output_validation import validate_final_output
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
@@ -56,101 +57,89 @@ async def async_execute_route(
     max_retries: int,
     raise_ensure_failure: bool,
 ) -> tuple[str, object]:
+    from .execution import AgentExecution
+
     with bind_runtime_context(agent_execution_context=owner.execution_context):
-        selection = owner.pattern_selection
-        defer_validation = selection is not None and not (
-            isinstance(selection, str) and selection in {"request", "goal"}
+        owner.execution_context.record_progress(stage="route_selection", status="started")
+        route, route_meta = await owner.select_route()
+        owner.execution_context.record_progress(stage="route_selection", status="completed")
+        owner.route_plan = owner.route_planner.build_route_plan(
+            execution_id=owner.id, route=route, route_meta=route_meta,
+        )
+        await owner.emit_stream("route.selected", owner.route_plan, route=route)
+        if route == "route_policy_blocked":
+            return route, await _blocked_route(owner, route_meta)
+
+        # Only the unmodified direct producer owns request-level final repair.
+        # A producer override can transform that value, so defer its caller's
+        # validator even when it uses super()._async_produce() internally.
+        request_owned_validation = (
+            route == "model_request"
+            and owner.__class__._async_produce is AgentExecution._async_produce
         )
         registered = owner.request.extension_handlers.get("validate_handlers", [])
         local_handlers = owner.request.extension_handlers.get(inherit=False)
         handlers = list(registered) if isinstance(registered, list) else []
         if validate_handler is not None:
             handlers.extend(validate_handler if isinstance(validate_handler, list) else [validate_handler])
-        if defer_validation:
-            # Shield run_default() as well: an extension may transform its result.
-            # None shadows inherited callbacks; an empty list would merge them.
+        if not request_owned_validation:
             owner.request.extension_handlers.set("validate_handlers", None)
-
-        async def run_default_route() -> tuple[str, object]:
-            return await _execute_default_route(
-                owner,
-                type=type,
-                ensure_keys=ensure_keys,
-                ensure_all_keys=ensure_all_keys,
-                validate_handler=None if defer_validation else validate_handler,
-                key_style=key_style,
-                max_retries=max_retries,
-                raise_ensure_failure=raise_ensure_failure,
-            )
-
+        options = ProductionOptions(
+            type=type, ensure_keys=ensure_keys, ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler if request_owned_validation else None,
+            key_style=key_style, max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
         try:
-            route, result = await run_selected_pattern(owner, run_default_route)
+            produced_route, result = await owner._async_produce(options)
+            if produced_route != route:
+                raise RuntimeError(
+                    f"Execution producer returned route {produced_route!r}; selected route was {route!r}."
+                )
         finally:
-            if defer_validation:
+            if not request_owned_validation:
                 if isinstance(local_handlers, dict) and "validate_handlers" in local_handlers:
                     owner.request.extension_handlers.set("validate_handlers", local_handlers["validate_handlers"])
                 else:
                     owner.request.extension_handlers.delete("validate_handlers")
         owner.result = result
-        if owner.status in {"running", "success", "completed"} and (defer_validation or route == "agent_task"):
-            await validate_final_output(owner, result, handlers)
+        final_value = _business_data_from_full_data(owner, result) if route == "agent_task" else result
+        if owner.status in {"running", "success", "completed"} and not request_owned_validation:
+            await validate_final_output(owner, final_value, handlers)
         if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
-            await run_declared_artifacts(owner, result)
+            await run_declared_artifacts(owner, final_value)
         if owner.status in {"running", "success", "completed"} and owner.review_declarations:
-            await run_declared_reviews(owner, result)
+            await run_declared_reviews(owner, final_value)
         return route, result
 
 
-async def _execute_default_route(
-    owner: "AgentExecution",
-    *,
-    type: Literal["original", "parsed", "all"],
-    ensure_keys: list[str] | None,
-    ensure_all_keys: bool | None,
-    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
-    key_style: Literal["dot", "slash"],
-    max_retries: int,
-    raise_ensure_failure: bool,
-) -> tuple[str, object]:
-    owner.execution_context.record_progress(stage="route_selection", status="started")
-    route, route_meta = await owner.select_route()
-    owner.execution_context.record_progress(stage="route_selection", status="completed")
-    owner.route_plan = owner.route_planner.build_route_plan(
-        execution_id=owner.id,
-        route=route,
-        route_meta=route_meta,
+async def _blocked_route(owner: "AgentExecution", route_meta: dict[str, Any]) -> object:
+    reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
+    owner.status = "blocked"
+    owner.close_snapshot = {
+        "status": "blocked", "route": "route_policy_blocked",
+        "route_meta": DataFormatter.sanitize(route_meta),
+    }
+    owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
+    await owner.emit_stream(
+        "route.policy.blocked", DataFormatter.sanitize(route_meta),
+        route="route_policy_blocked", source="agent_execution", meta={"status": "blocked"},
     )
-    owner.route_info.setdefault("selected_route", route)
-    owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
-    owner.route_info.setdefault("reusable", True)
-    await owner.emit_stream("route.selected", owner.route_plan, route=route)
-    if route == "route_policy_blocked":
-        reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
-        owner.status = "blocked"
-        owner.close_snapshot = {
-            "status": "blocked",
-            "route": "route_policy_blocked",
-            "route_meta": DataFormatter.sanitize(route_meta),
-        }
-        owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
-        await owner.emit_stream(
-            "route.policy.blocked",
-            DataFormatter.sanitize(route_meta),
-            route="route_policy_blocked",
-            source="agent_execution",
-            meta={"status": "blocked"},
-        )
-        return route, {
-            "status": "blocked",
-            "accepted": False,
-            "artifact_status": "blocked",
-            "reason": reason,
-            "final_response": (
-                "Task encountered a blocking condition. "
-                f"No complete final deliverable was accepted. Reason: {reason}"
-            ),
-            "route_policy": route_meta.get("route_policy"),
-        }
+    return {
+        "status": "blocked", "accepted": False, "artifact_status": "blocked",
+        "reason": reason,
+        "final_response": (
+            "Task encountered a blocking condition. "
+            f"No complete final deliverable was accepted. Reason: {reason}"
+        ),
+        "route_policy": route_meta.get("route_policy"),
+    }
+
+
+async def produce_default_route(
+    owner: "AgentExecution", options: ProductionOptions,
+) -> tuple[str, object]:
+    route, route_meta = await owner.select_route()
     if route == "agent_task" and owner._ensure_long_output_enabled:
         raise LongOutputError(
             "ensure_long_output is a direct ModelRequest delivery policy and cannot be "
@@ -160,17 +149,15 @@ async def _execute_default_route(
         )
     if route == "agent_task":
         result = await run_agent_task_route(owner, route_meta)
-    else:
+    elif route == "model_request":
         result = await run_model_request_route(
-            owner,
-            type=type,
-            ensure_keys=ensure_keys,
-            ensure_all_keys=ensure_all_keys,
-            validate_handler=validate_handler,
-            key_style=key_style,
-            max_retries=max_retries,
-            raise_ensure_failure=raise_ensure_failure,
+            owner, type=options.type, ensure_keys=options.ensure_keys,
+            ensure_all_keys=options.ensure_all_keys, validate_handler=options.validate_handler,
+            key_style=options.key_style, max_retries=options.max_retries,
+            raise_ensure_failure=options.raise_ensure_failure,
         )
+    else:
+        raise NotImplementedError(f"Execution {owner.name!r} has no producer for route {route!r}.")
     if route != "agent_task":
         await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
     return route, result
@@ -198,6 +185,9 @@ async def start_execution(
             if owner._error is not None:
                 raise owner._error
             return owner.result
+        # Capture the final draft before ModelRequest.get_result() consumes
+        # its pending Prompt. Later review/meta readers use this retained view.
+        owner._refresh_prompt_snapshot()
         owner._started = True
         owner.status = "running"
         try:

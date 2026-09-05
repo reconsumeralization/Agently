@@ -70,16 +70,30 @@ def load_strategy_state_from_options(owner: "AgentExecution"):
 
     task_options = owner.options.get("task")
     if isinstance(task_options, dict):
-        owner.task_options.update(task_options)
+        # Semantic fields are consumed into the Prompt once. Keeping another
+        # mutable copy here would reapply stale goals on unrelated configure().
+        controls = dict(task_options)
+        goal = controls.pop("goal", controls.pop("goals", None))
+        criteria = controls.pop("success_criteria", None)
+        generated = controls.pop("generated_success_criteria", None)
+        owner.options["task"] = controls
+        owner.task_options.update(controls)
         if "execution" in task_options:
             owner.task_options["execution"] = normalize_task_execution_strategy(task_options.get("execution"))
             owner.task_options.setdefault("_execution_strategy_source", "task_options")
-        goal = task_options.get("goal")
+        lifecycle_options = owner.options.get("execution")
+        enabled = lifecycle_options.get("turn_on_long_task") if isinstance(lifecycle_options, dict) else None
+        enabled = True if enabled is None else enabled
         if goal is not None:
-            owner.goal(goal)
-        criteria = task_options.get("success_criteria")
-        if criteria is not None:
+            owner.goal(goal, criteria, turn_on_long_task=enabled)
+        elif criteria is not None:
             set_success_criteria(owner, criteria)
+            owner._goal_turn_on_long_task = enabled
+        if isinstance(generated, list):
+            owner.generated_success_criteria = list(generated)
+    lifecycle_options = owner.options.get("execution")
+    if isinstance(lifecycle_options, dict) and lifecycle_options.get("turn_on_long_task") is not None:
+        owner._goal_turn_on_long_task = lifecycle_options["turn_on_long_task"]
 
 
 def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
@@ -90,6 +104,7 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
         {
             "lineage": owner.lineage,
             "limits": owner.limits,
+            "turn_on_long_task": owner._goal_turn_on_long_task,
         }
     )
     if owner.strategy_name is not None:
@@ -129,7 +144,7 @@ def build_effective_options(owner: "AgentExecution") -> dict[str, Any]:
 
 
 def normalize_task_execution_strategy(value: Any) -> str:
-    from agently.core.application import AgentTask
+    from ..long_task import AgentTask
 
     return str(AgentTask.normalize_execution_strategy(value))
 
@@ -444,13 +459,7 @@ def task_goal(owner: "AgentExecution") -> str:
 def task_success_criteria(owner: "AgentExecution") -> list[str]:
     if owner.success_criteria_items:
         return list(owner.success_criteria_items)
-    goal = task_goal(owner)
-    generated = [f"Complete the requested goal with concrete evidence: { goal }"]
-    owner.generated_success_criteria = generated
-    owner.success_criteria_items = generated
-    owner.diagnostics.setdefault("success_criteria", {})["generated"] = generated
-    owner.effective_options = build_effective_options(owner)
-    return list(generated)
+    raise ValueError("Long-task success criteria must be prepared before production.")
 
 
 def is_task_strategy(owner: "AgentExecution") -> bool:
@@ -464,7 +473,7 @@ def is_task_strategy(owner: "AgentExecution") -> bool:
         and is_task_execution_strategy_value(owner.strategy_name)
     ):
         return True
-    if owner.goal_items or owner.success_criteria_items:
+    if owner._goal_turn_on_long_task:
         return True
     if owner.task_options:
         return True

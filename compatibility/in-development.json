@@ -95,7 +95,7 @@
     },
     "skills": {
       "repository": "Agently-Skills",
-      "authoring_protocol": "agently-skills.authoring.v2",
+      "authoring_protocol": "agently-skills.authoring.v3",
       "authoring_format": "standard SKILL.md only",
       "runtime_contract": {
         "installed_truth_owner": "SkillLibrary immutable content-addressed revisions",
@@ -140,7 +140,7 @@
     },
     "docs": {
       "repository": "docs",
-      "public_surface_protocol": "agently-docs.public-surface.v1"
+      "public_surface_protocol": "agently-docs.public-surface.v2"
     },
     "action_runtime": {
       "task_workspace_contract": "TaskWorkspace Actions own bounded file read/search/write/edit/patch/export operations. A TaskWorkspace-bound shell resolves relative workdir values inside the injected root and consumes an already root-prefixed logical .agently/files/<execution-id> locator exactly once; paths outside the root fail closed.",
@@ -250,28 +250,41 @@
     }
   },
   "request_input": {
-    "agent_execution_terminal_policies_and_patterns": {
+    "agent_execution_plugins_and_terminal_policies": {
       "surface": [
+        "Agent.create_execution",
+        "Agent.goal",
         "Agent.interact",
         "Agent.review",
         "Agent.artifact",
-        "Agent.pattern",
+        "AgentExecution.run",
+        "AgentExecution.async_run",
+        "AgentExecution.goal",
         "AgentExecution.interact",
         "AgentExecution.review",
         "AgentExecution.artifact",
-        "AgentExecution.pattern",
-        "AgentPattern",
-        "PlanPattern",
-        "LongContentPattern",
-        "Agent.pattern(\"plan\")",
-        "Agent.pattern(\"long_content\")"
+        "AgentExecution.validate",
+        "AgentExecution",
+        "RequestExecution",
+        "LongTaskExecution",
+        "PlanExecution",
+        "LongContentExecution"
       ],
-      "standard_methods_stability": "interact, review, and artifact are stable AgentExecution methods; only pattern is beta",
-      "interaction_contract": "Agent.interact(handler) and AgentExecution.interact(handler) bind one synchronous or asynchronous connected response handler to one execution without forcing HITL or mutating the global ExecutionExchange registry. The handler receives a complete normalized ExecutionExchangeView and returns the response payload interpreted by the existing exchange consumer. TriggerFlow remains the only pause/resume owner; registered ExecutionExchange providers, routing handlers, and interaction settings remain the advanced durable and application-wide integration surfaces.",
-      "pattern_stability": "beta",
-      "pattern_compatibility_contract": "Pattern is an explicit opt-in beta surface. Registering an AgentPattern never selects or instantiates it for an ordinary execution, Pattern names remain isolated inside the AgentPattern plugin family and cannot shadow Agent or AgentExecution methods, and unknown or invalid selections fail before Pattern-owned model dispatch instead of falling back. Ordinary requests add no Pattern metadata or stream events. Agent.goal may be carried transparently through the built-in goal Pattern while preserving its existing caller API and AgentTask planning, evidence, verification, replan, result, and failure semantics.",
-      "contract": "The additive AgentExecution draft declarations keep one business-result and lifecycle owner. interact binds an execution-local connected response mechanism only when a real ExecutionExchange opens; review accepts domain rules and a replacement handler, with host-only on_fail=warn or block and no implicit retry. The default evaluator reads complete trusted text artifacts, judges original contract and actual content with descriptive quality levels, per-rule checks, issue-local suggestions, and overall suggestions; non-text or missing evidence is not_assessable. validate hard-checks the call's final output, not intermediate Pattern or AgentTask results; direct ModelRequest and ensure_long_output keep their existing repair semantics, while assembled final checks never replay execution. artifact renders the accepted result to text or bytes while TaskWorkspace retains containment, write, physical digest readback, trusted identity, and terminal-retention authority. pattern selects one whole-request behavior that consumes the existing AgentExecution input/output/capability/policy draft and returns its business value; the registered AgentPattern seam receives execution plus one-use run_default, while complex branching, loops, HITL wait/resume, and recovery remain TriggerFlow and ExecutionExchange concerns. Ordinary requests implicitly use request, and Agent.goal explicitly selects the built-in goal Pattern while preserving the existing AgentTask implementation. The default plugin registry also distributes plan and long_content through agently.builtins.plugins.AgentPattern: plan performs structured readiness, connected ExecutionExchange clarification, and terminal plan generation while preserving the caller output contract; long_content validates an ordered section plan, writes each section sequentially with bounded continuity, and host-assembles text without a final model recopy. Both bundled multi-request Patterns reject ensure_long_output mixing before model dispatch; long_content also rejects structured output, and disconnected plan clarification fails closed until AgentExecution can return a resumable Pattern handle.",
-      "typing_contract": "Ordinary Agent and AgentExecution fluent calls require no type imports and retain AgentExecution through configuration. Pattern, effort, and strategy overloads expose built-in Literal candidates while plugin-extensible Pattern names and alternate-orchestrator strategy names remain open strings. AgentTask execution is a host-validated finite Literal set. ExecutionExchangeView guarantees the standard interaction-handler fields; interaction/review/artifact handler types and the minimal direct AgentPattern protocol are available only from their narrow agently.types owner namespaces."
+      "standard_methods_stability": "interact, review, and artifact are stable AgentExecution methods; explicit create_execution(name) selects the actual registered AgentExecution plugin instance",
+      "builtin_plugins": [
+        "auto",
+        "request",
+        "long_task",
+        "plan",
+        "long_content"
+      ],
+      "creation_contract": "Agent owns reusable defaults and capabilities; its factory directly constructs the selected registered execution class. That same instance owns draft, production, terminal policies and readers. Explicit name overrides AgentExecution.activate; absent selection uses auto. Only absent selection with auto retains released non-default AgentOrchestrator activation. Released AgentTask imports delegate to execution-owned long_task components. Unreleased AgentPattern and pattern() are replaced, not parallel owners.",
+      "goal_contract": "goal(..., turn_on_long_task=True) declares semantic goals and criteria and enables the auto producer's long-task convenience path. False contributes the same Prompt fields without enabling that switch or vetoing an independently selected producer/strategy. If an already selected long_task producer lacks goals or criteria, one budgeted model preparation fills only missing fields from the original request before task construction. Explicit and restored fields remain unchanged; provenance is retained for production/review. Missing facts block; inferred criteria cannot invent thresholds or authorize work. Ordinary request, review, plan and long_content do not gain a global goal preflight.",
+      "interaction_contract": "Agent.interact(handler) and AgentExecution.interact(handler) bind one synchronous or asynchronous connected response handler to one execution without forcing HITL or mutating the global ExecutionExchange registry. The handler receives a complete normalized ExecutionExchangeView and returns the response payload interpreted by the existing exchange consumer. TriggerFlow remains the only pause/resume owner for connected plan clarification; registered ExecutionExchange providers and routing settings remain advanced durable integration surfaces.",
+      "contract": "One execution owns the business result and lifecycle. validate hard-checks only the final business output, including the agent_task final_result projection rather than its lifecycle envelope; get_full_data/run/start retain the released full envelope. Direct ModelRequest and ensure_long_output retain request-owned repair; assembled/custom producer final checks do not replay production. artifact materializes that business value through TaskWorkspace containment, physical digest readback and trusted identity. review accepts rules and a replacement handler with host-only on_fail=warn or block and no implicit retry or separate verify method. The default evaluator reads complete trusted text artifacts and evaluates original requirements and content with descriptive quality levels, per-rule checks, issue-local suggestions and overall suggestions; absent/non-text evidence is not_assessable.",
+      "producer_contract": "Built-ins share the once-only run lifecycle and specialize a typed production hook on the returned instance. request preserves direct request behavior; long_task owns existing task planning/evidence/execution; plan performs readiness, connected clarification and terminal plan generation; long_content plans ordered sections, writes sequentially with bounded continuity and host-assembles text without final model recopy. Incompatible explicit producer/strategy/policy or delivery combinations fail before dispatch. Plan and long_content reject ensure_long_output mixing; long_content rejects structured output. Disconnected plan clarification fails closed.",
+      "typing_contract": "Ordinary fluent calls retain AgentExecution without type imports. create_execution, effort and strategy expose built-in Literal choices while registered plugin names remain open strings. Public protocol methods have explicit readable signatures rather than __getattr__ -> Any. Specialized handlers and production option types remain available in their owning namespaces.",
+      "pending_control_contract": "Unified rework/interrupt/pause/resume/save/load capability and revision contracts are not yet implemented by this slice; run/start/readers share current once-only execution. Method presence or legacy task resume must not be advertised as rework or generic snapshot capability."
     },
     "structured_output": {
       "surface": [

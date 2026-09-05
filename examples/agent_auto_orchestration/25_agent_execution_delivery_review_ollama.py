@@ -5,7 +5,7 @@ Run:
 
 Environment:
     Local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434/v1).
-    AGENT_PATTERN_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
+    AGENT_EXECUTION_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
 
 The model produces a release-risk brief and performs the advisory review. The
 host-owned handler review checks only the declared delivery invariant: the

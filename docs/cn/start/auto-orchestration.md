@@ -61,10 +61,9 @@ evidence 分开。普通 Actions 进入 `model_request` AgentExecution action lo
 AgentExecution 交付。只有 legacy/custom fallback 或 `ensure_long_output` 这类独立交付
 策略才追加最终生成请求。Skills 不创建 route，也不是 planner capability。
 
-公开 Agent API 仍由 core 持有，但路线规划和执行由 active
-`AgentOrchestrator` plugin 通过 `AgentOrchestrator` protocol 承担。这样
-Skill Context、DAG substrate 和后续 route 实现都可以替换，而不需要 core 知道内置
-plugin 的内部实现。
+公开 Agent API 仍由 core 持有；其工厂直接创建所选 AgentExecution 插件，
+由该实例持有生产和最终处理规则。Skill Context 与 DAG substrate
+仍是 execution 内可替换的组件。
 
 ## 人机交互
 
@@ -78,10 +77,9 @@ def handle_exchange(exchange):
     return {"audience": "framework developers"}
 
 result = (
-    agent
+    agent.create_execution("plan")
     .input("规划这次发布。")
     .interact(handle_exchange)
-    .pattern("plan")
     .start()
 )
 ```
@@ -144,7 +142,7 @@ Agent/AgentExecution 不提供公开 `verify()`。
 事件包括 `review.started`、`review.completed`、`review.warning`、`review.blocked`。
 
 `validate(handler)` 硬校验的是**当前调用的最终输出**：直接响应、最终计划、
-Host 组装的完整文档、AgentTask 最终输出或自定义 Pattern 返回值，
+Host 组装的完整文档、长任务最终业务输出或自定义 Execution 返回值，
 不自动检查内部步骤。直接 ModelRequest 与 `ensure_long_output` 保留已有受控修复；
 其他最终校验仅执行一次，不重放内部步骤或副作用。后者的 context 使用
 `meta.scope="agent_execution_final"`，没有 provider response ID，`max_retries=0`。
@@ -189,178 +187,103 @@ artifact 交付不会替换或包装业务结果。可信 refs 位于
 stream event 暴露。连续调用可创建多个分别校验的文件；任一已声明交付失败都会使本次
 run 失败。artifact 物化总是在 review 之前完成。
 
-## 请求 Pattern
+## Execution 插件
 
-> **Beta：**`.pattern(...)`、`AgentPattern` 扩展协议以及内置 `plan` /
-> `long_content` 实现仍可能演进。面向调用者的 beta 路径只有显式调用 `.pattern(...)` 后
-> 才会启用；仅注册 Pattern 不会改变普通 Agent 请求。即使 Pattern plugin 使用了相同名称，
-> 既有 Agent 方法仍然是原方法。
+Agent 持有可复用配置与能力；AgentExecution 插件持有一次执行的隔离草稿、
+生产生命周期、结果和最终处理规则。`agent.create_execution(name)`
+返回的就是已注册类的实例。
 
-这里的 beta 标签只属于 Pattern；`.interact(...)`、`.artifact(...)`、`.review(...)` 都是 AgentExecution 标准方法。
+| 名称 | 生产行为 | 可显式搭配的策略 |
+| --- | --- | --- |
+| `auto`（默认） | 启动时选择已有请求、长任务或 DAG 路由 | 已有路由策略 |
+| `request` | 单次请求，包括请求自己的解析与修复 | `auto`、`direct` |
+| `long_task` | 保留状态的多步目标执行 | `auto`、`task`、`task_loop`、`long_task`、`flat`、`taskboard` |
+| `plan` | 就绪检查、必要时连接式澄清、最终计划 | `auto` |
+| `long_content` | 章节规划、依赖式写作、宿主按序组装 | `auto` |
 
-Pattern 是一个可复用的完整请求行为，对调用者保持与普通 Agent 请求相同的形态：消费
-现有 AgentExecution draft，返回业务结果。使用 `.pattern(pattern)` 选择一个：
-
-```python
-async def annotate(execution, run_default):
-    result = await run_default()
-    return {"result": result, "review_state": "pending"}
-
-result = agent.input(task).output(contract).pattern(annotate).start()
-```
-
-`pattern` 只接收一个已注册 `AgentPattern` 名称、一个 Pattern instance 或一个 callable。
-`run_default()` 最多调用一次现有 route；Pattern 也可以自行拥有明确的模型请求，并返回
-组装后的值。它不会得到第二套 input bag、output schema、settings tree、result wrapper 或
-lifecycle，而是读取 AgentExecution 上已经配置的 prompt、capabilities、TaskWorkspace 和
-policy。artifact 与 review declarations 随后作用于 Pattern 的业务结果。
-
-现有 `.output(...)` 仍是对外的结果契约。Pattern 调用 `run_default()` 时由普通 route
-落实；完全自行组织 stages 的 Pattern 必须消费并遵守同一声明，不存在额外的
-`pattern.input(...)` 或 `pattern.output(...)` API。
-
-可复用 Pattern 使用 `AgentPattern` plugin family：
+显式选择优先于配置中的默认插件。不兼容的策略组合在模型或 Action 调用前报错。
+路由策略不能悄悄把显式插件换成另一种生产方式。普通链式调用保留延迟
+`auto` 选择；仅注册插件不会额外发起模型请求、规划或 review。
 
 ```python
-class AnnotatePattern:
-    name = "annotate"
-    DEFAULT_SETTINGS = {}
-
-    def __init__(self, *, plugin_manager, settings):
-        self.plugin_manager = plugin_manager
-        self.settings = settings
-
-    async def run(self, execution, run_default, /):
-        result = await run_default()
-        return {"result": result, "review_state": "pending"}
-
-agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
-result = agent.input(task).pattern("annotate").start()
-```
-
-注册本身不会选择 Pattern，即使保留通用 plugin manager 的默认 `activate` 参数也一样。
-Pattern 只能由 `.pattern(...)` 选择；Pattern 名称只存在于 `AgentPattern` plugin namespace，
-不会被复制成 Agent 或 AgentExecution 的属性。
-
-一次只选择一个 Pattern；后续 `.pattern(...)` 会替换之前的选择，不会形成隐式链。Pattern
-特有调优应放进 plugin instance 或 plugin settings，不通过 fluent method 增长 kwargs。
-
-Pattern 不是 DAG 的别名：Pattern 是行为契约，其内部实现可以是线性、分支、并发或循环。
-复杂 Pattern 的 branches、joins、retry、loop、pause/resume 和 recovery 使用内部
-TriggerFlow。HITL clarification 复用 ExecutionExchange routing/provider seam 与
-TriggerFlow wait/resume；调用者可以通过标准 `.interact(handler)` 提供 connected
-响应机制。
-
-当 plan -> TaskBoard -> task loop 是一个以任务完成为终态结果的请求时，由一个 Pattern
-拥有这套 topology 和明确 handoff；如果 plan 或 board 本身是独立消费的 deliverable，则
-启动不同 AgentExecution 并显式传递结果。
-
-Agently 在 `agently.builtins.plugins.AgentPattern` 下随包提供两个具体插件：`plan` 和
-`long_content`。它们与应用自定义 Pattern 使用同一套 plugin protocol；AgentOrchestrator
-只负责解析和调用，不拥有其内部拼装逻辑。
-
-### 内置 `plan`
-
-```python
-plan = agent.input(task).interact(handle_exchange).pattern("plan").start()
-```
-
-`plan` 先进行结构化 readiness 判断。如果缺少会实质改变计划的信息，内部 TriggerFlow
-会发出 `clarification` ExecutionExchange，通过 `.interact(handler)` 或其他已配置的
-connected provider 等待回复，然后带着回复再次判断；ready 后由最终 ModelRequest 返回
-计划，而不是执行目标交付物。因此调用者的 `.output(...)` 描述的是计划结果：
-
-```python
-plan = (
-    agent
-    .input(task)
-    .output({"steps": [str], "risks": [str]}, format="json")
-    .pattern("plan")
-    .start()
+execution = (
+    agent.create_execution("plan")
+    .input("根据已提供的事实规划一次工作坊。")
+    .info(workshop_facts)
+    .interact(handle_exchange)
+    .output(plan_schema)
+    .validate(validate_plan)
 )
+plan = execution.start()
+meta = execution.get_meta()
+print(meta["plugin"], meta["route"]["selected_route"])
 ```
 
-默认每轮最多三个问题、最多三轮 clarification。高级调优放在
-`plugins.AgentPattern.plan.max_questions_per_round` 与
-`plugins.AgentPattern.plan.max_clarification_rounds`，不向 `.pattern(...)` 增加参数。
-首个内置版本支持 connected HITL；若 routing 选择 durable/disconnected wait，会 fail
-closed，因为 AgentExecution 目前还不能返回可恢复的 Pattern handle。它同样拒绝
-`.ensure_long_output()`，因为该 transport policy 当前属于普通 direct route，而不是
-Pattern 的 terminal plan request。
+调用方的 `validate(...)` 只硬校验生产方最终返回的值，不审查中间的就绪响应、
+章节计划或任务步骤。直接请求的修复仍由 ModelRequest 负责。
+Artifact 写入、回读和可选 review 在最终校验后由同一个 execution 执行。
 
-### 内置 `long_content`
+`plan` 使用有界的就绪检查与规划请求。需要澄清时，连接式 handler 接收
+`ExecutionExchangeView`。缺失或拒绝的回答、澄清次数耗尽会产生明确的 blocked
+结果，不会伪造回答。本内置连接式流程尚不承诺持久化恢复计划。
+配置为 `plugins.AgentExecution.plan.max_clarification_rounds`（默认 3）及
+`max_questions_per_round`（默认 3）。
+
+`long_content` 先规划章节，再使用有界衔接上下文写作，最后由宿主按计划顺序组装
+完整正文，不让模型再复制一遍全文。配置为
+`plugins.AgentExecution.long_content.max_sections`（默认 12）及
+`continuity_chars`（默认 4000）。它输出纯文本，不能搭配结构化 `output(...)`
+或 `ensure_long_output()`。原生截断续写与多章节内容生产是不同职责。
+
+自定义实现也注册到 `AgentExecution` 分类。可以继承内置实现复用生命周期，
+在同一个实例上覆盖带明确类型的受保护生产方法：
 
 ```python
-report = (
-    agent
-    .input(task)
-    .pattern("long_content")
-    .artifact("reports/report.md")
-    .review()
-    .start()
-)
+from agently.builtins.plugins.AgentExecution import RequestExecution, ProductionOptions
+
+class AuditedRequest(RequestExecution):
+    name = "audited_request"
+
+    async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        route, value = await super()._async_produce(options)
+        self.logs["audit"] = {"produced": True}
+        return route, value
+
+agent.plugin_manager.register("AgentExecution", AuditedRequest, activate=False)
+execution = agent.create_execution("audited_request").input("解释这次迁移。")
+result = execution.start()
 ```
 
-`long_content` 先用一次结构化请求生成 section plan，再携带有界 continuity notes 串行写作
-各个已校验 section。host 按计划顺序添加标题并组装已接受正文，不再用最后一次模型请求
-重抄整篇文档。它只返回文本：结构化 `.output(...)` 以及同时选择
-`.ensure_long_output()` 都会在第一次模型调用前被拒绝。使用 `.artifact(...)` 交付文件，
-使用 `.review()` 做终态语义判断。
+仅在确实要改变默认插件时使用 `activate=True`。完整替换实现也可以直接遵守公开
+协议。`run/async_run` 与兼容的 `start/async_start`、结果读取入口共享一次生产；
+预先取得的结果读取器不会再启动另一份执行。
 
-默认 section 上限为 12，前序 continuity 投影的总长度上限为 4,000 字符；高级配置位于
-`plugins.AgentPattern.long_content.max_sections` 与
-`plugins.AgentPattern.long_content.continuity_chars`。`ensure_long_output()` 仍是单次请求的
-transport truncation policy，不是语义长文拼装 Pattern。
+元数据提供 `plugin`；多请求生产方发出 `execution.stage.started/completed`，
+在 `diagnostics.execution_run` 中记录阶段。类型从 `agently.types.plugins`
+和 `agently.types.data` 导入，不额外扩张根包导出。
+已发布的 AgentOrchestrator 激活路径作为兼容适配保留，但不再参与默认创建。
+未发布的 `pattern()` 与 AgentPattern 分类已被替换，不作为并行 API 保留。
 
-以下本地 Ollama/Qwen 可运行示例覆盖标准终态方法与两个内置 beta Pattern：
+本地 Ollama Qwen 示例：
 
-- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py)：经过回读验证的 artifact、模型 advisory review，以及 handler 驱动的 blocking review；
-- [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py)：connected clarification、结构化计划校验与 artifact 回读；
-- [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py)：section plan/写作、Host 顺序组装 Markdown、artifact 回读与 review。
-
-隐式简单行为是 `request`。Agently 可以在内部透明地用 built-in `goal` Pattern 承载
-`.goal(...)`，但 goal 调用者继续使用原有 API 和 AgentTask 行为，不需要配置或理解
-Pattern。`.strategy(...)` 仍是更低层的执行机制 override。
-
-只有显式调用 `.pattern(...)` 的 execution 才在 metadata 中暴露 Pattern identity，并发出
-`pattern.started`、`pattern.completed`、`pattern.failed`；model-backed built-in 还会发出
-有界的 `pattern.stage.started`、`pattern.stage.completed` 事实。普通请求和 `.goal(...)`
-不会增加这套 beta metadata 或 stream surface。Pattern 应在 `.start()` 前选择；
-`start(mode=...)` 不是 Pattern API。无效或未知 Pattern 会明确失败，不会静默退回普通请求。
-
-### 类型与 IDE 提示
-
-普通 fluent 用法不需要导入任何 Agently 类型。IDE 会在调用位置直接提示
-`.pattern(...)`、`.effort(...)` 和 `.strategy(...)` 的内置值；所有配置方法也会把整条链
-持续标注为同一个 `AgentExecution`：
-
-```python
-result = agent.input(task).pattern("long_content").artifact("report.md").review().start()
-```
-
-Pattern 名称对已注册的 `AgentPattern` 插件保持开放。strategy 名称也允许替代
-`AgentOrchestrator` 实现扩展，但随包 orchestrator 只为文档列出的内置 strategy 赋予行为。
-与此不同，`create_task(execution=...)` 是 host 校验的有限选项，type checker 会在运行前拒绝
-未知值。
-
-`use_actions` / `use_action`、`require_actions`、`use_skills`、`require_skills`
-和 `use_skills_packs` 默认返回本轮 `AgentExecution`；在 Agent 上显式传入
-`always=True` 则返回 Agent 并配置未来运行。`use_tools` / `use_tool` 兼容别名也
-保留 execution 返回类型。IDE 的 Action `planning_protocol` 与 `concurrency_mode`
-提示采用有限选项；输入的 Action/Skill 对象仍保留既有插件扩展边界。
-
-只有扩展边界才可能需要类型导入。具名 handler 需要输入或 context 的 IDE 提示时，只从
-`agently.types.data` 导入实际使用的 `ExecutionExchangeView`、`AgentReviewContext` 或
-`AgentArtifactContext`；Pattern 作者可按需从 `agently.types.plugins` 导入
-`AgentExecution` 和 `AgentPatternContinuation`。inline handler 和普通调用不需要这些
-类型；高级类型也不会被重复暴露到 `agently` package root。
+- [带连接式澄清的计划](../../../examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py)
+- [带产物回读与 review 的长内容](../../../examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py)
 
 ## Goal Pursuit
 
-当业务目标需要有边界的 planning、execution、evidence、verification 和 replan
-闭环时，使用 `agent.goal(goal_or_goals, success_criteria=None)`。这会选择 built-in
-`goal` Pattern，同时保留现有 AgentTask 实现。
-`agent.goals(...)` 只是同一个入口的复数 alias。
+`agent.goal(goal_or_goals, success_criteria=None, *, turn_on_long_task=True)`
+声明语义目标与成功标准；默认还为普通 auto 路由开启有界长任务便捷路径。
+`turn_on_long_task=False` 写入相同 Prompt 声明，但不因此开启长任务，
+也不会禁止独立选择的 long_task 插件或策略。显式 `direct` 策略和插件选择仍然有效。
+`agent.goals(...)` 是复数别名；两者均不自动开启 review。
+启动前再次调用 goal() 会替换该声明拥有的便捷开关。
+
+已选定的长任务生产方若缺少 goal 或 success criteria，会在构造任务状态前调用模型，
+仅从原始请求推导缺失字段。显式声明与原始 Prompt 保持不变，metadata 记录模型来源；
+推导标准不能授权新工作或虚构业务门槛。必要事实不足时返回 blocked。
+完整或已恢复的合同跳过此节点；普通请求与 review 不增加前置调用，plan/long_content
+继续使用各自的规划节点。参见 [缺失目标补全示例](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
+及其真实运行中记录的后续长任务超时限制。
 
 task-specific options 单独组装时，应通过 task strategy 传入：
 

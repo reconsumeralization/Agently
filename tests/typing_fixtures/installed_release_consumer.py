@@ -18,16 +18,24 @@ execution = agent.input("check").info("installed wheel").use_action(lookup)
 
 assert_type(__version__, str)
 assert_type(execution, AgentExecution)
+assert_type(agent.goal("Explain", turn_on_long_task=False), AgentExecution)
+assert_type(agent.goals(["Explain"], turn_on_long_task=False), AgentExecution)
+assert_type(execution.goal("Explain", ["Be precise"], turn_on_long_task=False), AgentExecution)
+assert_type(execution.goals("Explain", turn_on_long_task=False), AgentExecution)
 assert_type(execution.use_tool(lookup), AgentExecution)
 assert_type(execution.require_actions(lookup), AgentExecution)
 assert_type(execution.use_skills("writer"), AgentExecution)
-assert_type(execution.pattern("plan"), AgentExecution)
+assert_type(agent.create_execution("plan"), AgentExecution)
 assert_type(execution.review(), AgentExecution)
 assert_type(execution.review(rules="Check the declared result contract.", on_fail="block"), AgentExecution)
 assert_type(execution.artifact("report.md"), AgentExecution)
 
 
 if TYPE_CHECKING:
+    from agently.builtins.plugins.AgentExecution import AgentExecution as BundledExecution
+
+    plugin_contract: AgentExecution = BundledExecution(agent)
+
     def review_handler(_result: object, context: AgentReviewContext) -> bool:
         assert_type(context.execution, AgentExecution)
         return True

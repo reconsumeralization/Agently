@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, StrictBool, model_validator
 
 from agently.types.config import AgentlyConfigModel
 
@@ -37,6 +37,7 @@ class AgentExecutionRouteOptions(AgentlyConfigModel):
 class AgentExecutionLifecycleOptions(AgentlyConfigModel):
     lineage: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
+    turn_on_long_task: StrictBool | None = None
 
 
 class ExecutionOptions(AgentlyConfigModel):

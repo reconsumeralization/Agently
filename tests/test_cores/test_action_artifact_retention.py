@@ -925,7 +925,7 @@ async def test_explicit_task_run_context_owns_action_loop_artifacts_over_ambient
 
 @pytest.mark.asyncio
 async def test_artifacts_only_terminal_carrier_discards_transient_selection_without_alias_leak(tmp_path) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+    from agently.builtins.plugins.AgentExecution.modules.terminal_retention import (
         prepare_agent_execution_terminal_retention,
     )
 
@@ -965,7 +965,7 @@ async def test_artifacts_only_terminal_carrier_discards_transient_selection_with
 async def test_selected_action_artifact_run_scope_release_is_concurrent_and_small_carrier_is_durable(
     tmp_path,
 ) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.route_execution import (
+    from agently.builtins.plugins.AgentExecution.modules.route_execution import (
         _finalize_terminal_execution,
     )
 
@@ -1047,7 +1047,7 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
     tmp_path,
     monkeypatch,
 ) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.route_execution import (
+    from agently.builtins.plugins.AgentExecution.modules.route_execution import (
         _finalize_terminal_execution,
     )
 
@@ -1256,7 +1256,7 @@ async def test_custom_triggerflow_handler_bounds_every_agent_execution_consumer(
     monkeypatch,
 ) -> None:
     from agently import TriggerFlow
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.diagnostics import (
+    from agently.builtins.plugins.AgentExecution.modules.diagnostics import (
         build_execution_meta,
     )
     from agently.core.runtime import bind_runtime_context
@@ -1873,7 +1873,7 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     monkeypatch,
     failure_stage: str,
 ) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.route_execution import (
+    from agently.builtins.plugins.AgentExecution.modules.route_execution import (
         _finalize_terminal_execution,
     )
 

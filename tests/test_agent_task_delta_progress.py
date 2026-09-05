@@ -13,7 +13,7 @@ from agently.core.application.AgentExecution.Stream import (
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
 from agently.core.application.AgentTask import AgentTask
 from agently.core.runtime import bind_runtime_context
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.bridges import (
+from agently.builtins.plugins.AgentExecution.modules.bridges import (
     normalize_action_log,
 )
 from agently.types.data import AgentExecutionStreamData

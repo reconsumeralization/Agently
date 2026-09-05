@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from agently import Agently
+from agently.builtins.plugins.ActionExecutor import CodeExecutionActionExecutor
 from agently.builtins.agent_extensions.SkillsExtension.SkillActionBinder import (
     SkillActionBinder,
 )
@@ -157,6 +158,7 @@ async def test_agent_exposes_released_script_binding_after_exact_skill_binding(
     assert bound.action_id in (execution.execution_context.scoped_action_ids() or set())
     executor = execution.action.action_registry.get_executor(bound.action_id)
     assert executor is not None
+    assert isinstance(executor, CodeExecutionActionExecutor)
     assert executor.skill_library is agent.skill_library
 
 
