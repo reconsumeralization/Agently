@@ -1,6 +1,6 @@
 # Agent 自动编排
 
-Agently 4.1.3 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
+Agently 4.1.4 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
 业务结果，但 Agent 可以在显式注入候选能力后，路由到普通模型响应、Actions 或
 AgentExecution-bound Skill context。
 
@@ -293,6 +293,12 @@ report = (
 `plugins.AgentPattern.long_content.continuity_chars`。`ensure_long_output()` 仍是单次请求的
 transport truncation policy，不是语义长文拼装 Pattern。
 
+以下本地 Ollama/Qwen 可运行示例覆盖标准终态方法与两个内置 beta Pattern：
+
+- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py)：经过回读验证的 artifact、模型 advisory review，以及 handler 驱动的 required verification；
+- [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py)：connected clarification、结构化计划校验与 artifact 回读；
+- [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py)：section plan/写作、Host 顺序组装 Markdown、artifact 回读与 review。
+
 隐式简单行为是 `request`。Agently 可以在内部透明地用 built-in `goal` Pattern 承载
 `.goal(...)`，但 goal 调用者继续使用原有 API 和 AgentTask 行为，不需要配置或理解
 Pattern。`.strategy(...)` 仍是更低层的执行机制 override。
@@ -317,6 +323,12 @@ Pattern 名称对已注册的 `AgentPattern` 插件保持开放。strategy 名�
 `AgentOrchestrator` 实现扩展，但随包 orchestrator 只为文档列出的内置 strategy 赋予行为。
 与此不同，`create_task(execution=...)` 是 host 校验的有限选项，type checker 会在运行前拒绝
 未知值。
+
+`use_actions` / `use_action`、`require_actions`、`use_skills`、`require_skills`
+和 `use_skills_packs` 默认返回本轮 `AgentExecution`；在 Agent 上显式传入
+`always=True` 则返回 Agent 并配置未来运行。`use_tools` / `use_tool` 兼容别名也
+保留 execution 返回类型。IDE 的 Action `planning_protocol` 与 `concurrency_mode`
+提示采用有限选项；输入的 Action/Skill 对象仍保留既有插件扩展边界。
 
 只有扩展边界才可能需要类型导入。具名 handler 需要输入或 context 的 IDE 提示时，只从
 `agently.types.data` 导入实际使用的 `ExecutionExchangeView`、`AgentReviewContext` 或

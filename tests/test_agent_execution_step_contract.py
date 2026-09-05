@@ -8552,7 +8552,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
         "scope": {"kind": "agent_task", "id": task_record.id},
         "owner": {"kind": "agent_execution", "id": execution.id},
     }
-    assert meta["diagnostics"]["action_artifact_release"]["scope"] == {
+    assert meta["diagnostics"].get("action_artifact_release", {}).get("scope") == {
         "kind": "agent_task",
         "id": task_record.id,
     }
@@ -9745,7 +9745,7 @@ async def test_agent_execution_action_scope_filters_action_runtime_boundary():
         entry.get("action_id") for entry in meta["logs"].get("action_loop_diagnostics", [])
     ]
     assert "action_loop" in boundary_diagnostics
-    assert meta["diagnostics"]["action_scope"]["allowed_action_ids"] == ["allowed_action"]
+    assert meta["diagnostics"].get("action_scope", {}).get("allowed_action_ids") == ["allowed_action"]
 
 
 @pytest.mark.asyncio

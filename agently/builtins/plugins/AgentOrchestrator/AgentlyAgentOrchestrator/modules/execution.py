@@ -1125,9 +1125,11 @@ class AgentExecution:
         return declare_interaction(self, handler)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        """Add an advisory post-run review; its verdict does not fail the run."""
         return declare_review(self, required=False, handler=handler)
 
     def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        """Add a required post-run verification that can fail this execution."""
         return declare_review(self, required=True, handler=handler)
 
     def artifact(
@@ -1135,6 +1137,7 @@ class AgentExecution:
         path: str | os.PathLike[str],
         handler: "AgentArtifactHandler | None" = None,
     ) -> "AgentExecution":
+        """Declare a TaskWorkspace-relative artifact to materialize after the run."""
         return declare_artifact(self, path, handler)
 
     @overload
@@ -1156,17 +1159,19 @@ class AgentExecution:
         value: AgentExecutionEffort = "medium",
         **strategy: object,
     ) -> "AgentExecution":
+        """Apply an effort profile and optional execution-strategy overrides."""
         return configure_effort(self._reconfiguration_target(), value, **strategy)
 
-    def use_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
+    def use_actions(self, actions: object) -> "AgentExecution":
+        """Attach Actions to this execution without changing Agent defaults."""
         target = self._reconfiguration_target()
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
-            raw_names = register(args[0] if args else None)
+            raw_names = register(actions)
         else:
             agent_any = cast(Any, self.agent)
-            agent_any.use_actions(*args, always=True, **kwargs)
-            raw_names = getattr(self.agent, "_normalize_registered_action_ids", lambda value: [])(args[0] if args else None)
+            agent_any.use_actions(actions, always=True)
+            raw_names = getattr(self.agent, "_normalize_registered_action_ids", lambda value: [])(actions)
         names = raw_names if isinstance(raw_names, (list, tuple, set)) else []
         for name in names:
             text = str(name or "").strip()
@@ -1177,15 +1182,28 @@ class AgentExecution:
         target.effective_options = target._build_effective_options()
         return target
 
-    def require_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
+    def use_action(self, actions: object) -> "AgentExecution":
+        """Attach one Action to this execution."""
+        return self.use_actions(actions)
+
+    def use_tools(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_actions(...)``."""
+        return self.use_actions(tools)
+
+    def use_tool(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_action(...)``."""
+        return self.use_action(tools)
+
+    def require_actions(self, actions: object) -> "AgentExecution":
+        """Require Actions during this execution."""
         target = self._reconfiguration_target()
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
-            raw_names = register(args[0] if args else None)
+            raw_names = register(actions)
         else:
             agent_any = cast(Any, self.agent)
-            agent_any.require_actions(*args, always=True, **kwargs)
-            raw_names = getattr(self.agent, "_normalize_registered_action_ids", lambda value: [])(args[0] if args else None)
+            agent_any.require_actions(actions, always=True)
+            raw_names = getattr(self.agent, "_normalize_registered_action_ids", lambda value: [])(actions)
         names = raw_names if isinstance(raw_names, (list, tuple, set)) else []
         for name in names:
             text = str(name or "").strip()
@@ -1488,6 +1506,7 @@ class AgentExecution:
         value: AgentExecutionStrategy | None = None,
         **options: object,
     ) -> "AgentExecution":
+        """Select an execution strategy and optional strategy-specific settings."""
         target = self._reconfiguration_target()
         if value is not None:
             apply_strategy_selection(target, value, source="explicit_strategy")

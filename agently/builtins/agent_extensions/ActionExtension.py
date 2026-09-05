@@ -20,7 +20,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
-from typing_extensions import Self
+from typing_extensions import Self, overload
 
 from agently.core import BaseAgent
 from agently.core.model.ModelRequestRunner import PreparedModelResponse
@@ -56,8 +56,6 @@ class ActionExtension(BaseAgent):
         self.action = type(global_action)(self.plugin_manager, self.settings)
         self.tool = self.action
 
-        self.use_action = self.use_actions
-        self.use_tool = self.use_tools
         self.use_mcp = default_stage_call_bridge.as_sync(self.async_use_mcp)
         self.use_sandbox = self.use_action_sandbox
         self.use_python = self.enable_python
@@ -146,6 +144,12 @@ class ActionExtension(BaseAgent):
         returns: "ReturnType | None" = None,
         concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
     ) -> Self:
+        """Register one Agent-local Action.
+
+        In eligible programmatic batches, ``concurrency_mode="parallel"``
+        permits overlap with other parallel Actions. ``"exclusive"`` keeps
+        this Action behind an ordering barrier.
+        """
         self.action.register_action(
             action_id=name,
             desc=desc,
@@ -224,16 +228,58 @@ class ActionExtension(BaseAgent):
             self.action.tag(names, agent_tag)
         return names
 
+    @overload
     def use_actions(
         self,
-        actions: Callable | str | list[str | Callable] | Any,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_actions(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_actions(
+        self,
+        actions: object,
         *,
         always: bool = False,
     ) -> "Self | AgentExecution":
+        """Attach Actions to one execution, or to future runs with ``always=True``."""
         if not always:
             return self.create_execution().use_actions(actions)
         self._register_action_items(actions)
         return self
+
+    @overload
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: bool = False,
+    ) -> "Self | AgentExecution":
+        """Attach one Action to a run, or to future runs with ``always=True``."""
+        return self.use_actions(actions, always=always)
 
     def use_acp(
         self,
@@ -267,12 +313,29 @@ class ActionExtension(BaseAgent):
             self.settings.set("agent.acp.diagnostics", cast(Any, diagnostics))
         return self
 
+    @overload
     def require_actions(
         self,
-        actions: Callable | str | list[str | Callable] | Any,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def require_actions(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def require_actions(
+        self,
+        actions: object,
         *,
         always: bool = False,
     ) -> "Self | AgentExecution":
+        """Require Actions for one execution, or for future runs with ``always=True``."""
         if not always:
             return self.create_execution().require_actions(actions)
         for name in self._register_action_items(actions):
@@ -309,8 +372,13 @@ class ActionExtension(BaseAgent):
             )
         return scoped_list
 
-    def use_tools(self, tools: Callable | str | list[str | Callable] | Any) -> "Self | AgentExecution":
+    def use_tools(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for execution-local ``use_actions(...)``."""
         return self.use_actions(tools)
+
+    def use_tool(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for execution-local ``use_action(...)``."""
+        return self.use_action(tools)
 
     @staticmethod
     def _build_capability_desc(
@@ -1381,6 +1449,12 @@ class ActionExtension(BaseAgent):
             | None
         ) = None,
     ) -> Self:
+        """Configure the Action loop and its model-planning protocol.
+
+        ``structured_plan`` uses Agently's structured planner,
+        ``native_tool_calls`` consumes provider-native tool calls, and
+        ``programmatic`` asks an eligible model for executable Action-call code.
+        """
         if enabled is not None:
             self.settings.set("action.loop.enabled", bool(enabled))
             self.settings.set("tool.loop.enabled", bool(enabled))
@@ -1498,7 +1572,10 @@ class ActionExtension(BaseAgent):
         self,
         action_calls: list["ActionCall"] | list[dict[str, Any]],
     ) -> int:
-        """Release generated program calls when the caller elects not to run them."""
+        """Release generated program calls that will not be executed.
+
+        Returns the number of retained program leases released by this call.
+        """
 
         return self.action.release_programmatic_action_calls(action_calls)
 

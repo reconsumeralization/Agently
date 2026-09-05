@@ -31,7 +31,15 @@ def test_release_pinned_usage_manifest_paths_exist() -> None:
     assert model_examples
     for example in model_examples:
         assert (ROOT / example["path"]).is_file()
-        assert example["provider"] == "Explicitly configured online model"
+        assert "configured" in example["provider"].lower()
+
+    coverage = manifest["development_line_4_1_4_8_coverage"]
+    assert coverage
+    for item in coverage:
+        assert item["work"]
+        assert item["examples"]
+        for path in item["examples"]:
+            assert (ROOT / path).is_file()
 
 
 def test_release_pinned_usage_readme_records_confirmation_policy() -> None:
@@ -129,3 +137,42 @@ def test_release_pinned_action_response_delivery_is_locked() -> None:
     assert "info_present_in_each_round" in source
     assert "simple_action_decision_hidden" in source
     assert "simple_response_once" in source
+
+
+def test_release_pinned_retry_stream_reconciliation_is_locked() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    retry_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith("06_validate_retry_accepted_stream.py")
+    )
+    source = (ROOT / retry_gate["path"]).read_text(encoding="utf-8")
+
+    assert any(
+        "reopened instant stream replays the accepted" in item
+        for item in retry_gate["protected_usage"]
+    )
+    assert "model_request_reopened_status" in source
+    assert "agent_execution_statuses" in source
+    assert "agent_execution_attempt_indexes" in source
+
+
+def test_release_pinned_skill_scope_and_script_candidates_are_locked() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    skill_scope_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith(
+            "07_skill_execution_scope_and_script_candidates.py"
+        )
+    )
+    source = (ROOT / skill_scope_gate["path"]).read_text(encoding="utf-8")
+
+    assert "agent.require_skills(..., always=True) supplies Agent defaults" in skill_scope_gate[
+        "protected_usage"
+    ]
+    assert "original_scope_frozen" in source
+    assert "fresh_execution_sees_new_default" in source
+    assert "empty_declarations_do_not_scan_library" in source
+    assert "script_candidate_status" in source
+    assert "binding_required" in source

@@ -16,9 +16,11 @@ forced onto the new Blocks lifecycle.
 
 ## Current Commands
 
-Run from the repository root. Model examples need `DEEPSEEK_API_KEY` in the
-environment or `.env`; set `DYNAMIC_TASK_MODEL_PROVIDER=ollama` for local
-Ollama where supported.
+Run from the repository root. Earlier model examples need `DEEPSEEK_API_KEY` in
+the environment or `.env`; set `DYNAMIC_TASK_MODEL_PROVIDER=ollama` for local
+Ollama where supported. Examples 25-27 use local Ollama/Qwen directly and
+default to `qwen3.5:9b`; override it with `AGENT_PATTERN_OLLAMA_MODEL` or
+`OLLAMA_DEFAULT_MODEL`.
 
 ```bash
 python examples/agent_auto_orchestration/02_actions_dag_streaming.py
@@ -29,6 +31,9 @@ python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.
 python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
 python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
 python examples/agent_auto_orchestration/24_independent_dynamic_task_dag.py
+python examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py
+python examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py
+python examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` shows the released
@@ -53,6 +58,15 @@ python examples/agent_auto_orchestration/24_independent_dynamic_task_dag.py
   default `model_request` and task-strategy `agent_task` dispatch.
 - **24 - Independent Dynamic Task DAG.** Infrastructure smoke for direct
   `Agently.create_dynamic_task(...)` submitted-DAG execution.
+- **25 - AgentExecution Delivery And Review.** Local Qwen business result,
+  verified TaskWorkspace artifact, model-backed advisory review, and a
+  host-owned required delivery verification.
+- **26 - Plan Pattern With Interaction.** Local Qwen readiness analysis,
+  request-local connected clarification, host-validated structured plan, and
+  verified artifact delivery.
+- **27 - Long-Content Pattern Delivery.** Local Qwen section planning and
+  writing, host-ordered Markdown assembly, verified artifact delivery, and
+  model-backed advisory review.
 
 Model calls are real. Business data is mocked unless the example explicitly
 states that it uses a real external system such as MCP or GitHub CLI.

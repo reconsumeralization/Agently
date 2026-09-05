@@ -25,36 +25,6 @@
   "required_typed_callables": [],
   "any_allowlist": [
     {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.use_skills",
-      "positions": [
-        "param:skills"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Skill selectors intentionally accept one selector or a host-defined collection/projection accepted by SkillLibrary resolution.",
-      "narrowing_plan": "Introduce a public recursive SkillSelectorInput alias after installed-package selector forms are finalized.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.require_skills",
-      "positions": [
-        "param:skills"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Required Skill selectors share the extensible SkillLibrary selector boundary used by use_skills.",
-      "narrowing_plan": "Adopt the same public SkillSelectorInput alias as use_skills when selector forms are finalized.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.use_skills_packs",
-      "positions": [
-        "param:skills_packs"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Skill pack selectors intentionally accept one selector or a host-defined collection/projection accepted by SkillLibrary resolution.",
-      "narrowing_plan": "Introduce a public recursive SkillPackSelectorInput alias after pack selector forms are finalized.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_record_data",
       "positions": [
         "param:content",

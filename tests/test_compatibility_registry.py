@@ -29,11 +29,11 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     assert current_manifest == release_manifest
 
 
-def test_4_1_4_7_release_manifest_pins_stage_native_runtime_contract() -> None:
+def test_4_1_4_8_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 
-    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.7"
-    assert CURRENT_RELEASE_TRAIN == "2026-08-4.1.4.7"
+    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.8"
+    assert CURRENT_RELEASE_TRAIN == "2026-09-4.1.4.8"
     stage_support = manifest["runtime_support"]["agently_stage"]
     assert stage_support["version_specifier"] == ">=0.3.8,<0.4.0"
     assert stage_support["role"] == "required_runtime_dependency"
@@ -59,7 +59,7 @@ def test_in_development_manifest_declares_4_1_4_8_owner_boundaries() -> None:
     manifest = _development_manifest()
 
     assert manifest["target_version"] == "4.1.4.8"
-    assert manifest["release_train"] == "2026-08-4.1.4.8-dev"
+    assert manifest["release_train"] == "2026-09-4.1.4.8-dev"
     assert "carries forward the 4.1.4.7 contract" in manifest["notes"]
     assert "Agently-Stage >=0.3.8,<0.4.0" in manifest["notes"]
     assert "Python 3.14 task-factory keyword arguments" in manifest["notes"]

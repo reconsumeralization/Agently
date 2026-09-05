@@ -1,6 +1,6 @@
 # Agent Auto-Orchestration
 
-Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
+Agently 4.1.4 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
 through ordinary model response, Actions, or SkillLibrary-backed Skills
 execution when those capabilities were explicitly injected.
@@ -336,6 +336,13 @@ is bounded to 4,000 characters. Configure these under
 remains the separate transport-truncation policy for one request; it is not a
 semantic document-composition Pattern.
 
+Runnable local Ollama/Qwen examples cover the standard terminal methods and
+both bundled beta Patterns:
+
+- [`25_agent_execution_delivery_review_ollama.py`](../../../examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py): verified artifact delivery, model-backed advisory review, and handler-backed required verification;
+- [`26_plan_pattern_interaction_ollama.py`](../../../examples/agent_auto_orchestration/26_plan_pattern_interaction_ollama.py): connected clarification, structured plan validation, and artifact readback;
+- [`27_long_content_pattern_artifact_ollama.py`](../../../examples/agent_auto_orchestration/27_long_content_pattern_artifact_ollama.py): section planning/writing, host-ordered Markdown assembly, artifact readback, and review.
+
 The implicit simple behavior is `request`. Agently may transparently carry
 `.goal(...)` through the built-in `goal` Pattern, but goal callers continue to
 use the existing API and AgentTask behavior without Pattern setup.
@@ -366,6 +373,13 @@ also remain open for alternate `AgentOrchestrator` implementations, although
 the bundled orchestrator assigns behavior only to its documented built-in
 strategies. By contrast, `create_task(execution=...)` is a host-validated finite
 choice, so type checkers reject unknown values before runtime.
+
+`use_actions` / `use_action`, `require_actions`, `use_skills`, `require_skills`,
+and `use_skills_packs` return a one-run `AgentExecution` by default. Passing
+`always=True` on the Agent returns the Agent and configures future runs.
+The `use_tools` / `use_tool` compatibility aliases also retain execution return
+types. Action `planning_protocol` and `concurrency_mode` expose finite IDE
+choices, while Action/Skill inputs retain their existing plugin boundaries.
 
 Type imports are optional at extension boundaries. Import only
 `ExecutionExchangeView`, `AgentReviewContext`, or `AgentArtifactContext` from

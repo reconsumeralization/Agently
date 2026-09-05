@@ -124,17 +124,25 @@ class AgentExecution(Protocol):
 
     def pattern(self, pattern: AgentPatternInput) -> "AgentExecution": ...
 
-    def interact(self, handler: AgentInteractionHandler) -> "AgentExecution": ...
+    def interact(self, handler: AgentInteractionHandler) -> "AgentExecution":
+        """Bind one connected human-interaction handler to this execution."""
+        ...
 
-    def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
+    def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution":
+        """Add an advisory post-run review; its verdict does not fail the run."""
+        ...
 
-    def verify(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
+    def verify(self, handler: AgentReviewHandler | None = None) -> "AgentExecution":
+        """Add a required post-run verification that can fail the execution."""
+        ...
 
     def artifact(
         self,
         path: str | os.PathLike[str],
         handler: AgentArtifactHandler | None = None,
-    ) -> "AgentExecution": ...
+    ) -> "AgentExecution":
+        """Declare a TaskWorkspace-relative artifact to materialize after the run."""
+        ...
 
     @overload
     def effort(
@@ -176,6 +184,26 @@ class AgentExecution(Protocol):
         **options: object,
     ) -> "AgentExecution": ...
 
+    def use_actions(self, actions: object) -> "AgentExecution":
+        """Attach Actions to this execution only."""
+        ...
+
+    def use_action(self, actions: object) -> "AgentExecution":
+        """Attach one Action to this execution only."""
+        ...
+
+    def require_actions(self, actions: object) -> "AgentExecution":
+        """Require Actions during this execution."""
+        ...
+
+    def use_tools(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_actions(...)``."""
+        ...
+
+    def use_tool(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_action(...)``."""
+        ...
+
     def create_execution(self, **kwargs: Any) -> "AgentExecution": ...
 
     def get_result(self) -> "AgentExecutionResult": ...
@@ -186,7 +214,7 @@ class AgentExecution(Protocol):
 
     def use_skills(
         self,
-        skills: Any,
+        skills: object,
         *,
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
@@ -194,14 +222,14 @@ class AgentExecution(Protocol):
 
     def require_skills(
         self,
-        skills: Any,
+        skills: object,
         *,
         auto_allow: bool = False,
     ) -> "AgentExecution": ...
 
     def use_skills_packs(
         self,
-        skills_packs: Any,
+        skills_packs: object,
         *,
         mode: SkillMode = "model_decision",
     ) -> "AgentExecution": ...

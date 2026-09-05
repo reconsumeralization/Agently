@@ -19,9 +19,9 @@ from agently_stage import default_stage_call_bridge
 import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from typing_extensions import Self
+from typing_extensions import Self, overload
 
 from agently.core import BaseAgent
 from agently.core.application.SkillLibrary import SkillBinding, SkillPackageRevision
@@ -29,6 +29,9 @@ from agently.types.data import SkillMode, SkillScriptAuthorization
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
 from .SkillActionBinder import BoundSkillAction, SkillActionBinder
+
+if TYPE_CHECKING:
+    from agently.types.plugins import AgentExecution
 
 
 @dataclass(frozen=True)
@@ -94,14 +97,39 @@ class SkillsExtension(BaseAgent):
             authorization=authorization,
         )
 
+    @overload
     def use_skills(
         self,
-        skills: Any,
+        skills: object,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_skills(
+        self,
+        skills: object,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_skills(
+        self,
+        skills: object,
         *,
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Select Skills for one execution, or for future runs with ``always=True``.
+
+        ``mode="model_decision"`` exposes eligible Skills for model selection;
+        ``mode="required"`` requires each selected Skill to resolve.
+        """
         if not always:
             return self.create_execution().use_skills(
                 skills,
@@ -111,13 +139,32 @@ class SkillsExtension(BaseAgent):
         self._add_skill_selectors(skills, mode=mode, auto_allow=auto_allow)
         return self
 
+    @overload
     def require_skills(
         self,
-        skills: Any,
+        skills: object,
+        *,
+        auto_allow: bool = False,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def require_skills(
+        self,
+        skills: object,
+        *,
+        auto_allow: bool = False,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def require_skills(
+        self,
+        skills: object,
         *,
         auto_allow: bool = False,
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Require Skills for one execution, or for future runs with ``always=True``."""
         return self.use_skills(
             skills,
             mode="required",
@@ -125,13 +172,32 @@ class SkillsExtension(BaseAgent):
             always=always,
         )
 
+    @overload
     def use_skills_packs(
         self,
-        skills_packs: Any,
+        skills_packs: object,
+        *,
+        mode: SkillMode = "model_decision",
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_skills_packs(
+        self,
+        skills_packs: object,
+        *,
+        mode: SkillMode = "model_decision",
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_skills_packs(
+        self,
+        skills_packs: object,
         *,
         mode: SkillMode = "model_decision",
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Select Skill packs for one execution, or persist them with ``always=True``."""
         if not always:
             return self.create_execution().use_skills_packs(skills_packs, mode=mode)
         self._validate_mode(mode)

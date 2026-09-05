@@ -24,7 +24,18 @@ exact-revision binding, and the human-readable simple/detail debug console
 profiles while EventCenter keeps the complete event stream. It also locks
 `input().info().use_action()` to one execution and verifies that a terminal
 Action-or-Response round becomes the existing AgentExecution result without a
-redundant third model request. It does not
-preserve the removed SkillsExecutor planning or prompt-injection engine.
-Model-owned business behavior is still checked by the model-backed examples
-named in the manifest.
+redundant third model request. The 4.1.4.8 additions pin accepted retry streams,
+per-execution Skill scope, and inert `binding_required` script candidates. It
+does not preserve the removed SkillsExecutor planning or prompt-injection
+engine. Model-owned business behavior is checked by the model-backed examples
+named in the manifest, including local Ollama/Qwen coverage for AgentExecution
+delivery/review and the beta `plan` / `long_content` Patterns.
+
+## 4.1.4.8 Coverage
+
+`pinned_usage_manifest.json` contains the authoritative
+`development_line_4_1_4_8_coverage` mapping. The mapping is based on
+`v4.1.4.7..dev` and links each runtime/public-use work batch to at least one
+runnable example. Documentation-only prompt guidance and typing-only metadata
+refinements remain covered by bilingual docs and static typing gates; they do
+not claim a separate runtime behavior.

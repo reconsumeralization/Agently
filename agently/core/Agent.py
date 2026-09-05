@@ -1834,9 +1834,11 @@ class BaseAgent:
         return self.create_execution().interact(handler)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        """Add an advisory post-run review to a fresh execution."""
         return self.create_execution().review(handler)
 
     def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        """Add a required post-run verification to a fresh execution."""
         return self.create_execution().verify(handler)
 
     def artifact(
@@ -1844,6 +1846,7 @@ class BaseAgent:
         path: str | os.PathLike[str],
         handler: "AgentArtifactHandler | None" = None,
     ) -> "AgentExecution":
+        """Declare a TaskWorkspace-relative artifact for a fresh execution."""
         return self.create_execution().artifact(path, handler)
 
     @overload
@@ -1865,6 +1868,7 @@ class BaseAgent:
         value: "AgentExecutionEffort" = "medium",
         **strategy: object,
     ) -> "AgentExecution":
+        """Apply an execution effort profile while preserving fluent typing."""
         return self.create_execution().effort(value, **strategy)
 
     def route_policy(self, value: Any) -> "AgentExecution":
@@ -1889,6 +1893,7 @@ class BaseAgent:
         value: "AgentExecutionStrategy | None" = None,
         **options: object,
     ) -> "AgentExecution":
+        """Select an execution strategy and optional strategy-specific settings."""
         return self.create_execution().strategy(value, **options)
 
     # Prompt

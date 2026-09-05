@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,10 @@ from agently.types.plugins import (
 def test_agent_execution_and_model_response_streaming_type_contracts():
     if TYPE_CHECKING:
         agent: BaseAgent = Agently.create_agent("typing-contract")
+        full_agent: Agent = Agently.create_agent("typing-fluent-contract")
+
+        def sample_action(value: str) -> str:
+            return value
 
         assert_type(agent.input("hello"), AgentExecution)
         assert_type(agent.input("persistent", always=True), Agent)
@@ -98,6 +103,39 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution.effort("team_profile"), AgentExecution)
         assert_type(execution.strategy("taskboard"), AgentExecution)
         assert_type(execution.strategy("custom_strategy"), AgentExecution)
+        assert_type(full_agent.use_actions(sample_action), AgentExecution)
+        assert_type(full_agent.use_action(actions=sample_action), AgentExecution)
+        assert_type(full_agent.use_tools(sample_action), AgentExecution)
+        assert_type(full_agent.use_tool(tools=sample_action), AgentExecution)
+        assert_type(full_agent.require_actions(sample_action), AgentExecution)
+        assert_type(full_agent.use_actions(sample_action, always=True), Agent)
+        assert_type(full_agent.use_action(sample_action, always=True), Agent)
+        assert_type(full_agent.require_actions(sample_action, always=True), Agent)
+        assert_type(execution.use_actions(sample_action), AgentExecution)
+        assert_type(execution.use_action(actions=sample_action), AgentExecution)
+        assert_type(execution.use_tools(sample_action), AgentExecution)
+        assert_type(execution.use_tool(tools=sample_action), AgentExecution)
+        assert_type(execution.require_actions(sample_action), AgentExecution)
+        assert_type(full_agent.use_skills("writer"), AgentExecution)
+        assert_type(full_agent.require_skills("writer"), AgentExecution)
+        assert_type(full_agent.use_skills_packs("writing"), AgentExecution)
+        assert_type(full_agent.use_skills("writer", always=True), Agent)
+        assert_type(full_agent.require_skills("writer", always=True), Agent)
+        assert_type(full_agent.use_skills_packs("writing", always=True), Agent)
+        assert_type(execution.use_skills("writer"), AgentExecution)
+        assert_type(execution.require_skills("writer"), AgentExecution)
+        assert_type(execution.use_skills_packs("writing"), AgentExecution)
+        assert_type(full_agent.set_action_loop(planning_protocol="programmatic"), Agent)
+        assert_type(
+            full_agent.register_action(
+                name="sample_action",
+                desc="Return the supplied value.",
+                kwargs={"value": str},
+                func=sample_action,
+                concurrency_mode="parallel",
+            ),
+            Agent,
+        )
         assert_type(execution.get_generator(), Generator[str, None, None])
         assert_type(execution.get_generator(type="delta"), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
@@ -266,13 +304,28 @@ def test_agent_task_execution_hint_is_a_closed_host_choice():
     assert str not in get_args(execution_hint)
 
 
-def test_agent_task_unknown_execution_choice_is_rejected_by_pyright():
-    pyright = shutil.which("pyright")
-    if pyright is None:
+def _pyright_command() -> list[str] | None:
+    executable = shutil.which("pyright")
+    if executable is not None:
+        return [executable]
+    if importlib.util.find_spec("pyright") is not None:
+        return [sys.executable, "-m", "pyright"]
+    return None
+
+
+def test_unknown_finite_choices_are_rejected_by_pyright():
+    pyright_command = _pyright_command()
+    if pyright_command is None:
         pytest.skip("pyright executable is not installed in this test environment")
     fixture_dir = Path(__file__).parent / "typing_fixtures"
     completed = subprocess.run(
-        [pyright, "--pythonpath", sys.executable, "--project", str(fixture_dir / "pyrightconfig.json")],
+        [
+            *pyright_command,
+            "--pythonpath",
+            sys.executable,
+            "--project",
+            str(fixture_dir / "pyrightconfig.json"),
+        ],
         cwd=Path(__file__).parents[1],
         capture_output=True,
         text=True,
@@ -283,6 +336,10 @@ def test_agent_task_unknown_execution_choice_is_rejected_by_pyright():
     assert "agent_execution_finite_invalid.py:5" in output
     assert "reportArgumentType" in output
     assert "parallel" in output
+    assert "release_4_1_4_8_finite_invalid.py:9" in output
+    assert "unknown_protocol" in output
+    assert "release_4_1_4_8_finite_invalid.py:15" in output
+    assert "serial" in output
 
 
 def test_changed_runtime_protocols_are_publicly_typed():

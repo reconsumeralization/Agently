@@ -1,6 +1,7 @@
 {
   "include": [
-    "agent_execution_finite_invalid.py"
+    "agent_execution_finite_invalid.py",
+    "release_4_1_4_8_finite_invalid.py"
   ],
   "extraPaths": [
     "../.."
