@@ -1,0 +1,3505 @@
+{
+  "baseline_commit": "17f8ab170cfbc36427c75b0906a508cafcceff18",
+  "reasons": {
+    "pattern_to_execution": "Approved producer migration: selector/route, lifecycle events, stage keys and _DocumentSection type location. Renamed YAML keys reorder rendered input; instructions and payload values are preserved.",
+    "prompt_owned_goals": "Approved Prompt-owned goal and success_criteria appear in the existing execution Prompt projection. Calls and output values stay unchanged; semantic Prompt audit remains separate.",
+    "restored_business_review": "Approved final-business review subject and persisted-original-request context. Terminal resume still dispatches zero requests and preserves the full envelope."
+  },
+  "changes": {
+    "direct_text": [],
+    "direct_json": [],
+    "concurrent_readers": [],
+    "mutation_and_fresh": [],
+    "provider_failure": [],
+    "fluent_isolation": [],
+    "validation_repair": [],
+    "validation_exhaustion": [],
+    "review_warn": [],
+    "review_block": [],
+    "artifact_review": [],
+    "artifact_escape": [],
+    "default_review_artifact": [],
+    "plan_ready": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "c77bd3de5de838a202f369416a6108fd5c73e8315a92272da55259e82e005d06",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "dee1c7edcd405c95b0766db4ba7a0bfb778382c534f4bc6adf0faf225f7a91dd",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_clarification": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "exchange.pending",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "exchange.pending",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          13,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          14,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          15,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          16,
+          "path"
+        ],
+        "before": "exchange.resolved",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          17,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          18,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "exchange.resolved",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "exchanges",
+          0,
+          "request",
+          "audit_metadata",
+          "source"
+        ],
+        "before": "AgentPattern:plan",
+        "after": "AgentExecution:plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "c77bd3de5de838a202f369416a6108fd5c73e8315a92272da55259e82e005d06",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "readiness_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 1,
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 1,
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "fe5c9ffc7826692aaf694ba766c477e67558a563ef551be14c29ce8065960434",
+        "after_sha256": "48329e3910b234298a35dbbed6a18c8280450a28d4b6b7f4f760fc3b3596d526",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "9d0b1515212fa2ee97697fb21d8a5c167593ca871cc98c0215ad81a14da50caf",
+        "after_sha256": "a37c1e256870c2eec91951ff1438a44b362b8f649f37bd7e920d394a456e780a",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_budget": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.failed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.failed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "c77bd3de5de838a202f369416a6108fd5c73e8315a92272da55259e82e005d06",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "dee1c7edcd405c95b0766db4ba7a0bfb778382c534f4bc6adf0faf225f7a91dd",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": null,
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_validation": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "c77bd3de5de838a202f369416a6108fd5c73e8315a92272da55259e82e005d06",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "final_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "dee1c7edcd405c95b0766db4ba7a0bfb778382c534f4bc6adf0faf225f7a91dd",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "long_content": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          13,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          14,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          15,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          16,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "result_role": "one coherent long-form text document"
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "result_role": "one coherent long-form text document"
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Design the complete document before drafting any section.",
+          "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+          "Use between 1 and 12 sections.",
+          "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+          "Do not write section prose in this planning stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Design the complete document before drafting any section.",
+          "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+          "Use between 1 and 12 sections.",
+          "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+          "Do not write section prose in this planning stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "sections",
+          0
+        ],
+        "before": "typing.Annotated[list[agently.builtins.plugins.AgentPattern.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]",
+        "after": "typing.Annotated[list[agently.builtins.plugins.AgentExecution.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "28fa0f1a71051b1a08fe3eb299a0730a00bc352432a265c67646e99d37750cf8",
+        "after_sha256": "84c4fc4efebc34f978e39d5cca23af8adb6b929fb8ef30564b8e16fc1d2ebceb",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "section_index": 0,
+          "current_section": {
+            "section_id": "context",
+            "title": "Context",
+            "brief": "State the context."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "section_index": 0,
+          "current_section": {
+            "section_id": "context",
+            "title": "Context",
+            "brief": "State the context."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "1e538ecd68e93ef41200d18a29abc8b561291a18248f1ec5e144f2edbb81a4d4",
+        "after_sha256": "9cd764421a042301632d9853f1245a03e585b7d6cf9c0015f7b80eea7350dfcb",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "section_index": 1,
+          "current_section": {
+            "section_id": "checks",
+            "title": "Checks",
+            "brief": "List the checks."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "section_index": 1,
+          "current_section": {
+            "section_id": "checks",
+            "title": "Checks",
+            "brief": "List the checks."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "5a9966b0ad9275621a26785d0dcc91a6ca217d68ec9b93a6429ef3266ef84140",
+        "after_sha256": "8990378c577f908465d63ae3bc2cd0df8cb6ed684550ae24dc99490715792e0c",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "long_content_rejected": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          13,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          14,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          15,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          16,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "result_role": "one coherent long-form text document"
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "result_role": "one coherent long-form text document"
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Design the complete document before drafting any section.",
+          "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+          "Use between 1 and 12 sections.",
+          "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+          "Do not write section prose in this planning stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Design the complete document before drafting any section.",
+          "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+          "Use between 1 and 12 sections.",
+          "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+          "Do not write section prose in this planning stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "sections",
+          0
+        ],
+        "before": "typing.Annotated[list[agently.builtins.plugins.AgentPattern.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]",
+        "after": "typing.Annotated[list[agently.builtins.plugins.AgentExecution.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "28fa0f1a71051b1a08fe3eb299a0730a00bc352432a265c67646e99d37750cf8",
+        "after_sha256": "84c4fc4efebc34f978e39d5cca23af8adb6b929fb8ef30564b8e16fc1d2ebceb",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "section_index": 0,
+          "current_section": {
+            "section_id": "context",
+            "title": "Context",
+            "brief": "State the context."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "section_index": 0,
+          "current_section": {
+            "section_id": "context",
+            "title": "Context",
+            "brief": "State the context."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "1e538ecd68e93ef41200d18a29abc8b561291a18248f1ec5e144f2edbb81a4d4",
+        "after_sha256": "9cd764421a042301632d9853f1245a03e585b7d6cf9c0015f7b80eea7350dfcb",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_plugin"
+        ],
+        "operation": "add",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "execution_stage"
+        ],
+        "operation": "add",
+        "after": "section_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "section_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "section_index": 1,
+          "current_section": {
+            "section_id": "checks",
+            "title": "Checks",
+            "brief": "List the checks."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "section_index": 1,
+          "current_section": {
+            "section_id": "checks",
+            "title": "Checks",
+            "brief": "List the checks."
+          }
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Write only the current section body while satisfying its brief and the original request contract.",
+          "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+          "Do not repeat the document title or section heading; the host adds headings during assembly.",
+          "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+          "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+          "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "5a9966b0ad9275621a26785d0dcc91a6ca217d68ec9b93a6429ef3266ef84140",
+        "after_sha256": "8990378c577f908465d63ae3bc2cd0df8cb6ed684550ae24dc99490715792e0c",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "long_content",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "action_once": [],
+    "resume_flat": [
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": {
+          "source": "Original fact"
+        },
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "input"
+        ],
+        "operation": "add",
+        "after": "Original request",
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "value"
+        ],
+        "before": {
+          "status": "completed",
+          "accepted": true,
+          "artifact_status": "accepted",
+          "task_id": "characterization-terminal",
+          "final_result": "retained business value",
+          "final_response": "Completed. Deliverable result: retained business value",
+          "iterations": 1,
+          "resumed": true
+        },
+        "after": "retained business value",
+        "reason": "restored_business_review"
+      }
+    ],
+    "resume_taskboard": [
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": {
+          "source": "Original fact"
+        },
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "input"
+        ],
+        "operation": "add",
+        "after": "Original request",
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "value"
+        ],
+        "before": {
+          "status": "completed",
+          "accepted": true,
+          "artifact_status": "accepted",
+          "task_id": "characterization-terminal",
+          "final_result": "retained business value",
+          "final_response": "Completed. Deliverable result: retained business value",
+          "iterations": 1,
+          "resumed": true
+        },
+        "after": "retained business value",
+        "reason": "restored_business_review"
+      }
+    ],
+    "goal_direct": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Explain the source"
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "State the assumption"
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "3ee199869dc89c9089b69338703524fc200512097263ba4894c049dd2e0eddf6",
+        "after_sha256": "789ac8ae521b9fc7575ef2ec037d97f7e196ce846b341f91917763b7c4b4dc5f",
+        "reason": "prompt_owned_goals"
+      }
+    ],
+    "ensure_short": [],
+    "ensure_continuation": [],
+    "ensure_stale": [],
+    "ensure_task_conflict": [],
+    "flat_task": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "234c48eb411c5107551196e59e5c95844404e03811f64b0d57edf042b83f6548",
+        "after_sha256": "cb9b5a01acd3bdd62841b27fe704a1adc6a5f4fde06381b1aee00ba7adcf4b49",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "f09d8ce01851801168745a1a7054f675ea6a91742c064d29e62b1ef830c66a0d",
+        "after_sha256": "83a1dc409b59af55966f2b8e98f2317ef8e866d13c88b1501545ca0c9c07f35b",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "392ff9dcf6f1d94af56f26b973b34709b86b8a1b58e59bd9e64632baaf414c03",
+        "after_sha256": "e56b9b0876eafed3a704865149430d1fd750bb0e9f62a68196b8e504e63df306",
+        "reason": "prompt_owned_goals"
+      }
+    ],
+    "taskboard_task": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "e8f5ee9a67c11b510a57aec0cb1233900c2b668c214fada005d06af673dc695f",
+        "after_sha256": "083fe4c34cff20392de51108cb8174a2ed491a8fc75480a3830b5e55675f0470",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "e7fb1465ba450d73f5403ed2b898b2aeb7762bebb3b728e60a48bb493ca611f8",
+        "after_sha256": "159416f40ad304684c6b9f977acdd8ec051579225b8b858bfdf6b5dbd43201d2",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "5047845679007e73ead9b13d7b462e9b12f02fda29feffb0dfb4a8cb099e07c5",
+        "after_sha256": "3e7e89036173e8953428d59f2776d4759a98c4526b5d9fa84d4e04964189d6cf",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "6bf6691feab1cc397d8810df00b3b9b50df1f767a235510a87f7e19d36e4bda8",
+        "after_sha256": "6a5ac817ebbea24c7a20c4721675ccbc5696c79a65bfd9e401b808cce80e64e5",
+        "reason": "prompt_owned_goals"
+      }
+    ]
+  }
+}
