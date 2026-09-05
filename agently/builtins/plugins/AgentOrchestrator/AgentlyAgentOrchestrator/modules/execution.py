@@ -170,6 +170,7 @@ class AgentExecution:
         self.generated_success_criteria: list[str] = []
         self.local_action_ids: list[str] = []
         self.local_required_action_ids: list[str] = []
+        self._task_context_dependent_action_ids: set[str] = set()
         self.local_skill_selectors: list[dict[str, Any]] = []
         self.local_skills_pack_selectors: list[dict[str, Any]] = []
         self._agent_task_step_overrides: dict[str, Any] = {}
@@ -348,9 +349,33 @@ class AgentExecution:
 
         return wrapper
 
-    def _reconfiguration_target(self) -> "AgentExecution":
+    def _clear_task_context_dependent_actions(self) -> None:
+        action_ids = set(self._task_context_dependent_action_ids)
+        if not action_ids:
+            return
+        self.local_action_ids = [
+            action_id
+            for action_id in self.local_action_ids
+            if action_id not in action_ids
+        ]
+        self.local_required_action_ids = [
+            action_id
+            for action_id in self.local_required_action_ids
+            if action_id not in action_ids
+        ]
+        self.execution_context.clear_skill_script_exec_authorizations(action_ids)
+        self._task_context_dependent_action_ids.clear()
+        self._sync_action_scope(source="AgentExecution.task_context_invalidated")
+
+    def _reconfiguration_target(
+        self,
+        *,
+        invalidate_task_context: bool = True,
+    ) -> "AgentExecution":
         if not self._started:
-            self._task_context_prepared = False
+            if invalidate_task_context:
+                self._task_context_prepared = False
+                self._clear_task_context_dependent_actions()
             return self
         raise RuntimeError(
             "AgentExecution represents one independent run and has already started. "
@@ -378,7 +403,11 @@ class AgentExecution:
         fork.goal_items = list(self.goal_items)
         fork.success_criteria_items = list(self.success_criteria_items)
         fork.generated_success_criteria = list(self.generated_success_criteria)
-        fork.local_action_ids = list(self.local_action_ids)
+        fork.local_action_ids = [
+            action_id
+            for action_id in self.local_action_ids
+            if action_id not in self._task_context_dependent_action_ids
+        ]
         fork.local_required_action_ids = list(self.local_required_action_ids)
         fork.local_skill_selectors = [dict(item) for item in self.local_skill_selectors]
         fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
@@ -476,6 +505,8 @@ class AgentExecution:
         return getattr(self, "_parent_model_request_budget", None)
 
     def _replace_runtime_context(self):
+        self._task_context_prepared = False
+        self._clear_task_context_dependent_actions()
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
@@ -1222,6 +1253,26 @@ class AgentExecution:
             dict(self.execution_context.action_scope)
         )
         return self
+
+    def _enable_task_context_dependent_action(self, action_id: str) -> "AgentExecution":
+        target = self._reconfiguration_target(invalidate_task_context=False)
+        if not target._task_context_prepared:
+            raise RuntimeError(
+                "Prepare the AgentExecution TaskContext before enabling a dependent Action."
+            )
+        normalized = str(action_id or "").strip()
+        registry = getattr(getattr(target, "action", None), "action_registry", None)
+        if not normalized or registry is None or not registry.has(normalized):
+            raise ValueError("A dependent Action must already be registered.")
+        if normalized not in target.local_action_ids:
+            target.local_action_ids.append(normalized)
+        target._task_context_dependent_action_ids.add(normalized)
+        target._sync_action_scope(
+            source="AgentExecution.task_context_dependent_action"
+        )
+        target._selected_route = None
+        target.effective_options = target._build_effective_options()
+        return target
 
     @staticmethod
     def _skill_selector_id(selector: Any) -> str:

@@ -524,7 +524,6 @@ class SkillsExecutor:
                 "revision_ref": skill.revision_ref,
                 "guidance": None,
                 "selected_resources": [],
-                "action_candidates": [],
             }
             for skill in installed
         }
@@ -548,16 +547,13 @@ class SkillsExecutor:
                 block.role == "capability"
                 and block.metadata.get("resource_kind") == "script"
             ):
-                target["action_candidates"].append(
+                target["selected_resources"].append(
                     {
-                        "candidate_key": block.block_key,
-                        "skill_binding_id": block.metadata.get(
-                            "skill_binding_id"
-                        ),
-                        "resource_path": path,
+                        "path": path,
+                        "kind": "script",
+                        "content": block.content,
+                        "completeness": block.completeness,
                         "source_ref": block.source_ref,
-                        "sha256": block.metadata.get("sha256"),
-                        "status": "binding_required",
                     }
                 )
                 continue
@@ -572,19 +568,20 @@ class SkillsExecutor:
             )
         diagnostics = [diagnostic.to_dict() for diagnostic in package.diagnostics]
         if actionize_scripts:
+            script_count = sum(
+                1
+                for item in projected.values()
+                for resource in item["selected_resources"]
+                if resource.get("kind") == "script"
+            )
             diagnostics.append(
                 {
-                    "code": "skills.compat.action_binding_required",
+                    "code": "skills.compat.actionize_scripts_ignored",
                     "message": (
-                        "Skill script candidates are inert descriptors. Bind an exact "
-                        "candidate through AgentExecution and SkillActionBinder before use."
+                        "Skill scripts remain capability descriptors; this facade cannot "
+                        "execute them."
                     ),
-                    "details": {
-                        "candidate_count": sum(
-                            len(item["action_candidates"])
-                            for item in projected.values()
-                        )
-                    },
+                    "details": {"script_count": script_count},
                 }
             )
         if include_public_lookup:

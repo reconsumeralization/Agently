@@ -101,11 +101,11 @@
         "installed_truth_owner": "SkillLibrary immutable content-addressed revisions",
         "selection_and_binding_owner": "AgentExecution structured semantic selection with host-issued keys and fail-closed validation",
         "composition_contract": "Skills use the same agent.use_*(..., always=True) default plus execution.use_*(...) one-run composition grammar as Actions; no second public Skill collection manager is introduced",
-        "execution_scope_contract": "Agent defaults plus current AgentExecution declarations resolve to one frozen exact-revision scope; empty declarations do not expose the global SkillLibrary; unchanged preparation is idempotent",
+        "execution_scope_contract": "Agent defaults plus current AgentExecution declarations resolve to one frozen exact-revision scope; each later user request creates a fresh execution and re-evaluates the current task while Session carries only conversation/memory; empty declarations do not expose the global SkillLibrary; unchanged preparation is idempotent",
         "disclosure_owner": "TaskContext plus SkillContextSource plus consumer-bound ContextReader",
         "root_disclosure_contract": "A complete SKILL.md root suppresses duplicate selection and delivery of its indexed child sections; child sections remain eligible only for lossy-parent or later bounded reads",
         "compatibility_facade": "Agently.skills_executor supports local configure/install/list/inspect/read/context-pack/TaskDAG helpers only",
-        "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, capability inference, or capability mounting; actionize_scripts compatibility projection returns inert binding_required candidates only; trusted exact-revision scripts require explicit host authorization and bind as ordinary Workspace-backed code_execution Actions",
+        "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, per-script Action discovery, capability inference, or capability mounting; actionize_scripts is a compatibility-only ignored projection flag and scripts remain resource descriptors; after explicit host authorization, enable_skill_script_exec reuses one stable ordinary Workspace-backed code_execution Action definition per Agent/language, binds permission only in the current execution, preserves the prepared Skill selection, and resolves a unique script_path against that execution's frozen exact-revision Skill bindings; the released explicit binder remains compatible for exact-path binding",
         "revision_binding_event": "skills.revisions.bound records exact revision availability without claiming activation",
         "context_consumption_event": "skills.context.bound records concrete ModelRequest response-bound context consumption; availability alone is not consumption or Action evidence",
         "remote_source_policy": "Registered SkillSourceProvider plugins materialize authorized local or Git sources to immutable local snapshots; SkillLibrary installs exact snapshots and records redacted provenance; remote compatibility installs default to untrusted and selected subpaths reject symlink escape"
@@ -312,6 +312,8 @@
         "AgentExecution.use_skills_packs",
         "AgentExecution.async_prepare_task_context",
         "AgentExecution.async_read_task_context",
+        "Agent.enable_skill_script_exec",
+        "Agent.bind_skill_script_action",
         "Agent.run_skills_task",
         "Agently.skills_executor"
       ],

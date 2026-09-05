@@ -107,34 +107,32 @@ pack = await Agently.skills_executor.async_build_context_pack(
 ```
 
 This method creates a temporary TaskContext and uses the same ContextReader
-contracts as ordinary execution. `actionize_scripts=True` returns inert
-`binding_required` Action candidates and a diagnostic; it does not mount or
-authorize them. Host code may explicitly bind a trusted exact-revision script
-as an ordinary Workspace-backed
-`code_execution` Action, with ActionRuntime and ExecutionResource retaining
-execution ownership.
+contracts as ordinary execution. The compatibility-only
+`actionize_scripts=True` flag leaves selected scripts as ordinary resource
+descriptors and emits `skills.compat.actionize_scripts_ignored`; it does not
+discover, generate, mount, or authorize Actions.
+
+For normal AgentExecution work, prepare the Skill scope and explicitly enable
+one restricted script-exec Action for the required language. The Action accepts
+only a relative `script_path` and bounded `args`; the host resolves that path
+against the execution's frozen exact-revision bindings and records the resolved
+revision, path, and digest in Action evidence. Enabling the Action does not
+invalidate the prepared TaskContext or repeat Skill applicability selection.
 
 ```python
 from agently.types.data import SkillScriptAuthorization
 
 await execution.async_prepare_task_context()
-binding = next(
-    item
-    for item in execution.skill_bindings
-    if item.revision_ref == contract["revision_ref"]
-)
-bound = agent.bind_skill_script_action(
+exec_action_id = agent.enable_skill_script_exec(
     execution,
-    binding_id=binding.binding_id,
-    resource_path="scripts/check.py",
     authorization=SkillScriptAuthorization(
         auto_allow=True,
         expected_outputs=("output/report.json",),
     ),
 )
 action_result = await agent.action.async_execute_action(
-    bound.action_id,
-    {"args": []},
+    exec_action_id,
+    {"script_path": "scripts/check.py", "args": []},
 )
 artifact = next(
     item
@@ -144,13 +142,51 @@ artifact = next(
 readback = await execution.task_workspace.read_file(artifact["path"])
 ```
 
-The binder registers its own narrow provider requirement from the ordered
-`code_execution.providers` setting. Do not call `enable_code_runtime(...)`
-only for this script; that would expose an additional general-purpose code
-Action. Trust is package provenance policy, not script permission. Only the
-successful Action record plus TaskWorkspace readback proves the side effect and
-collected bytes. Published artifact paths are TaskWorkspace-relative private
-paths under `.agently/files/.../code_execution/.../output/`.
+`enable_skill_script_exec(...)` reuses one stable ordinary Action definition per
+Agent/language, then binds authorization only in the current execution's Action
+scope and execution context. It does not create one Action per script or user
+request. If the same relative path exists in more than one
+bound Skill, narrow the execution's Skill declarations or use the released
+`bind_skill_script_action(...)` compatibility API for an explicit exact-path
+binding. Do not call `enable_code_runtime(...)` only for a Skill script; that
+would expose an additional general-purpose code Action. Trust is package
+provenance policy, not script permission. Only the successful Action record
+plus TaskWorkspace readback proves the side effect and collected bytes.
+Published artifact paths are TaskWorkspace-relative private paths under
+`.agently/files/.../code_execution/.../output/`.
+
+### A later user message needs the Skill
+
+Use a fresh AgentExecution for every user request. Session carries conversation
+and memory only; it does not carry the previous execution's Skill bindings,
+Action scope, or script authorization. Declare potentially relevant Skills as
+ordinary Agent defaults so each fresh execution can evaluate them against its
+current message:
+
+```python
+agent.use_skills([contract["skill_id"]], always=True)
+
+# The first message does not need a script. Its selector may choose no Skill,
+# and the host enables no script Action.
+first = agent.create_execution().input(first_user_message)
+first_result = await first.async_get_data()
+
+# A later message requests script-backed work, so it gets a fresh execution.
+later = agent.create_execution().input(later_user_message)
+await later.async_prepare_task_context()
+if later.skill_bindings:  # The application still applies its allowlist/policy.
+    agent.enable_skill_script_exec(
+        later,
+        authorization=SkillScriptAuthorization(auto_allow=True),
+    )
+later_result = await later.async_get_data()
+```
+
+A started execution and a dispatched ModelRequest are snapshots; neither can
+receive a hot-added Skill or Action. If prompt or Skill declarations change
+after authorization but before start, Agently revokes the script authorization
+and Action visibility that depended on the old TaskContext. Prepare and
+authorize again.
 
 ## Released execution convenience adapter
 
