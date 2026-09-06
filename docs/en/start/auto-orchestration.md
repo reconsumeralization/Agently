@@ -326,7 +326,8 @@ creation raises `RuntimeStageStallError`; after creation, the task retains its
 Complete/restored contracts skip this node. Ordinary requests and review do
 not gain a preflight call; plan/long-content keep their own planning stages.
 See [missing-goal preparation](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
-for a real-model example and its recorded timeout limitation.
+for a recorded 27B success and unsuccessful 9B outcomes; one run is not a
+stability guarantee.
 
 When task-specific options are assembled separately, attach them through the
 task strategy:

@@ -58,13 +58,15 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-# Recorded local qwen3.5:9b run (2026-09-05):
+# Expected key output from one local qwen3.8:27b-mlx run (2026-09-06):
 # plugin=long_task
-# status=timed_out
+# status=success
 # goal_declared=False
 # goal_preparation_source=model
 # effective_goal_count=2
-# effective_criterion_count=3
-# The preparation node completed, but subsequent production exhausted the
-# 210-second limit. No complete final deliverable was accepted. Goal wording
-# and counts remain model-owned; this is not end-to-end release acceptance.
+# effective_criterion_count=4
+# result.recommendation=local
+# Four model requests completed in about 168 seconds, within the original
+# 210-second execution budget. Goal wording/counts remain model-owned.
+# Earlier qwen3.5:9b runs timed out or were blocked without an accepted final
+# deliverable. This successful 27B sample is not a stability or release claim.

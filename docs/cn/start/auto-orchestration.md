@@ -286,7 +286,7 @@ result = execution.start()
 结果封装，并受 execution 剩余时间约束。
 完整或已恢复的合同跳过此节点；普通请求与 review 不增加前置调用，plan/long_content
 继续使用各自的规划节点。参见 [缺失目标补全示例](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
-及其真实运行中记录的后续长任务超时限制。
+及其记录的 27B 成功样例与 9B 未通过结果；单次运行不代表稳定性保证。
 
 task-specific options 单独组装时，应通过 task strategy 传入：
 
