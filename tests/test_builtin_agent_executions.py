@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
@@ -540,6 +542,135 @@ async def test_goal_preparation_is_counted_against_outer_budget(tmp_path):
         await execution.async_get_data()
     assert ScriptedExecutionRequester.model_dispatches == 0
     assert execution.task_record is None
+
+
+@pytest.mark.asyncio
+async def test_expired_goal_preparation_dispatches_nothing(tmp_path):
+    from agently.core.application.AgentExecution import RuntimeStageStallError
+
+    agent = create_execution_agent(tmp_path, "expired-preparation", [])
+    execution = agent.create_execution("long_task", limits={"max_seconds": 0}).input("Write a report.").strategy("flat")
+
+    with pytest.raises(RuntimeStageStallError) as caught:
+        await execution.async_get_data()
+
+    assert caught.value.status == "timed_out"
+    assert execution.status == "timed_out"
+    assert execution.task_record is None
+    assert ScriptedExecutionRequester.model_dispatches == 0
+    assert ScriptedExecutionRequester.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+async def test_goal_preparation_stops_and_joins_before_terminal(tmp_path, monkeypatch, stop):
+    from agently.core.application.AgentExecution import RuntimeStageStallError
+
+    started = asyncio.Event()
+    settled = asyncio.Event()
+
+    async def pending_model(self, request_data):
+        ScriptedExecutionRequester.model_dispatches += 1
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            settled.set()
+        if False:
+            yield "message", ""
+
+    monkeypatch.setattr(ScriptedExecutionRequester, "request_model", pending_model)
+    agent = create_execution_agent(tmp_path, f"preparation-{stop}", [{"status": "ready"}])
+    execution = agent.create_execution(
+        "long_task", limits={"max_seconds": 0.15 if stop == "deadline" else None},
+    ).input("Write a report.").strategy("flat")
+    policies = []
+    execution.validate(lambda result, context: policies.append(result) or True)
+    work = asyncio.create_task(execution.async_get_data())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    if stop == "cancel":
+        work.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+    else:
+        with pytest.raises(RuntimeStageStallError) as caught:
+            await asyncio.wait_for(work, timeout=1)
+        assert caught.value.status == "timed_out"
+    assert settled.is_set()
+    assert execution.task_record is None
+    assert policies == []
+    assert ScriptedExecutionRequester.model_dispatches == 1
+
+
+@pytest.mark.asyncio
+async def test_preparation_and_task_share_absolute_execution_deadline(tmp_path, monkeypatch):
+    from agently.builtins.plugins.AgentExecution.long_task import AgentTask
+
+    original_request = ScriptedExecutionRequester.request_model
+
+    async def delayed_preparation(self, request_data):
+        await asyncio.sleep(0.08)
+        async for item in original_request(self, request_data):
+            yield item
+
+    monkeypatch.setattr(ScriptedExecutionRequester, "request_model", delayed_preparation)
+    agent = create_execution_agent(tmp_path, "shared-task-deadline", [{
+        "status": "ready", "goals": ["Write the requested report"],
+        "success_criteria": ["Return the requested report"], "missing_information": [],
+    }])
+    execution = cast(AgentExecution, agent.create_execution(
+        "long_task", limits={"max_seconds": 0.25, "max_no_progress_seconds": 5},
+    ).input("Write a report.").strategy("flat"))
+    observed = []
+
+    async def pending_plan(iteration_index, context_pack):
+        task = cast(AgentTask, execution.task_record)
+        elapsed = time.monotonic() - execution.execution_context.started_at
+        observed.append((elapsed, task._task_deadline_remaining()))
+        await asyncio.Event().wait()
+
+    execution._agent_task_step_overrides = {"_request_plan": pending_plan}
+    result = await asyncio.wait_for(execution.async_get_full_data(), timeout=2)
+
+    assert result["status"] == "timed_out"
+    assert result["accepted"] is False
+    assert "plan stage" in result["reason"]
+    assert execution.status == "timed_out"
+    assert len(observed) == 1
+    elapsed, remaining = observed[0]
+    assert elapsed >= 0.08
+    assert remaining is not None
+    assert elapsed + remaining == pytest.approx(0.25, abs=0.02)
+    task = cast(AgentTask, execution.task_record)
+    assert task._execution_deadline_monotonic == execution.execution_context.started_at + 0.25
+    assert task.limits["max_seconds"] == execution.limits["max_seconds"] == 0.25
+    assert "_execution_deadline_monotonic" not in task.options
+    assert ScriptedExecutionRequester.model_dispatches == 1
+
+
+@pytest.mark.parametrize("task_seconds,parent_seconds,expected", [
+    (None, None, None), (10, None, 10), (None, 2, 2),
+    (10, 2, 2), (2, 10, 2), (2, -1, -1),
+])
+def test_task_deadline_respects_both_owners_without_mutating_limits(
+    tmp_path, task_seconds, parent_seconds, expected,
+):
+    from agently.builtins.plugins.AgentExecution.long_task import AgentTask
+
+    agent = create_execution_agent(tmp_path, "task-clock-boundary", [])
+    task = AgentTask(agent, goal="Clock fixture", success_criteria=["Clock invariant"],
+                     limits={"max_seconds": task_seconds})
+    task.started_at = time.time()
+    task._execution_deadline_monotonic = (
+        time.monotonic() + parent_seconds if parent_seconds is not None else None
+    )
+    remaining = task._task_deadline_remaining()
+    if expected is None:
+        assert remaining is None
+    else:
+        assert remaining == pytest.approx(expected, abs=0.02)
+    assert task.limits == {"max_seconds": task_seconds}
 
 
 @pytest.mark.asyncio

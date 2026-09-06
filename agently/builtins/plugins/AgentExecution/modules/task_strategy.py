@@ -348,6 +348,12 @@ async def _run_agent_task_route_impl(
             options=cast(Any, agent_task_options),
             task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
         )
+    # Keep the original execution deadline across prerequisite preparation and
+    # task construction. This process-local bound is not a recovery option.
+    max_seconds = execution.limits.get("max_seconds")
+    task._execution_deadline_monotonic = (
+        execution.execution_context.started_at + float(max_seconds) if max_seconds is not None else None
+    )
     # This is the exact host-owned transfer seam: a routed task keeps its
     # agent_task Action artifact scope live until the parent AgentExecution has
     # completed terminal selection/promotion and releases it. Standalone tasks

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .model_stage import run_model_stage
+from .limits import await_route_with_limits
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -76,7 +77,7 @@ async def prepare_missing_goal(execution: AgentExecution) -> dict[str, object] |
         },
         "missing_information": [(str, "Required fact that cannot be inferred; non-empty only when status is missing_information.")],
     }
-    stage = await run_model_stage(
+    preparation = run_model_stage(
         execution, producer="long_task", stage="goal_preparation",
         stage_input={"missing_fields": missing},
         stage_info={"final_output_contract": execution.prompt_snapshot.get("output")},
@@ -90,6 +91,8 @@ async def prepare_missing_goal(execution: AgentExecution) -> dict[str, object] |
         ],
         output=schema, inherit_extension_handlers=False,
     )
+    # The nested task does not exist yet, so its clock cannot bound this work.
+    stage = await await_route_with_limits(execution, preparation, enforce_execution_deadline=True)
     value = stage.value
     if not isinstance(value, dict) or value.get("status") not in {"ready", "missing_information"}:
         raise ValueError("Goal preparation must return ready or missing_information.")

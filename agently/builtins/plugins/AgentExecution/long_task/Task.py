@@ -234,6 +234,7 @@ class AgentTask(
         self.reflections: list[dict[str, Any]] = []
         self.created_at = time.time()
         self.started_at: float | None = None
+        self._execution_deadline_monotonic: float | None = None
         self.completed_at: float | None = None
         self._completed = False
         self._error: BaseException | None = None

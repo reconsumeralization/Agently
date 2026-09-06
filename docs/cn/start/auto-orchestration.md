@@ -281,6 +281,9 @@ result = execution.start()
 已选定的长任务生产方若缺少 goal 或 success criteria，会在构造任务状态前调用模型，
 仅从原始请求推导缺失字段。显式声明与原始 Prompt 保持不变，metadata 记录模型来源；
 推导标准不能授权新工作或虚构业务门槛。必要事实不足时返回 blocked。
+补全阶段消耗同一 execution 的模型请求与时间预算，构造任务不会重新计时。
+任务创建前超时会抛出 `RuntimeStageStallError`；创建后沿用任务的 `timed_out`
+结果封装，并受 execution 剩余时间约束。
 完整或已恢复的合同跳过此节点；普通请求与 review 不增加前置调用，plan/long_content
 继续使用各自的规划节点。参见 [缺失目标补全示例](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
 及其真实运行中记录的后续长任务超时限制。

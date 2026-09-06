@@ -705,9 +705,14 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
 
     def _task_deadline_remaining(self) -> float | None:
         max_seconds = self._task_max_seconds()
-        if max_seconds is None or self.started_at is None:
-            return None
-        return max_seconds - (time.time() - self.started_at)
+        remaining = (
+            max_seconds - (time.time() - self.started_at)
+            if max_seconds is not None and self.started_at is not None else None
+        )
+        if self._execution_deadline_monotonic is not None:
+            execution_remaining = self._execution_deadline_monotonic - time.monotonic()
+            remaining = min(remaining, execution_remaining) if remaining is not None else execution_remaining
+        return remaining
 
     async def _await_task_deadline(self, awaitable: Awaitable[Any], *, stage: str) -> Any:
         remaining = self._task_deadline_remaining()

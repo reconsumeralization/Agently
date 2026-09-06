@@ -29,7 +29,7 @@ per-execution Skill scope, and inert `binding_required` script candidates. It
 does not preserve the removed SkillsExecutor planning or prompt-injection
 engine. Model-owned business behavior is checked by the model-backed examples
 named in the manifest, including local Ollama/Qwen coverage for AgentExecution
-delivery/review and the beta `plan` / `long_content` Patterns.
+delivery/review and the `plan` / `long_content` execution plugins.
 
 ## 4.1.4.8 Coverage
 

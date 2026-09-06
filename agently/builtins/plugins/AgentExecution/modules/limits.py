@@ -24,7 +24,9 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
-async def await_route_with_limits(owner: "AgentExecution", run_coro: Any):
+async def await_route_with_limits(
+    owner: "AgentExecution", run_coro: Any, *, enforce_execution_deadline: bool = False,
+):
     max_seconds = owner.limits.get("max_seconds")
     max_no_progress_seconds = owner.limits.get("max_no_progress_seconds")
     if max_seconds is None and max_no_progress_seconds is None:
@@ -39,10 +41,21 @@ async def await_route_with_limits(owner: "AgentExecution", run_coro: Any):
             task_strategy_owns_wall_clock = False
     hard_deadline = (
         owner.execution_context.started_at + float(max_seconds)
-        if max_seconds is not None and not task_strategy_owns_wall_clock
+        if max_seconds is not None and (enforce_execution_deadline or not task_strategy_owns_wall_clock)
         else None
     )
     idle_limit = float(max_no_progress_seconds) if max_no_progress_seconds is not None else None
+    if hard_deadline is not None and time.monotonic() >= hard_deadline:
+        if asyncio.iscoroutine(run_coro):
+            run_coro.close()
+        raise build_execution_stall_error(
+            owner,
+            status="timed_out",
+            message=f"AgentExecution hard deadline exceeded: max_seconds={max_seconds}.",
+            elapsed_seconds=time.monotonic() - owner.execution_context.started_at,
+            idle_seconds=time.monotonic() - owner.execution_context.last_progress_at,
+            timeout_seconds=float(max_seconds) if max_seconds is not None else None,
+        )
     task = asyncio.create_task(run_coro)
     try:
         while True:
@@ -91,8 +104,7 @@ async def await_route_with_limits(owner: "AgentExecution", run_coro: Any):
                             timeout_seconds=idle_limit,
                         ) from error
     except BaseException:
-        if not task.done():
-            task.cancel()
+        await cancel_limited_task(task)
         raise
 
 

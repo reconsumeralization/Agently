@@ -319,6 +319,10 @@ asks the model to interpret only the missing fields before constructing its
 task state. Explicit declarations and the original Prompt stay unchanged;
 metadata records model provenance. Derived criteria cannot authorize new work
 or invent business thresholds. Insufficient facts produce a blocked outcome.
+Preparation consumes the same execution's model-request and time budgets;
+constructing the task does not restart the deadline. A timeout before task
+creation raises `RuntimeStageStallError`; after creation, the task retains its
+`timed_out` result envelope and uses the remaining execution time.
 Complete/restored contracts skip this node. Ordinary requests and review do
 not gain a preflight call; plan/long-content keep their own planning stages.
 See [missing-goal preparation](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
