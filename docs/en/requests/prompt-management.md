@@ -22,6 +22,11 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 
 ## Collaborative prompt design and review
 
+For multi-round work, begin each substantive response with a status-left/item-right
+table and a timestamped, versioned change-log table. Distinguish confirmed,
+applied, verified and abandoned changes; reuse existing records. See
+[the multi-round guidance and example](prompt-collaboration.md#multi-round-progress-and-changes).
+
 Apply this method by default when it is known that the user is developing with
 Agently and the current work is solution design, workflow/block optimization,
 or Prompt review. Do not wait for the user to request a table. Ordinary
