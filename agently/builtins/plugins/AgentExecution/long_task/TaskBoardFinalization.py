@@ -16,7 +16,31 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    build_task_board_acceptance_index,
+    build_task_board_evidence_view,
+    build_task_board_focus_payload,
+    build_task_board_incremental_verification_plan,
+    build_task_board_scoped_evidence_view,
+    cast,
+    collect_evidence_use,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    source_refs_from_ledger,
+    task_board_blocking_state_facts,
+    task_board_explicit_state_facts,
+    TaskBoard,
+    TaskBoardRevision,
+    TaskContextView,
+    validate_evidence_use,
+    value_with_normalized_evidence_use,
+    _compact_agent_task_error_message,
+    _VERIFIER_PROMPT_VALUE_CHARS,
+    _WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+)
 
 
 TASK_BOARD_COMPLETION_NOTES_SCHEMA_VERSION = "task_board_completion_notes/v1"

@@ -19,6 +19,7 @@ from agently_stage import default_stage_call_bridge
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
 from agently.core.context import TaskContext
@@ -26,7 +27,25 @@ from agently.core.storage import RecordStore, RecordStoreContextSource
 
 from .LifecycleState import AgentTaskLifecycleState
 from .LifecycleFlow import AgentTaskLifecycleFlowMixin
-from .TaskShared import *
+from .TaskShared import (
+    AgentExecutionStreamData,
+    AgentTaskEffectiveExecutionStrategy,
+    AgentTaskExecutionStrategy,
+    AgentTaskStatus,
+    Any,
+    asyncio,
+    BaseAgent,
+    cast,
+    Mapping,
+    RecordRef,
+    Sequence,
+    TaskReferenceCatalog,
+    TerminalConvergenceState,
+    time,
+    uuid,
+    _AGENT_TASK_DEFAULT_MAX_ITERATIONS,
+    _normalize_agent_task_max_iterations,
+)
 from .StrategyRouter import AgentTaskStrategyRouterMixin
 from .TaskBoardStrategy import AgentTaskTaskBoardStrategyMixin
 from .ArtifactDelivery import AgentTaskArtifactMixin

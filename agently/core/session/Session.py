@@ -394,7 +394,7 @@ class Session:
     def memo(self):
         try:
             return self._memo.copy()  # type: ignore
-        except:
+        except Exception:
             return self._memo
 
     @staticmethod

@@ -14,7 +14,14 @@
 
 from __future__ import annotations
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    _TASKBOARD_SOURCE_REFS_MAX,
+)
 
 
 _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION = (

@@ -18,7 +18,15 @@ import hashlib
 import uuid
 
 from .LifecycleState import TerminalCarrier, TerminalCarrierInventory
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    TaskContextView,
+    _compact_agent_task_error_message,
+)
 
 
 class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):

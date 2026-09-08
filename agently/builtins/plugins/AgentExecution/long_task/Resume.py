@@ -32,7 +32,23 @@ from agently.types.data import (
 )
 
 from .LifecycleState import AgentTaskLifecycleState
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskEffectiveExecutionStrategy,
+    AgentTaskMixinBase,
+    Any,
+    BaseAgent,
+    cast,
+    DataFormatter,
+    Mapping,
+    os,
+    Sequence,
+    TaskBoardRevision,
+    TaskReferenceCatalog,
+    TerminalConvergenceState,
+    _AgentTaskT,
+    _compact_agent_task_error_message,
+    _normalize_agent_task_max_iterations,
+)
 from .TaskEvidenceContextSource import TaskEvidenceContextSource
 
 

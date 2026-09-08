@@ -411,7 +411,6 @@ def _locate_acceptance_point(
     point: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     anchor = str(point.get("expected_anchor") or point.get("anchor_text") or "").strip()
-    criterion = str(point.get("criterion") or point.get("claim") or point.get("topic") or "").strip()
     candidates = _dedupe_strings([anchor])
     for candidate in candidates:
         if not candidate:

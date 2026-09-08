@@ -14,7 +14,17 @@
 
 from __future__ import annotations
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    build_task_board_evidence_view,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    TaskBoardCardResult,
+    TaskBoardRevision,
+    _TASKBOARD_PROMPT_RESULT_CHARS,
+)
 
 
 class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):

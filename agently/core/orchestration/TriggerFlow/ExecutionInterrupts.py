@@ -1172,10 +1172,11 @@ class TriggerFlowExecutionInterrupts:
                     )
                 result = None
         except BaseException as exc:
+            dispatch_error = str(exc)
             if resume_request_id is not None and request_record is not None:
                 request_record["status"] = "dispatch_failed"
                 request_record["dispatch_failed_at"] = time.time()
-                request_record["error"] = str(exc)
+                request_record["error"] = dispatch_error
                 resume_requests[resume_request_id] = request_record
                 interrupt["status"] = "waiting"
                 interrupt["response"] = None
@@ -1188,7 +1189,7 @@ class TriggerFlowExecutionInterrupts:
                     "dispatch_failed",
                     resume_request_id=resume_request_id,
                     actor=actor,
-                    error=str(exc),
+                    error=dispatch_error,
                 )
                 current_interrupt = self.get_interrupt(interrupt_id)
                 same_generation = (
@@ -1223,7 +1224,7 @@ class TriggerFlowExecutionInterrupts:
                             "dispatch_failed",
                             resume_request_id=resume_request_id,
                             actor=actor,
-                            error=str(exc),
+                            error=dispatch_error,
                         )
 
                 self._atomic_mutate_interrupt(

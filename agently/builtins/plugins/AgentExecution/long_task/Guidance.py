@@ -27,7 +27,18 @@ from agently.types.data import (
     ContextReadIntent,
 )
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    asyncio,
+    cast,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    TaskContextView,
+    time,
+    uuid,
+)
 
 _GUIDANCE_PREVIEW_CHARS = 800
 

@@ -33,8 +33,6 @@ SAFE_BUILTINS = {
     "str": str,
     "int": int,
     "float": float,
-    "list": list,
-    "dict": dict,
     "bool": bool,
 }
 

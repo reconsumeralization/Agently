@@ -16,7 +16,15 @@ from __future__ import annotations
 
 import uuid
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    DataFormatter,
+    Mapping,
+    TriggerFlow,
+    TriggerFlowRuntimeData,
+    _AgentTaskDeadlineExceeded,
+)
 
 
 _LIFECYCLE_STAGE_NAMES = (

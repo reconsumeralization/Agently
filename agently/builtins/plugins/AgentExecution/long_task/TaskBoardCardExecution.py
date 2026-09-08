@@ -16,8 +16,40 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from typing import Literal
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentExecutionStreamData,
+    AgentTaskMixinBase,
+    Any,
+    asyncio,
+    Awaitable,
+    build_task_board_acceptance_index,
+    build_task_board_evidence_view,
+    build_task_board_focus_payload,
+    build_task_board_incremental_verification_plan,
+    build_task_board_scoped_evidence_view,
+    cast,
+    collect_evidence_use,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    suppress,
+    task_board_explicit_state_facts,
+    task_board_preflight_diagnostics,
+    TaskBoard,
+    TaskBoardCardResult,
+    TaskContextView,
+    time,
+    validate_evidence_use,
+    value_with_normalized_evidence_use,
+    WorkUnitIntent,
+    _compact_agent_task_error_message,
+    _TASKBOARD_CONTROL_CARD_SHAPES,
+    _TASKBOARD_READBACK_CARD_SHAPES,
+    _TASKBOARD_RECOVERABLE_CARD_STATUSES,
+    _TASKBOARD_SOURCE_REFS_MAX,
+)
 from .TaskBoardSourceRefs import _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION
 
 
