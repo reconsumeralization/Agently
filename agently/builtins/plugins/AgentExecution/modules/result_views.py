@@ -140,6 +140,9 @@ async def async_get_text(
 
 
 async def async_get_meta(owner: "AgentExecution") -> dict[str, Any]:
+    if owner._retained_meta is not None:
+        from copy import deepcopy
+        return deepcopy(owner._retained_meta)
     if not owner._completed:
         await owner.async_start()
     owner._refresh_diagnostics()
@@ -172,6 +175,9 @@ async def get_async_generator(
     owner.stream.queues.append(queue)
     start_task = asyncio.create_task(owner.async_start())
     start_task.add_done_callback(_retrieve_generator_start_exception)
+    # A safe pause settles this read without closing the execution's stream.
+    # Wake this reader even when production raised before a terminal sentinel.
+    start_task.add_done_callback(lambda _: queue.put_nowait(None))
     try:
         while True:
             item = await queue.get()

@@ -20,6 +20,7 @@ from typing import Any, Literal, TYPE_CHECKING
 from agently.core.application.AgentExecution import (
     AgentExecutionLimitExceeded,
     AgentReviewError,
+    AgentExecutionPaused,
     RuntimeStageStallError,
 )
 from agently.core.runtime.RuntimeContext import bind_runtime_context
@@ -28,6 +29,7 @@ from agently.utils import DataFormatter
 from .artifact import run_declared_artifacts
 from .long_output import LongOutputError
 from .production import ProductionOptions
+from .lifecycle import pause_at, resume_route, release_owned_resources
 from .result_views import _business_data_from_full_data
 from .output_validation import validate_final_output
 from .routes import run_model_request_route
@@ -91,7 +93,8 @@ async def async_execute_route(
             raise_ensure_failure=raise_ensure_failure,
         )
         try:
-            produced_route, result = await owner._async_produce(options)
+            produced_route, result = (await owner._async_rework_produce(options)
+                                      if owner.revision else await owner._async_produce(options))
             if produced_route != route:
                 raise RuntimeError(
                     f"Execution producer returned route {produced_route!r}; selected route was {route!r}."
@@ -103,14 +106,48 @@ async def async_execute_route(
                 else:
                     owner.request.extension_handlers.delete("validate_handlers")
         owner.result = result
-        final_value = _business_data_from_full_data(owner, result) if route == "agent_task" else result
-        if owner.status in {"running", "success", "completed"} and not request_owned_validation:
-            await validate_final_output(owner, final_value, handlers)
-        if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
-            await run_declared_artifacts(owner, final_value)
-        if owner.status in {"running", "success", "completed"} and owner.review_declarations:
-            await run_declared_reviews(owner, final_value)
-        return route, result
+        if owner._cancel_requested:
+            raise asyncio.CancelledError("Execution cancelled before final policies.")
+
+        async def finish_candidate() -> tuple[str, object]:
+            return await finish_production(owner, route, result, handlers, request_owned_validation)
+
+        if owner.status in {"running", "success", "completed"}:
+            owner._candidate_validation_handlers = handlers
+            owner._candidate_request_validated = request_owned_validation
+            await pause_at(owner, "candidate_ready", finish_candidate)
+        return await finish_candidate()
+
+
+async def finish_production(
+    owner: "AgentExecution", route: str, result: object,
+    handlers: "list[OutputValidateHandler]", request_owned_validation: bool,
+) -> tuple[str, object]:
+    final_value = _business_data_from_full_data(owner, result) if route == "agent_task" else result
+    if owner.status in {"running", "success", "completed"} and not request_owned_validation:
+        await validate_final_output(owner, final_value, handlers)
+    if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
+        await run_declared_artifacts(owner, final_value)
+    if owner.status in {"running", "success", "completed"} and owner.review_declarations:
+        await run_declared_reviews(owner, final_value)
+    return route, result
+
+
+async def prepare_production(owner: "AgentExecution", options: ProductionOptions) -> tuple[str, object]:
+    await owner.async_prepare_task_context()
+    if owner._cancel_requested:
+        raise asyncio.CancelledError("Execution cancelled during context preparation.")
+    await owner._async_emit_agent_execution_started_once()
+    owner.execution_context.raise_if_nesting_exceeded()
+    owner.execution_context.record_progress(
+        stage="agent_execution", status="started", event_type="agent_execution.started",
+        meta={"execution_id": owner.id},
+    )
+    return await owner._async_execute_route(
+        type=options.type, ensure_keys=options.ensure_keys, ensure_all_keys=options.ensure_all_keys,
+        validate_handler=options.validate_handler, key_style=options.key_style,
+        max_retries=options.max_retries, raise_ensure_failure=options.raise_ensure_failure,
+    )
 
 
 async def _blocked_route(owner: "AgentExecution", route_meta: dict[str, Any]) -> object:
@@ -187,29 +224,30 @@ async def start_execution(
             return owner.result
         # Capture the final draft before ModelRequest.get_result() consumes
         # its pending Prompt. Later review/meta readers use this retained view.
-        owner._refresh_prompt_snapshot()
+        if not owner._resuming:
+            owner._refresh_prompt_snapshot()
+            owner._production_options = ProductionOptions(
+                type=type, ensure_keys=ensure_keys, ensure_all_keys=ensure_all_keys,
+                validate_handler=validate_handler, key_style=key_style, max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+            )
         owner._started = True
         owner.status = "running"
         try:
-            await owner.async_prepare_task_context()
-            await owner._async_emit_agent_execution_started_once()
-            owner.execution_context.raise_if_nesting_exceeded()
-            owner.execution_context.record_progress(
-                stage="agent_execution",
-                status="started",
-                event_type="agent_execution.started",
-                meta={"execution_id": owner.id},
-            )
-            run_coro = owner._async_execute_route(
-                type=type,
-                ensure_keys=ensure_keys,
-                ensure_all_keys=ensure_all_keys,
-                validate_handler=validate_handler,
-                key_style=key_style,
-                max_retries=max_retries,
-                raise_ensure_failure=raise_ensure_failure,
-            )
+            async def produce() -> tuple[str, object]:
+                assert owner._production_options is not None
+                return await prepare_production(owner, owner._production_options)
+
+            if owner._resuming:
+                owner._resuming = False
+                owner.execution_context.record_progress(stage="agent_execution", status="resumed")
+                run_coro = resume_route(owner)
+            else:
+                await pause_at(owner, "before_production", produce)
+                run_coro = produce()
             route, owner.result = await owner._await_route_with_limits(run_coro)
+            if owner._cancel_requested:
+                raise asyncio.CancelledError("Execution cancelled before delivery.")
             if owner.status == "running":
                 owner.status = "success"
             terminal_projection = await _prepare_terminal_projection(owner)
@@ -227,6 +265,10 @@ async def start_execution(
                 terminal_projection=terminal_projection,
             )
             return owner.result
+        except AgentExecutionPaused:
+            # TriggerFlow has retained an explicit continuation. This is not a
+            # terminal error, and readers must never turn it into auto-resume.
+            raise
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
             owner._error = error
@@ -306,8 +348,15 @@ async def start_execution(
             raise
         finally:
             owner._refresh_diagnostics()
-            owner._completed = True
-            await owner.close_streams()
+            if owner.status != "paused":
+                owner._pause_requested = False
+                await mark_pending_guidance_not_applied(owner, reason="execution_terminal_without_consumer")
+                owner._completed = True
+                if owner._pause_flow is not None and not owner._pause_flow.is_closed():
+                    await owner._pause_flow.async_close(
+                        reason="agent_execution_settled", pending_interrupts="cancel",
+                    )
+                await owner.close_streams()
 
 
 async def _prepare_terminal_projection(
@@ -338,6 +387,7 @@ async def _finalize_terminal_execution(
 ) -> None:
     owner._terminal_status = terminal_status
     try:
+        await release_owned_resources(owner)
         event_result, retained_refs = (
             terminal_projection
             if terminal_projection is not None

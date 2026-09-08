@@ -17,11 +17,13 @@ from __future__ import annotations
 from agently_stage import default_stage_call_bridge
 
 import asyncio
+import concurrent.futures
 import inspect
 import os
+import threading
 import uuid
 from pathlib import Path
-from collections.abc import AsyncGenerator, Generator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING, cast, overload
 
 import json5
@@ -79,6 +81,12 @@ from .limits import (
     build_execution_stall_error,
     cancel_limited_task,
 )
+from .lifecycle import (
+    cancel as cancel_execution, close as close_execution, run_owned,
+    pause as pause_execution, resume as resume_execution,
+)
+from .snapshot import save as save_execution, load as load_execution
+from agently.types.data.agent_execution import AgentExecutionControlResult, AgentExecutionControlCapabilities
 from .result_views import (
     async_get_data as async_get_data_entry,
     async_get_data_object as async_get_data_object_entry,
@@ -93,6 +101,7 @@ from .production import ProductionOptions
 from .goal_preparation import PreparedGoal
 from .route_execution import async_execute_route, produce_default_route, start_execution
 from .runtime_guidance import add_guidance as add_guidance_entry
+from .runtime_guidance import interrupt as interrupt_execution, record_interrupt_consumption
 from .routing import HybridRoutePlanner
 from .state import (
     ExecutionOptionsState,
@@ -121,6 +130,7 @@ from .record_store_records import (
 )
 
 if TYPE_CHECKING:
+    from agently.core.orchestration.TriggerFlow.Execution import TriggerFlowExecution
     from agently.core.operation import Action
     from agently.core.Agent import BaseAgent
     from agently.types.data import (
@@ -176,6 +186,14 @@ class AgentExecution:
         self.prompt = self.request_prompt
         self._draft = AgentExecutionPromptDraft(self.agent, self.request)
         self.id = uuid.uuid4().hex
+        self.revision = 0
+        self._revision_history: dict[int, AgentExecution] = {}
+        self._retained_meta: dict[str, Any] | None = None
+        self._rework_limit: int | None = None
+        self._rework_feedback: str | None = None
+        self._rework_allow_replay = False
+        self._producer_state: dict[str, Any] = {}
+        self._resource_release_error: Exception | None = None
         self.lineage: "AgentExecutionLineage" = normalize_execution_lineage(lineage)
         self.limits: "AgentExecutionLimits" = normalize_execution_limits(limits)
         self._effort_applied_limits: set[str] = set()
@@ -314,6 +332,22 @@ class AgentExecution:
         self.execution_prompt_snapshot: dict[str, Any] = self._snapshot_execution_prompt()
 
         self._start_lock = asyncio.Lock()
+        self._run_admission_lock = threading.Lock()
+        self._run_task: asyncio.Task[Any] | None = None
+        self._run_loop: asyncio.AbstractEventLoop | None = None
+        self._run_completion: concurrent.futures.Future[Any] | None = None
+        self._cancel_requested = False
+        self._closing = False
+        self._closed = False
+        self._pause_requested = False
+        self._pause_boundary: str | None = None
+        self._pause_flow: "TriggerFlowExecution[Any, Any, Any] | None" = None
+        self._paused_continuation: Callable[[], Awaitable[tuple[str, object]]] | None = None
+        self._continued_result: tuple[str, object] | None = None
+        self._resuming = False
+        self._production_options: ProductionOptions | None = None
+        self._candidate_validation_handlers: list["OutputValidateHandler"] = []
+        self._candidate_request_validated = False
         self._record_store_write_lock = asyncio.Lock()
         self.route_planner = HybridRoutePlanner(self.agent, prompt_snapshot=self.prompt_snapshot, execution=self)
         self.stream = AgentExecutionStream(
@@ -325,6 +359,9 @@ class AgentExecution:
         self._seen_action_log_keys: set[str] = set()
         self._key_waiter_handlers: dict[str, list[Any]] = {}
 
+        self._bind_result_sugar()
+
+    def _bind_result_sugar(self) -> None:
         self.start = default_stage_call_bridge.as_sync(self.async_start)
         self.get_data = default_stage_call_bridge.as_sync(self.async_get_data)
         self.get_data_object = default_stage_call_bridge.as_sync(self.async_get_data_object)
@@ -601,6 +638,7 @@ class AgentExecution:
                 execution_id=self.id,
                 meta={
                     "execution_id": self.id,
+                    "revision": self.revision,
                     "strategy": self.strategy_name,
                     "lineage": DataFormatter.sanitize(self.lineage),
                 },
@@ -694,8 +732,13 @@ class AgentExecution:
             ),
         )
 
-    def get_result(self) -> AgentExecutionResult:
-        return AgentExecutionResult(self)
+    def get_result(self, *, revision: int | None = None) -> AgentExecutionResult:
+        if revision is not None and revision != self.revision and revision not in self._revision_history:
+            raise ValueError(f"Unknown execution revision: {revision}.")
+        result = AgentExecutionResult(self)
+        if revision is not None:
+            result.revision = revision
+        return result
 
     def get_response(self) -> AgentExecutionResult:
         return self.get_result()
@@ -1540,6 +1583,7 @@ class AgentExecution:
         return package
 
     def record_context_consumption(self, package: Any, *, request_id: str) -> ContextConsumption:
+        record_interrupt_consumption(self, package, request_id=request_id)
         consumption = ContextConsumption(
             consumption_id=f"context_consumption:{uuid.uuid4().hex}",
             package_id=package.package_id,
@@ -1771,6 +1815,7 @@ class AgentExecution:
             execution_id=self.id,
             lineage=self.lineage,
         )
+        stream_meta["revision"] = self.revision
         return await self.stream.emit(
             path,
             value,
@@ -1978,7 +2023,7 @@ class AgentExecution:
         parent_run_context: "RunContext | None" = None,
     ) -> Any:
         with bind_runtime_context(settings=self.request.settings):
-            return await start_execution(
+            return await run_owned(self, lambda: start_execution(
                 self,
                 type=type,
                 ensure_keys=ensure_keys,
@@ -1988,7 +2033,113 @@ class AgentExecution:
                 max_retries=max_retries,
                 raise_ensure_failure=raise_ensure_failure,
                 parent_run_context=parent_run_context,
-            )
+            ))
+
+    def _assert_rework_supported(self) -> None:
+        if self.__class__._async_produce is not AgentExecution._async_produce:
+            raise NotImplementedError(f"Producer {self.name!r} must declare its own safe rework contract.")
+        route = self.route_info.get("selected_route")
+        if route == "agent_task":
+            if self.task_record is None or self._producer_state.get("kind") != "long_task":
+                raise RuntimeError("Long-task rework requires its retained producer and evidence bindings.")
+            if any(not task.done() for task in self.task_record._background_stream_tasks):
+                raise RuntimeError("Long-task child work has not settled.")
+        elif route != "model_request":
+            raise NotImplementedError("This producer does not support retained-state rework.")
+
+    async def _async_rework_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        if self.route_info.get("selected_route") == "agent_task":
+            from ..long_task.Rework import prepare_task_rework
+            await prepare_task_rework(self)
+        else:
+            from .revisions import rework_request
+            await rework_request(self)
+        return await self._async_produce(options)
+
+    async def async_rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object:
+        from .revisions import rework
+        return await rework(self, feedback, max_reworks=max_reworks, allow_replay=allow_replay)
+
+    def rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object:
+        return default_stage_call_bridge.as_sync(self.async_rework)(
+            feedback, max_reworks=max_reworks, allow_replay=allow_replay,
+        )
+
+    async def async_cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult:
+        """Cancel owned work and await settlement; timeout never means success."""
+        return await cancel_execution(self, reason=reason, timeout=timeout)
+
+    @property
+    def control_capabilities(self) -> AgentExecutionControlCapabilities:
+        """Describe implemented boundaries without starting the producer."""
+        return {
+            "pause_boundaries": ["before_production", "candidate_ready"],
+            "snapshot_boundaries": ["before_production", "candidate_ready"],
+            "resume": "explicit_pending_pause",
+            "rework": ("same_execution_revision" if (
+                self.__class__._async_produce is AgentExecution._async_produce
+                or self.__class__._assert_rework_supported is not AgentExecution._assert_rework_supported
+            ) else "unsupported"),
+            "active_child_snapshot": False,
+        }
+
+    async def async_pause(self) -> AgentExecutionControlResult:
+        """Request suspension at a safe producer boundary; receipt is not suspension."""
+        return await pause_execution(self)
+
+    async def async_interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]:
+        """Supply information to a future producer boundary; never cancel execution."""
+        return await interrupt_execution(self, content, author=author)
+
+    def interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]:
+        return default_stage_call_bridge.as_sync(self.async_interrupt)(content, author=author)
+
+    def pause(self) -> AgentExecutionControlResult:
+        return default_stage_call_bridge.as_sync(self.async_pause)()
+
+    async def async_resume(self) -> object:
+        """Continue a retained safe pause without replaying completed production."""
+        return await resume_execution(self)
+
+    def resume(self) -> object:
+        return default_stage_call_bridge.as_sync(self.async_resume)()
+
+    def save(self) -> dict[str, object]:
+        """Return a data-only snapshot at a settled safe pause."""
+        return save_execution(self)
+
+    async def async_save(self) -> dict[str, object]:
+        return self.save()
+
+    def load(self, snapshot: Mapping[str, object]) -> "AgentExecution":
+        """Restore into a fresh explicitly rebound draft; never dispatch or resume."""
+        load_execution(self, snapshot)
+        return self
+
+    async def async_load(self, snapshot: Mapping[str, object]) -> "AgentExecution":
+        return self.load(snapshot)
+
+    def cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult:
+        return default_stage_call_bridge.as_sync(self.async_cancel)(reason=reason, timeout=timeout)
+
+    async def async_close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult:
+        """Drain and seal execution resources, preserving completed result readers."""
+        return await close_execution(self, reason=reason, timeout=timeout, pending=pending)
+
+    def close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult:
+        return default_stage_call_bridge.as_sync(self.async_close)(
+            reason=reason, timeout=timeout, pending=pending,
+        )
 
     async def _await_route_with_limits(self, run_coro: Any):
         return await await_route_with_limits(self, run_coro)

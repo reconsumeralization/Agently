@@ -13,6 +13,13 @@ class PlanExecution(AgentExecution):
     supported_strategies = frozenset({"auto"})
     DEFAULT_SETTINGS = {"max_questions_per_round": 3, "max_clarification_rounds": 3}
 
+    def _assert_rework_supported(self) -> None:
+        if self._producer_state.get("kind") != "plan":
+            raise RuntimeError("Plan rework requires its retained accepted clarifications.")
+
+    async def _async_rework_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        return await self._async_produce(options)
+
     async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
         settings = SettingsNamespace(self.request.settings, f"plugins.AgentExecution.{self.name}")
         config = PlanExecutionConfig(

@@ -24,11 +24,22 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
+def execution_wall_clock_limits(owner: "AgentExecution") -> tuple[float | None, float | None]:
+    """Task facade wall clocks are lifetime bounds; its request caps remain per step."""
+    task_limits = owner.task_strategy_options().get("limits") if owner.is_task_strategy() else None
+    task_limits = task_limits if isinstance(task_limits, dict) else {}
+    result: list[float | None] = []
+    for key in ("max_seconds", "max_no_progress_seconds"):
+        candidates = [float(value) for value in (owner.limits.get(key), task_limits.get(key))
+                      if not isinstance(value, bool) and isinstance(value, (int, float))]
+        result.append(min(candidates) if candidates else None)
+    return result[0], result[1]
+
+
 async def await_route_with_limits(
     owner: "AgentExecution", run_coro: Any, *, enforce_execution_deadline: bool = False,
 ):
-    max_seconds = owner.limits.get("max_seconds")
-    max_no_progress_seconds = owner.limits.get("max_no_progress_seconds")
+    max_seconds, max_no_progress_seconds = execution_wall_clock_limits(owner)
     if max_seconds is None and max_no_progress_seconds is None:
         return await run_coro
 
@@ -41,10 +52,15 @@ async def await_route_with_limits(
             task_strategy_owns_wall_clock = False
     hard_deadline = (
         owner.execution_context.started_at + float(max_seconds)
-        if max_seconds is not None and (enforce_execution_deadline or not task_strategy_owns_wall_clock)
+        if max_seconds is not None and (enforce_execution_deadline or owner.revision > 0 or not task_strategy_owns_wall_clock)
         else None
     )
-    idle_limit = float(max_no_progress_seconds) if max_no_progress_seconds is not None else None
+    idle_limit = (
+        float(max_no_progress_seconds)
+        if max_no_progress_seconds is not None
+        and (enforce_execution_deadline or owner.revision > 0 or not task_strategy_owns_wall_clock)
+        else None
+    )
     if hard_deadline is not None and time.monotonic() >= hard_deadline:
         if asyncio.iscoroutine(run_coro):
             run_coro.close()

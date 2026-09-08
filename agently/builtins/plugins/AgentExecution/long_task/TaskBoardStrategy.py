@@ -647,7 +647,11 @@ class AgentTaskTaskBoardStrategyMixin(
                     "runtime_topology": topology,
                 },
             )
-            await data.async_emit_nowait(tick_requested_event, {"tick_index": initial_tick_index})
+            if max_ticks is not None and initial_tick_index > max_ticks:
+                await data.async_set_state("terminal_reason", "max_ticks", emit=False)
+                await data.async_emit_nowait(finalize_requested_event, {"tick_index": initial_tick_index - 1})
+            else:
+                await data.async_emit_nowait(tick_requested_event, {"tick_index": initial_tick_index})
             return {"runtime_topology": topology}
 
         async def run_lifecycle_tick(data: TriggerFlowRuntimeData[Any, Any, Any]):
@@ -731,6 +735,8 @@ class AgentTaskTaskBoardStrategyMixin(
 
             await data.async_set_state(revision_state_key, _pack_revision_state(tick_result.revision), emit=False)
             await data.async_set_state("tick_index", tick_index + 1, emit=False)
+            frame["taskboard_tick_index"] = tick_index
+            frame["taskboard_revision"] = tick_result.revision.to_dict()
             await self._emit(
                 f"agent_task.taskboard.tick.{tick_index}.completed",
                 self._taskboard_completed_stream_payload(tick_result),
@@ -981,6 +987,8 @@ class AgentTaskTaskBoardStrategyMixin(
                     else {}
                 ),
             }
+        if self._terminal_taskboard_state is not None:
+            self._terminal_taskboard_state["tick_index"] = int(frame.get("taskboard_tick_index") or 0)
         frame["iteration_result"] = dict(result)
         return frame
 

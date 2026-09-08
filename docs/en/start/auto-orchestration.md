@@ -1594,6 +1594,107 @@ background replay buffer fills, the partial replay is replaced by the complete
 authoritative result at completion rather than being presented as the whole
 response.
 
+### Execution controls
+
+`run()`/`async_run()` and result readers share one owned run. Concurrent readers
+cannot duplicate production. Inspect `execution.control_capabilities` before
+starting when the caller needs a supported control boundary.
+
+- `pause()`/`async_pause()` requests a safe boundary before production or after
+  the candidate is ready, before final validation/artifact/review policies.
+  A requested pause is not yet suspension; an in-flight provider finishes first.
+- At an actual pause, run/readers raise `AgentExecutionPaused` without turning
+  the candidate into a terminal result. `resume()`/`async_resume()` explicitly
+  continues the retained TriggerFlow. Ordinary reads never resume implicitly.
+- `interrupt(content, author=None)` supplies information for a future model
+  request through TaskContext. Its receipt distinguishes insertion, request
+  consumption and ignoring. It cannot change an already dispatched request;
+  information arriving after candidate production is ignored.
+- `cancel(reason=..., timeout=...)` cancels owned work and waits for cleanup.
+  A timeout is an unsettled outcome; repeat the call to join the same cleanup.
+  Cancellation does not roll back external effects.
+- `close(reason=..., timeout=..., pending="error")` drains and seals. Pending
+  waits fail by default; use `pending="cancel"` explicitly to abandon them.
+  Closing a draft prevents start; closing a completed result preserves readers.
+
+Every control has an `async_` counterpart. A snapshot is supported only at a
+settled safe pause:
+
+```python
+from agently.core.application.AgentExecution import AgentExecutionPaused
+
+execution = agent.create_execution("request").input("Summarize these supplied notes.")
+await execution.async_pause()
+try:
+    await execution.async_run()
+except AgentExecutionPaused:
+    snapshot = execution.save()
+
+restored = agent.create_execution("request").input("Summarize these supplied notes.")
+restored.load(snapshot)  # Validation and rebinding only; no model or Action dispatch.
+await execution.async_cancel()  # Retire the original paused handle before handing off.
+data = await restored.async_resume()
+await restored.async_close()
+```
+
+Configure the same original draft, limits, policy callbacks, Actions, Skills,
+TaskWorkspace, RecordStore and external ContextSources on the fresh handle.
+Snapshots contain JSON data and resource identities, never settings, credentials,
+clients or executable callbacks. Missing/changed bindings fail before readiness.
+The current format conservatively rejects any Skill catalog change. Model-call
+usage and elapsed time survive load, including time spent offline. A candidate
+pause resumes final policies without repeating production.
+
+### Rework and retained revisions
+
+```python
+execution = agent.create_execution("request", limits={"max_model_requests": 3}).input(
+    "Summarize: staging passed; production awaits approval."
+)
+previous = execution.get_result()  # Captures revision 0.
+first = await execution.async_run()
+revised = await execution.async_rework("Lead with the pending approval.", max_reworks=2)
+assert execution.revision == 1  # Same object and execution ID.
+assert await previous.async_get_full_data() == first
+assert await execution.get_result(revision=0).async_get_full_data() == first
+```
+
+Rework produces a new candidate and returns its full result. New readers select
+its revision; captured readers retain their original result, metadata and stream.
+The original task and acceptance contract remain available alongside the feedback.
+Request producers revise the previous candidate; Plan keeps accepted clarification;
+LongContent reuses an unchanged prefix and rewrites affected dependent sections.
+LongTask asks the model to select retained work, then validates the IDs and
+invalidates dependants (the remaining serial suffix for Flat). Selecting the
+final candidate alone re-enters delivery without invalidating completed work. TaskBoard preserves
+unaffected card results and checks reused file content identities.
+
+Model-call usage, elapsed time, Flat iterations and TaskBoard ticks remain
+cumulative. Use `create_execution("long_task", limits=...)` for an overall model
+request cap; the legacy `create_task(limits=...)` request cap retains its per-step
+meaning, while its wall-clock limit spans rework. `max_reworks` bounds revisions and cannot raise an already established
+cap. A failed revision remains a failure while earlier candidates remain readable.
+Previously dispatched Actions, including uncertain failures, require declared
+`replay_safe` semantics or the host's explicit `allow_replay=True`; children cannot
+relax ancestor protection. Artifact callbacks also require that explicit choice.
+External effects are not rolled back and historical file references are not file
+backups. Custom producers must declare their own rework support.
+
+Safe-pause snapshots include revision history, producer state and replay protection.
+Rebind the original task ID when using `create_task(..., task_id=...)`. Settled task
+resources use the built-in task recovery contract; unsupported ContextSources fail
+explicitly. Historical snapshot readers restore data, metadata and stream records,
+not live provider result objects or original Python exception classes. A live
+ExecutionResource without a checkpoint contract prevents save; settle or release
+it first. Terminal cleanup releases this execution's owned execution scopes.
+
+This supports the outer execution boundaries only. In-flight provider state,
+active children, disconnected plan clarification and nested-budget restoration
+remain unsupported. Legacy task resume does not establish those capabilities.
+See `examples/agent_auto_orchestration/29_execution_controls_ollama.py` for a bounded
+real-model snapshot handoff and same-execution rework.
+
+
 ## Submitted DAG Input
 
 Submitted DAGs routed through the independent DynamicTask facade keep using DAG

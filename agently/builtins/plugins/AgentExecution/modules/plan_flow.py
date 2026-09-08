@@ -100,6 +100,9 @@ class _PlanExecutionRuntime:
             stage_input={
                 "clarification_round": clarification_round,
                 "clarifications": clarifications,
+                **({"revision_feedback": self.execution._rework_feedback,
+                    "previous_candidate": self.execution._revision_history[self.execution.revision - 1].result}
+                   if self.execution.revision else {}),
             },
             stage_info={
                 "max_questions_per_round": self.config.max_questions_per_round,
@@ -136,6 +139,9 @@ class _PlanExecutionRuntime:
             stage_input={
                 "validated_readiness": readiness,
                 "clarifications": clarifications,
+                **({"revision_feedback": self.execution._rework_feedback,
+                    "previous_candidate": self.execution._revision_history[self.execution.revision - 1].result}
+                   if self.execution.revision else {}),
             },
             stage_info={
                 "result_role": "terminal actionable plan",
@@ -166,7 +172,10 @@ def _require_runtime(data: TriggerFlowRuntimeData) -> _PlanExecutionRuntime:
 
 async def _initialize_plan(data: TriggerFlowRuntimeData) -> None:
     await data.async_set_state("clarification_round", 0, emit=False)
-    await data.async_set_state("clarifications", [], emit=False)
+    runtime = _require_runtime(data)
+    prior = runtime.execution._producer_state
+    clarifications = prior.get("clarifications", []) if runtime.execution.revision else []
+    await data.async_set_state("clarifications", clarifications, emit=False)
     await data.async_emit(_ANALYZE_EVENT, None)
 
 
@@ -438,9 +447,12 @@ async def run_plan_execution(
             snapshot.get("clarification_round", 0)
         )
         execution.diagnostics["execution_run"] = diagnostic
+    execution._producer_state = {"kind": "plan", "clarifications": snapshot.get("clarifications", []),
+                                 "readiness": snapshot.get("readiness")}
     execution._review_contract = {
         "deliverable_role": "An actionable plan, not execution of the planned task.",
         "clarifications": snapshot.get("clarifications", []),
+        **({"rework_feedback": execution._rework_feedback} if execution.revision else {}),
     }
     return snapshot["execution_result"]
 

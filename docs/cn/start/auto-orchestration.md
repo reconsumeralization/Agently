@@ -1360,3 +1360,72 @@ async for item in execution.get_async_runtime_stream({"ticket": ticket}, timeout
 ```
 
 这样可以把 AgentExecution stream 语义和独立 DAG runtime stream 语义分开。
+
+
+## 统一执行控制
+
+`run()` / `async_run()` 与结果 reader 共享同一个自有运行任务，并发读取不会
+重复生产。启动前可查看 `execution.control_capabilities` 确认支持边界。
+
+- `pause()` / `async_pause()` 请求在生产前，或候选产生后、最终策略前暂停。
+  requested 不等于 paused；在途 provider 先结算。实际暂停时 run 和 reader
+  抛出 `AgentExecutionPaused`，不会伪造终态结果。
+- `resume()` / `async_resume()` 显式继续原 TriggerFlow；普通读取不会自动恢复，
+  候选暂停后的恢复不会重复生产。已完成的结果不能借 resume 再次生产。
+- `interrupt(content, author=None)` 通过 TaskContext 补充后续请求的信息；回执
+  区分插入、请求消费与忽略，不会修改已分发请求。候选已经产生时明确忽略。
+- `cancel(reason=..., timeout=...)` 取消并等待自有工作清理。超时仍未结算，
+  重复调用继续等待同一清理过程；取消不回滚外部副作用。
+- `close(reason=..., timeout=..., pending="error")` 默认排空并关闭；未解决的
+  等待会报错，只有显式 `pending="cancel"` 才放弃。关闭 draft 禁止启动，
+  关闭已完成结果仍保留 reader。所有控制方法均提供 async 对应形式。
+
+在已经结算的安全暂停处调用 `snapshot = execution.save()`；先配置新的执行
+对象，再 `restored.load(snapshot)`，最后显式 `await restored.async_resume()`。
+load 本身不调用模型或 Action。恢复新对象前先取消旧暂停对象，避免保留两份可继续的句柄。
+
+新对象须重新绑定同一原始 draft、预算、策略 callback、Action/Skill、Workspace、
+RecordStore 及外部 ContextSource。快照只有 JSON 数据与资源身份，没有 settings、
+密钥、客户端或可执行 callback；缺失或变更的绑定明确失败。目前保守拒绝任何
+Skill 目录变化。累计模型调用数与 elapsed time 跨 load 保留，停机时间也计入。
+
+### 返工与历史版本
+
+```python
+execution = agent.create_execution("request", limits={"max_model_requests": 3}).input(
+    "总结：staging 已通过；production 尚待批准。"
+)
+previous = execution.get_result()  # 固定读取 revision 0。
+first = await execution.async_run()
+revised = await execution.async_rework("先说明待批准事项。", max_reworks=2)
+assert execution.revision == 1  # 同一个对象、同一个 execution ID。
+assert await previous.async_get_full_data() == first
+assert await execution.get_result(revision=0).async_get_full_data() == first
+```
+
+`rework` 返回新候选的完整结果，已有 reader 保留原版本的数据、meta 和 stream；
+新 reader 默认读取当前 revision。原始任务和验收标准与本次反馈一起交给生产者。
+Request 修改上一候选；Plan 保留已接受的澄清；LongContent 复用未变的前缀，
+重写受影响章节及后续章节。LongTask 由模型选择需失效的工作，Host 校验 ID
+并失效依赖：Flat 失效后续串行工作，TaskBoard 保留无关卡片并核验复用文件内容。
+也可以只选择最终 candidate 返工，保留全部已完成工作，重新生产交付结果。
+
+模型调用数、耗时、Flat 迭代数和 TaskBoard tick 累计。用
+`create_execution("long_task", limits=...)` 声明总模型预算；兼容
+`create_task(limits=...)` 的模型次数仍保持原有单步含义，但墙钟跨返工累计。
+`max_reworks` 建立的次数
+上限不能被后续调用提高。失败的 revision 不会变成成功，旧候选仍可读取。
+已分发的 Action（包括副作用结果不确定的失败）再次执行，需要 `replay_safe`
+声明或 Host 显式传入 `allow_replay=True`；子执行不能放宽父执行限制。
+Artifact callback 同样需要显式允许重放。副作用不会回滚，历史文件引用不等于
+文件备份；自定义生产者须声明自己的安全返工契约。
+
+安全暂停快照包含版本历史、生产者状态和重放保护。使用 `create_task` 恢复时
+须显式重新绑定原 `task_id`；已结算任务资源通过原有 task recovery 契约恢复，
+不能恢复的 ContextSource 明确失败。快照恢复历史数据、meta、stream 记录，
+不恢复 provider 活对象或原 Python 异常类。仍存活且没有 checkpoint 契约的
+ExecutionResource 会阻止保存，须先结算或释放；终态清理释放当前执行自有的 execution scope。
+
+当前仅支持外层执行安全边界；在途 provider、活跃子执行、离线 Plan 澄清和
+嵌套父预算恢复仍不支持，不能用旧 AgentTask resume 能力代替。真实模型快照
+交接与同一 execution 返工示例见 `examples/agent_auto_orchestration/29_execution_controls_ollama.py`。

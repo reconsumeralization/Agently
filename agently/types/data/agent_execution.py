@@ -37,6 +37,27 @@ AgentExecutionStatus: TypeAlias = Literal[
     "timed_out",
     "cancelled",
 ] | str
+
+
+class AgentExecutionControlCapabilities(TypedDict):
+    """Supported semantic boundaries, independent from execution state."""
+
+    pause_boundaries: list[Literal["before_production", "candidate_ready"]]
+    snapshot_boundaries: list[Literal["before_production", "candidate_ready"]]
+    resume: Literal["explicit_pending_pause"]
+    rework: Literal["same_execution_revision", "unsupported"]
+    active_child_snapshot: Literal[False]
+
+
+class AgentExecutionControlResult(TypedDict):
+    """Control receipt; pause_requested alone does not establish suspension."""
+
+    execution_id: str
+    status: str
+    closed: bool
+    pause_requested: NotRequired[bool]
+    boundary: NotRequired[str | None]
+
 AgentExecutionRecordPurpose: TypeAlias = Literal["process", "deliverable", "recovery", "audit"]
 AgentExecutionStrategy: TypeAlias = Literal[
     "auto",
@@ -137,6 +158,7 @@ class AgentExecutionActionLog(TypedDict, total=False):
 
 class AgentExecutionMeta(TypedDict):
     execution_id: str
+    revision: NotRequired[int]
     status: AgentExecutionStatus
     strategy: AgentExecutionStrategy | None
     goals: list[str]
@@ -152,6 +174,7 @@ class AgentExecutionMeta(TypedDict):
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
     plugin: str
+    control_capabilities: NotRequired[AgentExecutionControlCapabilities]
     close_snapshot: dict[str, Any]
     logs: dict[str, Any]
     diagnostics: AgentExecutionDiagnostics
@@ -227,6 +250,7 @@ class EvidenceRequirement(TypedDict, total=False):
 
 class AgentExecutionStreamMeta(TypedDict, total=False):
     execution_id: str
+    revision: int
     lineage: AgentExecutionLineage
 
 

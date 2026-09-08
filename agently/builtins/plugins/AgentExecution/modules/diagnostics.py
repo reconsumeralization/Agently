@@ -178,7 +178,9 @@ def _action_log_key(log: dict[str, Any]) -> str:
 def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
     meta = {
         "execution_id": owner.id,
+        "revision": owner.revision,
         "plugin": owner.name,
+        "control_capabilities": owner.control_capabilities,
         "status": owner.status,
         "strategy": owner.strategy_name,
         "goals": DataFormatter.sanitize(owner.goal_items),

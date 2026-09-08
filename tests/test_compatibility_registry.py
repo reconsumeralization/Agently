@@ -266,7 +266,8 @@ def test_agent_execution_plugins_and_terminal_policies_share_one_owner() -> None
     assert "Agent.verify" not in contract["surface"]
     assert "final_result projection" in contract["contract"]
     assert "only missing fields" in contract["goal_contract"]
-    assert "not yet implemented" in contract["pending_control_contract"]
+    assert "same execution revision" in contract["control_contract"]
+    assert "nested parent-budget restoration" in contract["pending_control_contract"]
     assert _development_manifest()["companions"]["skills"]["authoring_protocol"] == "agently-skills.authoring.v3"
     assert _development_manifest()["companions"]["docs"]["public_surface_protocol"] == "agently-docs.public-surface.v2"
     assert "normalized ExecutionExchangeView" in contract["interaction_contract"]
