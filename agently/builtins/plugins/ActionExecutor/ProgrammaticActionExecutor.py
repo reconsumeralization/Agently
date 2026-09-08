@@ -523,6 +523,44 @@ class ProgrammaticActionExecutor:
             },
         ]
 
+    @staticmethod
+    def _programmatic_observation(
+        *,
+        catalog: Mapping[str, Any],
+        program: str,
+        wrapper_source: str,
+        binding_summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, int | str]:
+        summary = binding_summary if isinstance(binding_summary, Mapping) else {}
+        entries = catalog.get("entries", [])
+        diagnostics = catalog.get("diagnostics", [])
+        observation: dict[str, int | str] = {
+            "sdk_renderer_version": str(catalog.get("renderer_version", "")),
+            "eligible_action_count": len(entries) if isinstance(entries, list) else 0,
+            "ineligible_action_count": sum(
+                1
+                for diagnostic in diagnostics
+                if isinstance(diagnostic, Mapping)
+                and str(diagnostic.get("code", "")).startswith("action.programmatic.ineligible.")
+            )
+            if isinstance(diagnostics, list)
+            else 0,
+            "sdk_bytes": int(catalog.get("sdk_bytes", 0)),
+            "contract_bytes": int(catalog.get("contract_bytes", 0)),
+            "program_bytes": len(program.encode("utf-8")),
+            "wrapper_bytes": len(wrapper_source.encode("utf-8")),
+        }
+        for source_key, target_key in {
+            "call_count": "binding_call_count",
+            "successful_calls": "successful_binding_calls",
+            "failed_calls": "failed_binding_calls",
+            "peak_active_calls": "peak_active_binding_calls",
+        }.items():
+            value = summary.get(source_key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                observation[target_key] = value
+        return observation
+
     async def execute(self, *, spec, action_call, policy, settings) -> Any:
         _ = spec
         action_input = action_call.get("action_input", {})
@@ -537,6 +575,11 @@ class ProgrammaticActionExecutor:
             raise ValueError("Programmatic Action description must be non-empty.")
         catalog = self._resolve_catalog(revision)
         wrapper_source = build_programmatic_python_source(program)
+        base_observation = self._programmatic_observation(
+            catalog=catalog,
+            program=program,
+            wrapper_source=wrapper_source,
+        )
 
         workspace = action_call.get("task_workspace")
         if not isinstance(workspace, TaskWorkspace):
@@ -619,6 +662,7 @@ class ProgrammaticActionExecutor:
                     "bundle_id": bundle.bundle_id,
                     "bundle_digest": bundle.bundle_digest,
                     "grant_id": grant.grant_id,
+                    "programmatic_observation": base_observation,
                 },
                 "diagnostics": [
                     {
@@ -668,6 +712,12 @@ class ProgrammaticActionExecutor:
         binding_meta = result_meta.get("binding", {}) if isinstance(result_meta, dict) else {}
         if not isinstance(binding_meta, dict):
             binding_meta = {}
+        binding_summary = result.get(
+            "binding_summary",
+            binding_meta.get("summary", {}),
+        )
+        if not isinstance(binding_summary, Mapping):
+            binding_summary = {}
         meta = {
             **(dict(result_meta) if isinstance(result_meta, dict) else {}),
             **self._provider_facts(action_call),
@@ -677,10 +727,7 @@ class ProgrammaticActionExecutor:
             "program_digest": program_digest,
             "program_bytes": len(program.encode("utf-8")),
             "catalog_revision": revision,
-            "binding_summary": result.get(
-                "binding_summary",
-                binding_meta.get("summary", {}),
-            ),
+            "binding_summary": binding_summary,
             "binding_calls": result.get(
                 "binding_calls",
                 binding_meta.get("calls", []),
@@ -690,6 +737,12 @@ class ProgrammaticActionExecutor:
             "bundle_id": bundle.bundle_id,
             "bundle_digest": bundle.bundle_digest,
             "grant_id": grant.grant_id,
+            "programmatic_observation": self._programmatic_observation(
+                catalog=catalog,
+                program=program,
+                wrapper_source=wrapper_source,
+                binding_summary=binding_summary,
+            ),
         }
         return {
             "ok": ok,

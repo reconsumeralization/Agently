@@ -549,6 +549,7 @@ class CodeExecutionBindingBridge:
         self._protocol_frames = 0
         self._rejected_frames = 0
         self._call_count = 0
+        self._peak_active_dispatches = 0
         self._request_bytes = 0
         self._response_bytes = 0
         self._transport_error = ""
@@ -602,6 +603,7 @@ class CodeExecutionBindingBridge:
             "failed_calls": len(records) - successful,
             "request_bytes": self._request_bytes,
             "response_bytes": self._response_bytes,
+            "peak_active_calls": self._peak_active_dispatches,
         }
 
     @property
@@ -756,11 +758,19 @@ class CodeExecutionBindingBridge:
                         if mode == "parallel" and len(self._active_dispatches) < self.limits.max_parallel_calls:
                             self._pending_dispatches.pop(sequence, None)
                             self._active_dispatches.add(sequence)
+                            self._peak_active_dispatches = max(
+                                self._peak_active_dispatches,
+                                len(self._active_dispatches),
+                            )
                             self._schedule_condition.notify_all()
                             return
                         if mode == "exclusive" and not self._active_dispatches:
                             self._pending_dispatches.pop(sequence, None)
                             self._active_dispatches.add(sequence)
+                            self._peak_active_dispatches = max(
+                                self._peak_active_dispatches,
+                                len(self._active_dispatches),
+                            )
                             self._exclusive_dispatch_active = True
                             self._schedule_condition.notify_all()
                             return

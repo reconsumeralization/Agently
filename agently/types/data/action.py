@@ -28,7 +28,7 @@ ActionPlanningProtocol = Literal["structured_plan", "native_tool_calls", "progra
 
 PROGRAMMATIC_ACTION_TRANSPORT_ID = "run_action_program"
 PROGRAMMATIC_ACTION_ARTIFACT_READ_ID = "read_action_artifact"
-PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION = "agently.programmatic_action.python.v2"
+PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION = "agently.programmatic_action.python.v3"
 
 
 class ActionPolicy(TypedDict, total=False):
@@ -149,6 +149,19 @@ class ActionDecision(TypedDict, total=False):
     tool_command: ActionCall
     tool_commands: list[ActionCall]
     diagnostics: list[ActionDiagnostic]
+    planning_observation: "ActionPlanningObservation"
+
+
+class ActionPlanningObservation(TypedDict, total=False):
+    """Bounded host facts about one Action planning decision."""
+
+    planning_protocol: ActionPlanningProtocol
+    sdk_renderer_version: str
+    eligible_action_count: int
+    ineligible_action_count: int
+    sdk_bytes: int
+    contract_bytes: int
+    program_bytes: int
 
 
 class ProgrammaticActionDecision(TypedDict):
@@ -180,8 +193,26 @@ class ProgrammaticActionCatalog(TypedDict):
     renderer_version: str
     catalog_revision: str
     sdk: str
+    sdk_bytes: int
+    contract_bytes: int
     entries: list[ProgrammaticActionCatalogEntry]
     diagnostics: list[ActionDiagnostic]
+
+
+class ProgrammaticActionObservation(TypedDict, total=False):
+    """Primitive-only host facts for one programmatic planning/execution boundary."""
+
+    sdk_renderer_version: str
+    eligible_action_count: int
+    ineligible_action_count: int
+    sdk_bytes: int
+    contract_bytes: int
+    program_bytes: int
+    wrapper_bytes: int
+    binding_call_count: int
+    successful_binding_calls: int
+    failed_binding_calls: int
+    peak_active_binding_calls: int
 
 
 class ActionResult(TypedDict, total=False):

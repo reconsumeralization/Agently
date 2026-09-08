@@ -96,6 +96,25 @@ PTC 都使用了更多 prompt/total tokens 和耗时。因此业务完成、模�
 精确本地计算的价值足以覆盖 SDK/Docker 开销时才选 PTC；不要把它当成所有多调用
 任务的自动优化。
 
+### SDK 投影与观测计量
+
+4.1.4.8 的 renderer v3 为每个合格 Action 保留一份 canonical exact JSON
+contract，继续提供 Python callable 与返回类型，并删除第二份展开的输入
+`TypedDict` 投影。required fields、描述、enum、范围、pattern、额外字段策略和
+并发模式仍以 exact JSON 为权威。这是确定性的 prompt 大小优化，不代表所有模型
+都会因此生成更好的程序。
+
+在确定性验证使用的重复代表性 contract 上，单 Action SDK 从 1,527 bytes 降到
+1,399 bytes，32 Action SDK 从 31,287 bytes 降到 26,292 bytes。后续获授权的模型
+对比仍必须分别评价业务完成度与 token。
+
+`action.plan_ready` 在 `decision.planning_observation` 中提供 primitive-only
+观测事实：renderer 版本、合格/不合格 Action 数、SDK/contract bytes 与 program
+bytes。外层 Action settle 后，`meta.programmatic_observation` 还会提供 wrapper
+bytes、binding 调用结果和观测到的 active binding 并发峰值。这些字段仅用于诊断，
+且只在 provider 实际上报时出现；缺失事实不会被推断成 0。它们不参与路由、授权、
+retry 或 acceptance，也不会复制到下一轮模型可见 Action record。
+
 ## 当前合格边界
 
 当前协议生成一段 Python 3.10+ async function body；它的 return value 必须符合

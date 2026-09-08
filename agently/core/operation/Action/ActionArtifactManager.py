@@ -1339,6 +1339,27 @@ class ActionArtifactManager:
                 max_bytes=1200,
             ),
         }
+        planning_observation = decision.get("planning_observation")
+        if isinstance(planning_observation, Mapping):
+            projected["planning_observation"] = {
+                key: value
+                for key, value in planning_observation.items()
+                if key
+                in {
+                    "planning_protocol",
+                    "sdk_renderer_version",
+                    "eligible_action_count",
+                    "ineligible_action_count",
+                    "sdk_bytes",
+                    "contract_bytes",
+                    "program_bytes",
+                }
+                and (
+                    isinstance(value, str)
+                    if key in {"planning_protocol", "sdk_renderer_version"}
+                    else isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                )
+            }
         if omitted_count:
             projected["omitted_action_call_count"] = omitted_count
         return projected
@@ -1346,6 +1367,38 @@ class ActionArtifactManager:
     @classmethod
     def _to_runtime_visible_record(cls, record: ActionResult) -> ActionResult:
         visible = cast(ActionResult, cls._redact_value(cls._to_model_visible_record(record)))
+        record_meta = record.get("meta")
+        programmatic_observation = (
+            record_meta.get("programmatic_observation")
+            if isinstance(record_meta, Mapping)
+            else None
+        )
+        if isinstance(programmatic_observation, Mapping):
+            visible["meta"] = {
+                "programmatic_observation": {
+                    key: value
+                    for key, value in programmatic_observation.items()
+                    if key
+                    in {
+                        "sdk_renderer_version",
+                        "eligible_action_count",
+                        "ineligible_action_count",
+                        "sdk_bytes",
+                        "contract_bytes",
+                        "program_bytes",
+                        "wrapper_bytes",
+                        "binding_call_count",
+                        "successful_binding_calls",
+                        "failed_binding_calls",
+                        "peak_active_binding_calls",
+                    }
+                    and (
+                        isinstance(value, str)
+                        if key == "sdk_renderer_version"
+                        else isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    )
+                }
+            }
         if cls._safe_json_size(visible) <= 12000:
             return visible
         compact = cast(
@@ -1453,14 +1506,31 @@ class ActionArtifactManager:
         return visible_observation
 
     @classmethod
+    def _without_programmatic_observation_meta(cls, record: ActionResult) -> ActionResult:
+        """Keep host accounting out of the next model-facing Action record."""
+
+        projected = cls._project_model_artifact_refs(record)
+        meta = projected.get("meta")
+        if not isinstance(meta, dict) or "programmatic_observation" not in meta:
+            return projected
+        projected = cast(ActionResult, dict(projected))
+        projected_meta = dict(meta)
+        projected_meta.pop("programmatic_observation", None)
+        if projected_meta:
+            projected["meta"] = projected_meta
+        else:
+            projected.pop("meta", None)
+        return projected
+
+    @classmethod
     def _to_model_visible_record(cls, record: ActionResult) -> ActionResult:
         if not isinstance(record, dict):
             return record
         digest = record.get("model_digest")
         if not isinstance(digest, dict):
-            return cls._project_model_artifact_refs(record)
+            return cls._without_programmatic_observation_meta(record)
         if digest.get("same_as") == "result" and isinstance(record.get("result"), dict):
-            return cls._project_model_artifact_refs(record)
+            return cls._without_programmatic_observation_meta(record)
         visible_digest = (
             dict(digest)
             if (

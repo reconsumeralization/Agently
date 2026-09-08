@@ -15,7 +15,10 @@ from agently.builtins.plugins.ActionExecutor.ProgrammaticActionExecutor import (
 from agently.core.TaskWorkspace import TaskWorkspace
 from agently.core.operation.Action.ActionRegistry import ActionRegistry
 from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
-from agently.core.operation.Action.ActionProgram import build_programmatic_action_catalog
+from agently.core.operation.Action.ActionProgram import (
+    build_programmatic_action_catalog,
+    build_programmatic_python_source,
+)
 from agently.types.data import (
     PROGRAMMATIC_ACTION_TRANSPORT_ID,
     ActionSpec,
@@ -444,6 +447,15 @@ async def test_default_programmatic_planner_builds_one_reserved_action_call(
     assert calls[0]["action_id"] == PROGRAMMATIC_ACTION_TRANSPORT_ID
     assert calls[0]["source_protocol"] == "programmatic"
     assert calls[0]["action_input"]["catalog_revision"].startswith("sha256:")
+    planning_observation = decision["planning_observation"]
+    assert planning_observation["planning_protocol"] == "programmatic"
+    assert planning_observation["sdk_renderer_version"].endswith(".v3")
+    assert planning_observation["eligible_action_count"] == 1
+    assert planning_observation["ineligible_action_count"] == 0
+    assert planning_observation["sdk_bytes"] > planning_observation["contract_bytes"] > 0
+    assert planning_observation["program_bytes"] == len(
+        calls[0]["action_input"]["program"].encode("utf-8")
+    )
     request = captured["request"]
     assert request.prompt.get("tools") is None
     prompt_text = request.prompt.to_text()
@@ -597,6 +609,21 @@ async def test_programmatic_executor_reenters_action_dispatcher_and_returns_oute
     assert result["data"]["logs"] == ["selected one record"]
     assert result["data"]["subcall_evidence"][0]["action_id"] == "lookup_record"
     assert result["data"]["subcall_evidence"][0]["action_call_id"].startswith("act_call_")
+    assert result["meta"]["programmatic_observation"] == {
+        "sdk_renderer_version": catalog["renderer_version"],
+        "eligible_action_count": 1,
+        "ineligible_action_count": 0,
+        "sdk_bytes": catalog["sdk_bytes"],
+        "contract_bytes": catalog["contract_bytes"],
+        "program_bytes": len("return await actions.lookup_record({'record_id': 'r1'})".encode("utf-8")),
+        "wrapper_bytes": len(
+            build_programmatic_python_source(
+                "return await actions.lookup_record({'record_id': 'r1'})"
+            ).encode("utf-8")
+        ),
+        "binding_call_count": 1,
+        "successful_binding_calls": 1,
+    }
     assert {item["artifact_type"] for item in result["artifacts"]} >= {
         "programmatic_action_sdk",
         "programmatic_action_catalog",

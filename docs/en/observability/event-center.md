@@ -262,6 +262,14 @@ uses that fact to suppress normal internal planning streams and show the accepte
 outer business response once. Detail mode and EventCenter hooks can still inspect
 the planning request and decision; validation warnings remain visible in simple.
 
+For programmatic planning, `action.plan_ready` may include the bounded
+`payload.decision.planning_observation` accounting view. A settled
+`run_action_program` record may include `meta.programmatic_observation` with
+SDK/contract/program/wrapper sizes, binding outcomes, and observed peak active
+binding calls. Exact SDK, catalog, program source, binding values, and provider
+logs remain cold. These additive fields are diagnostics and must not drive
+route, retry, policy, or acceptance decisions.
+
 Concrete action execution uses `action.started`, `action.completed`, and
 `action.failed`. Policy or sandbox gates that stop an action before normal
 execution use `action.approval_required` or `action.blocked` instead of being

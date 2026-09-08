@@ -18,7 +18,7 @@ from agently_stage import default_stage_call_bridge
 
 import asyncio
 import inspect
-import json
+
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, cast
@@ -806,6 +806,20 @@ class AgentlyActionRuntime:
         catalog_payload["_revision_seed"] = revision_seed
         catalog_entries = catalog.get("entries", [])
         diagnostics = list(catalog.get("diagnostics", []))
+        planning_observation = {
+            "planning_protocol": "programmatic",
+            "sdk_renderer_version": str(catalog.get("renderer_version", "")),
+            "eligible_action_count": len(catalog_entries) if isinstance(catalog_entries, list) else 0,
+            "ineligible_action_count": sum(
+                1
+                for diagnostic in diagnostics
+                if isinstance(diagnostic, dict)
+                and str(diagnostic.get("code", "")).startswith("action.programmatic.ineligible.")
+            ),
+            "sdk_bytes": int(catalog.get("sdk_bytes", 0)),
+            "contract_bytes": int(catalog.get("contract_bytes", 0)),
+            "program_bytes": 0,
+        }
         if not isinstance(catalog_entries, list) or not catalog_entries:
             diagnostics.append(
                 {
@@ -827,6 +841,7 @@ class AgentlyActionRuntime:
                     "action_calls": [],
                     "execution_commands": [],
                     "diagnostics": diagnostics,
+                    "planning_observation": planning_observation,
                 },
             )
 
@@ -997,8 +1012,11 @@ class AgentlyActionRuntime:
                     "action_calls": [],
                     "execution_commands": [],
                     "diagnostics": diagnostics,
+                    "planning_observation": planning_observation,
                 },
             )
+
+        planning_observation["program_bytes"] = len(str(decision["program"]).encode("utf-8"))
 
         max_active_catalogs_raw = settings.get(
             "action.programmatic.max_active_catalogs",
@@ -1036,6 +1054,7 @@ class AgentlyActionRuntime:
                 "action_calls": [action_call],
                 "execution_commands": [action_call],
                 "diagnostics": diagnostics,
+                "planning_observation": planning_observation,
             },
         )
 

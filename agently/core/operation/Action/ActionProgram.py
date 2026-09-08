@@ -338,6 +338,7 @@ def build_programmatic_action_catalog(
 
     entries.sort(key=lambda item: item["action_id"])
     sdk = render_programmatic_action_sdk(entries, renderer_version=renderer_version)
+    contract_bytes = len(_programmatic_action_contract_json(entries).encode("utf-8"))
     catalog_revision = programmatic_action_catalog_revision(
         entries,
         renderer_version=renderer_version,
@@ -347,6 +348,8 @@ def build_programmatic_action_catalog(
         "renderer_version": renderer_version,
         "catalog_revision": catalog_revision,
         "sdk": sdk,
+        "sdk_bytes": len(sdk.encode("utf-8")),
+        "contract_bytes": contract_bytes,
         "entries": entries,
         "diagnostics": diagnostics,
     }
@@ -1006,20 +1009,7 @@ def render_programmatic_action_sdk(
         canonical_lossless_json_bytes(entry["input_schema"], label=f"Action {action_id!r} input schema")
         canonical_lossless_json_bytes(entry["output_schema"], label=f"Action {action_id!r} output schema")
 
-    contract_payload = {
-        entry["action_id"]: {
-            "description": entry["description"],
-            "input_schema": entry["input_schema"],
-            "required_input_keys": entry["required_input_keys"],
-            "returns": entry["output_schema"],
-            "concurrency_mode": entry["concurrency_mode"],
-        }
-        for entry in ordered_entries
-    }
-    contract_json = canonical_lossless_json_bytes(
-        contract_payload,
-        label="programmatic Action SDK contract",
-    ).decode("utf-8")
+    contract_json = _programmatic_action_contract_json(ordered_entries)
 
     lines = [
         "# Agently programmatic Action SDK (Python 3.10+)",
@@ -1027,34 +1017,37 @@ def render_programmatic_action_sdk(
         "# Generated deterministically from the exact eligible Action catalog.",
         "from __future__ import annotations",
         "",
-        "from typing import Final, Literal, Protocol, TypedDict, Union, overload",
+        "from typing import Literal, Protocol, TypedDict, Union, overload",
         "from typing_extensions import NotRequired",
         "",
         'JSONValue = Union[None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]]',
-        f"ACTION_CONTRACTS_JSON: Final[str] = {json.dumps(contract_json, ensure_ascii=False)}",
-        "",
+        "# The following canonical JSON entries are the exhaustive Action contracts.",
     ]
+    for action_id, contract in json.loads(contract_json).items():
+        entry_json = canonical_lossless_json_bytes(
+            {action_id: contract},
+            label=f"programmatic Action SDK contract {action_id!r}",
+        ).decode("utf-8")
+        lines.append(f"# Action contract (JSON): {entry_json}")
+    lines.append("")
 
     rendered_types: list[tuple[str, str, str]] = []
     for index, entry in enumerate(ordered_entries, start=1):
         prefix = f"_Action{index:04d}"
         type_renderer = _PythonSchemaTypeRenderer(prefix)
-        input_type = type_renderer.render(entry["input_schema"], f"{prefix}Input")
         output_type = type_renderer.render(entry["output_schema"], f"{prefix}Output")
         lines.extend(type_renderer.declarations)
         if type_renderer.declarations:
             lines.append("")
-        if input_type != f"{prefix}Input":
-            lines.append(f"{prefix}Input = {input_type}")
         if output_type != f"{prefix}Output":
             lines.append(f"{prefix}Output = {output_type}")
-        if input_type != f"{prefix}Input" or output_type != f"{prefix}Output":
+        if output_type != f"{prefix}Output":
             lines.append("")
         callable_name = f"{prefix}Callable"
         lines.extend(
             [
                 f"class {callable_name}(Protocol):",
-                f"    async def __call__(self, action_input: {prefix}Input) -> {prefix}Output: ...",
+                f"    async def __call__(self, action_input: dict[str, JSONValue]) -> {prefix}Output: ...",
                 "",
             ]
         )
@@ -1078,7 +1071,7 @@ def render_programmatic_action_sdk(
             description_literal = json.dumps(entry["description"], ensure_ascii=False)
             lines.extend(
                 [
-                    f"    async def {action_id}(self, action_input: {prefix}Input) -> {prefix}Output:",
+                    f"    async def {action_id}(self, action_input: dict[str, JSONValue]) -> {prefix}Output:",
                     f"        {description_literal}",
                     "        ...",
                     "",
@@ -1106,6 +1099,25 @@ def render_programmatic_action_sdk(
     for entry in ordered_entries:
         lines.append(f"# await {entry['access_expression']}({{...}})")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _programmatic_action_contract_json(
+    entries: Sequence[ProgrammaticActionCatalogEntry],
+) -> str:
+    contract_payload = {
+        entry["action_id"]: {
+            "description": entry["description"],
+            "input_schema": entry["input_schema"],
+            "required_input_keys": entry["required_input_keys"],
+            "returns": entry["output_schema"],
+            "concurrency_mode": entry["concurrency_mode"],
+        }
+        for entry in sorted(entries, key=lambda item: item["action_id"])
+    }
+    return canonical_lossless_json_bytes(
+        contract_payload,
+        label="programmatic Action SDK contract",
+    ).decode("utf-8")
 
 
 class _PythonSchemaTypeRenderer:

@@ -183,6 +183,7 @@ from .action import (
     ActionDiagnostic,
     ActionPolicy,
     ActionPlanningRequest,
+    ActionPlanningObservation as ActionPlanningObservation,
     ActionExecutionRequest,
     ActionResult,
     ActionRunContext,
@@ -191,9 +192,10 @@ from .action import (
     ActionSideEffectLevel,
     ActionSpec,
     ActionStatus,
-    ProgrammaticActionCatalog,
+    ProgrammaticActionCatalog as ProgrammaticActionCatalog,
     ProgrammaticActionCatalogEntry,
     ProgrammaticActionDecision,
+    ProgrammaticActionObservation as ProgrammaticActionObservation,
 )
 
 from .capability import (
@@ -310,7 +312,7 @@ from .skill import (
     SkillRuntimeStreamItem,
     SkillSourceRequest,
     SkillSourceSnapshot,
-    SkillScriptAuthorization,
+    SkillScriptAuthorization as SkillScriptAuthorization,
     redact_skill_source,
 )
 
