@@ -1,4 +1,3 @@
-import pytest
 
 from agently.utils import DataFormatter
 

@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 

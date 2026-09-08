@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import copy
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from agently import Agently
-from agently.types.data import TaskWorkspaceFileRef
 
 
 def _terminal_payload(final_result: Any, *, strategy: str = "flat") -> dict[str, Any]:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from agently import Agently
 from agently.core import Action, PluginManager
-from agently.types.data import ActionCall, ActionDecision, ActionPolicy
+from agently.types.data import ActionDecision, ActionPolicy
 from agently.utils import Settings
 
 

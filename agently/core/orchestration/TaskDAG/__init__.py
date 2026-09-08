@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .TaskDAGExecutor import (
-    TaskDAGExecutor,
+from .TaskDAGExecutor import TaskDAGExecutor
+from .TaskDAGResolver import (
     _GRAPH_SCHEMA_VERSION,
     _TASK_ID_PATTERN,
-)
-from .TaskDAGResolver import (
     TaskDAGContext,
     TaskDAGHandler,
     TaskDAGResolver,

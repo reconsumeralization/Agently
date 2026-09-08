@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "release-checklist"
@@ -43,7 +43,7 @@ def main():
         )
         contract = Agently.skills_executor.install_skills(skill_root, trust_level="local")
         skill_id = str(contract["skill_id"])
-        print(f"install_status=ok")
+        print("install_status=ok")
         print(f"skill_id={skill_id}")
 
         # Inspect the normalized contract (guidance-only, no execution metadata).

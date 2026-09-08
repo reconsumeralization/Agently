@@ -14,7 +14,6 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import Any
 
 _O_PATH = getattr(os, "O_PATH", 0)
 

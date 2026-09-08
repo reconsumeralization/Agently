@@ -99,7 +99,7 @@ def demo_augmented_planning():
     turn = agent.input(
         "What is the price of a laptop after a 20% discount? Use the actions."
     )
-    records = agent.get_action_result(prompt=turn.prompt)
+    agent.get_action_result(prompt=turn.prompt)
     result = turn.get_result()
     print(result.get_text())
     agent.register_action_planning_handler(None)  # reset to default
@@ -196,7 +196,7 @@ def demo_execution_handler():
     agent.register_action_execution_handler(timed_execution_handler)
     agent.use_actions(["lookup_price", "apply_discount"])
     turn = agent.input("What is the 15% discounted price of a laptop? Use actions.")
-    records = agent.get_action_result(prompt=turn.prompt)
+    agent.get_action_result(prompt=turn.prompt)
     result = turn.get_result()
     print(result.get_text())
     agent.register_action_planning_handler(None)

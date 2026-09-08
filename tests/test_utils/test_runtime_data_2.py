@@ -5,7 +5,6 @@ import toml
 import datetime
 from pathlib import Path
 from unittest.mock import mock_open, patch
-from collections.abc import Mapping, Sequence
 
 from agently.utils.StateData import DictRef
 from agently.utils import StateData, StateDataNamespace

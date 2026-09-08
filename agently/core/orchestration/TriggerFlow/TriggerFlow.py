@@ -25,7 +25,7 @@ from typing import Callable, Any, Literal, TYPE_CHECKING, overload, AsyncGenerat
 if TYPE_CHECKING:
     from .Execution import TriggerFlowExecution
     from .Chunk import TriggerFlowHandler
-    from agently.types.data import ExecutionResourceRequirement, RunContext, SerializableValue
+    from agently.types.data import ExecutionResourceRequirement, RunContext
 
 from agently.types.trigger_flow import (
     TriggerFlowBlockData,

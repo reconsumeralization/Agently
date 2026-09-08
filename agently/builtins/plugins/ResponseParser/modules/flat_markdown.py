@@ -23,7 +23,9 @@ import re
 from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
-from agently.core.model.StructuredOutputParser import parse_flat_markdown_output
+from agently.core.model.StructuredOutputParser import (
+    parse_flat_markdown_output as parse_flat_markdown_output,
+)
 
 
 class FlatMarkdownStreamingParser:

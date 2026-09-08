@@ -48,10 +48,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
-from agently.core.application.AgentExecution import RuntimeStageStallError
-from agently.utils import DataFormatter
-from examples.dynamic_task._shared import configure_model
+from agently import Agently  # noqa: E402
+from agently.core.application.AgentExecution import RuntimeStageStallError  # noqa: E402
+from agently.utils import DataFormatter  # noqa: E402
+from examples.dynamic_task._shared import configure_model  # noqa: E402
 
 
 RUNTIME_ROOT = ROOT / ".example_runtime" / "agent_auto_orchestration" / "github_issue_intake"

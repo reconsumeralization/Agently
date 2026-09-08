@@ -20,7 +20,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parent
 if str(EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_DIR))
 
-from _business_ladder_runtime import (
+from _business_ladder_runtime import (  # noqa: E402
     ROOT,
     BusinessCase,
     all_outputs,
@@ -30,8 +30,8 @@ from _business_ladder_runtime import (
     require_number,
     run_business_cases,
 )
-from agently import Agently
-from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
+from agently import Agently  # noqa: E402
+from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor  # noqa: E402
 
 
 async def mcp_add(context: Mapping[str, Any]) -> dict[str, Any]:

@@ -26,7 +26,10 @@ import re
 from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
-from agently.core.model.StructuredOutputParser import _extract_json_block, parse_hybrid_output
+from agently.core.model.StructuredOutputParser import (
+    _extract_json_block as _extract_json_block,
+    parse_hybrid_output as parse_hybrid_output,
+)
 
 
 class HybridStreamingParser:

@@ -106,8 +106,6 @@ from .state import (
     normalize_options_state,
     record_consumed_option as state_record_consumed_option,
     route_options as state_route_options,
-    set_execution_goals,
-    set_success_criteria,
     task_goal as state_task_goal,
     task_success_criteria as state_task_success_criteria,
     task_target as state_task_target,

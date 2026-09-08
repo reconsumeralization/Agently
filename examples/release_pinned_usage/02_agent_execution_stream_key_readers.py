@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from examples.release_pinned_usage._local_requesters import (
+from examples.release_pinned_usage._local_requesters import (  # noqa: E402
     PinnedUsageStructuredRequester,
     create_specific_stream_agent,
     create_structured_agent,

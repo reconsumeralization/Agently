@@ -14,7 +14,6 @@
 
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
@@ -29,7 +28,6 @@ from agently.core import (
     PolicyApprovalManager,
     PluginManager,
     EventCenter,
-    Tool,
     TriggerFlow,
     Prompt,
     ModelRequest,

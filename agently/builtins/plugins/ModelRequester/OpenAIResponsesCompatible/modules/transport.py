@@ -26,7 +26,7 @@ from agently.types.data import AgentlyRequestData, SerializableValue
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    pass
 
 
 class OpenAIResponsesCompatibleTransportMixin:

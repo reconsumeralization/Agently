@@ -35,9 +35,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
-from agently.core import ModelRequestResult
-from examples.dynamic_task._shared import configure_model
+from agently import Agently  # noqa: E402
+from agently.core import ModelRequestResult  # noqa: E402
+from examples.dynamic_task._shared import configure_model  # noqa: E402
 
 
 def build_result_request() -> ModelRequestResult:

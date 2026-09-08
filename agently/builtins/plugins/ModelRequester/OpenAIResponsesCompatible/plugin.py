@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from httpx import AsyncClient
+from httpx import AsyncClient as AsyncClient
 
 from agently.types.plugins import ModelRequester
 from agently.types.settings import OpenAIResponsesCompatibleSettings as TypedOpenAIResponsesCompatibleSettings
@@ -27,7 +27,6 @@ from .modules.handlers import OpenAIResponsesCompatibleHandlersMixin
 from .modules.request_builder import OpenAIResponsesCompatibleRequestBuilderMixin
 from .modules.response_adapter import OpenAIResponsesCompatibleResponseAdapterMixin
 from .modules.transport import OpenAIResponsesCompatibleTransportMixin
-from .modules.types import OpenAIResponsesCompatibleSettings
 
 if TYPE_CHECKING:
     from agently.core.model.Prompt import Prompt

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from httpx import AsyncClient
+from httpx import AsyncClient as AsyncClient
 
 from agently.types.plugins import ModelRequester
 from agently.types.settings import AnthropicCompatibleSettings as TypedAnthropicCompatibleSettings
@@ -27,7 +27,6 @@ from .modules.handlers import AnthropicCompatibleHandlersMixin
 from .modules.request_builder import AnthropicCompatibleRequestBuilderMixin
 from .modules.response_adapter import AnthropicCompatibleResponseAdapterMixin
 from .modules.transport import AnthropicCompatibleTransportMixin
-from .modules.types import AnthropicCompatibleSettings
 
 if TYPE_CHECKING:
     from agently.core.model.Prompt import Prompt

@@ -17,7 +17,7 @@ import uuid
 import copy
 from asyncio import Event, Semaphore
 
-from typing import Callable, Any, Literal, TYPE_CHECKING, overload, cast, TypeAlias
+from typing import Any, Literal, TYPE_CHECKING, overload, cast, TypeAlias
 from typing_extensions import Self
 
 

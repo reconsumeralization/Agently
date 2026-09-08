@@ -38,12 +38,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dotenv import find_dotenv, load_dotenv
+from dotenv import find_dotenv, load_dotenv  # noqa: E402
 
 load_dotenv(find_dotenv(usecwd=True))
 
-from agently import Agently
-from agently.utils.ModelPool import resolve_model_pool_settings
+from agently import Agently  # noqa: E402
+from agently.utils.ModelPool import resolve_model_pool_settings  # noqa: E402
 
 
 def _check_env():

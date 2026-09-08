@@ -15,8 +15,8 @@ if str(ROOT) not in sys.path:
 if str(EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_DIR))
 
-from agently import Agently
-from legacy_agently_script_upgrade import TASK_MODEL_KEY, configure_agent_model_pool
+from agently import Agently  # noqa: E402
+from legacy_agently_script_upgrade import TASK_MODEL_KEY, configure_agent_model_pool  # noqa: E402
 
 
 TASK_ROOT = Path("agent-task-workspaces/goal-effort-public-stream").resolve()
