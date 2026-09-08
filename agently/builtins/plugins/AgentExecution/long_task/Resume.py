@@ -562,6 +562,18 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         state = await bound_record_store.get_snapshot(cls._resume_run_id(str(task_id)))
         if not isinstance(state, dict):
             raise ValueError(f"No resumable AgentTask snapshot was found for task_id '{ task_id }'.")
+        return cls._from_resume_state(
+            agent, task_id, state, task_workspace=bound_task_workspace, record_store=bound_record_store,
+        )
+
+    @classmethod
+    def _from_resume_state(
+        cls: type[_AgentTaskT], agent: "BaseAgent", task_id: str, state: dict[str, Any], *,
+        task_workspace: TaskWorkspace | None, record_store: RecordStore,
+    ) -> _AgentTaskT:
+        """Rebind trusted built-in task state without loading executable code."""
+        bound_task_workspace = task_workspace
+        bound_record_store = record_store
         manifest = state.get("manifest")
         if not isinstance(manifest, dict) or not manifest.get("goal"):
             raise ValueError(f"No resumable AgentTask snapshot was found for task_id '{ task_id }'.")

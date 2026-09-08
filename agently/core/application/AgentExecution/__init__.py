@@ -21,11 +21,13 @@ from .Context import (
     normalize_execution_lineage,
 )
 from .PromptDraft import AgentExecutionPromptDraft
+from .Control import AgentExecutionPaused as AgentExecutionPaused
 from .Result import AgentExecutionResult
 from .Review import AgentReviewError
 from .Stream import AgentExecutionStream
 
 __all__ = [
+    "AgentExecutionPaused",
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
     "AgentExecutionPromptDraft",

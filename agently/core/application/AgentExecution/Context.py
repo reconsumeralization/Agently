@@ -244,6 +244,15 @@ class AgentExecutionContext:
         self.action_scope: dict[str, Any] = {}
         self._skill_script_exec_authorizations: dict[str, dict[str, Any]] = {}
         self.action_artifact_recall_records: list[dict[str, Any]] = []
+        from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+        parent_context = get_current_agent_execution_context()
+        self._parent_execution_context = (
+            parent_context if isinstance(parent_context, AgentExecutionContext)
+            and parent_context.execution_id != execution_id else None
+        )
+        self._dispatched_action_ids: set[str] = set()
+        self._resource_handle_ids: set[str] = set()
+        self._rework_blocked_action_ids: set[str] = set()
         self.action_records: list[dict[str, Any]] = []
         self._seen_action_record_keys: set[str] = set()
         # Depth of this AgentExecution in a nested agent-step chain (root = 0).
@@ -472,6 +481,27 @@ class AgentExecutionContext:
                 }
             )
         self.action_artifact_recall_records = normalized
+
+    def _check_action_replay(self, action_id: str, *, replay_safe: bool) -> None:
+        context: AgentExecutionContext | None = self
+        while context is not None:
+            if action_id in context._rework_blocked_action_ids and not replay_safe:
+                raise PermissionError(
+                    f"Action {action_id!r} was previously dispatched and has no replay_safe authorization for rework."
+                )
+            context = context._parent_execution_context
+
+    def _record_action_dispatch(self, action_id: str) -> None:
+        context: AgentExecutionContext | None = self
+        while context is not None:
+            context._dispatched_action_ids.add(action_id)
+            context = context._parent_execution_context
+
+    def _record_resource_handles(self, handle_ids: list[str]) -> None:
+        context: AgentExecutionContext | None = self
+        while context is not None:
+            context._resource_handle_ids.update(handle_ids)
+            context = context._parent_execution_context
 
     def record_action_records(
         self,

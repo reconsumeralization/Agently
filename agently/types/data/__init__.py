@@ -335,6 +335,8 @@ from .record_store import (
 )
 
 from .agent_execution import (
+    AgentExecutionControlResult as AgentExecutionControlResult,
+    AgentExecutionControlCapabilities as AgentExecutionControlCapabilities,
     AgentExecutionName,
     ActionArtifactReleaseDiagnostic,
     ActionArtifactReleaseDiagnostics,

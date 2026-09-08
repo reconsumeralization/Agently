@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING
 from typing_extensions import assert_type
 
 from agently import Agent, Agently, __version__
-from agently.types.data import AgentArtifactContext, AgentReviewContext
+from agently.types.data import (
+    AgentArtifactContext,
+    AgentExecutionControlCapabilities,
+    AgentReviewContext,
+)
 from agently.types.plugins import AgentExecution
 
 
@@ -29,12 +33,22 @@ assert_type(agent.create_execution("plan"), AgentExecution)
 assert_type(execution.review(), AgentExecution)
 assert_type(execution.review(rules="Check the declared result contract.", on_fail="block"), AgentExecution)
 assert_type(execution.artifact("report.md"), AgentExecution)
+assert_type(execution.revision, int)
+assert_type(execution.control_capabilities, AgentExecutionControlCapabilities)
+assert_type(execution.get_result(revision=0).revision, int)
 
 
 if TYPE_CHECKING:
-    from agently.builtins.plugins.AgentExecution import AgentExecution as BundledExecution
+    from agently.builtins.plugins.AgentExecution import (
+        AgentExecution as BundledExecution,
+    )
 
     plugin_contract: AgentExecution = BundledExecution(agent)
+
+    async def check_controls(run: AgentExecution) -> None:
+        assert_type(await run.async_rework("Revise", max_reworks=2, allow_replay=False), object)
+        assert_type(await run.async_save(), dict[str, object])
+        assert_type(await run.async_load({}), AgentExecution)
 
     def review_handler(_result: object, context: AgentReviewContext) -> bool:
         assert_type(context.execution, AgentExecution)

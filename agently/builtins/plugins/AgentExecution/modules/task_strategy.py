@@ -21,6 +21,7 @@ from agently.utils import DataFormatter
 from agently.utils.LanguagePolicy import language_policy_from_prompt_snapshot
 
 from .runtime_guidance import drain_pending_guidance_to_task
+from .limits import execution_wall_clock_limits
 from .goal_preparation import PreparedGoal, prepare_missing_goal, retain_prepared_goal
 
 if TYPE_CHECKING:
@@ -351,6 +352,8 @@ async def _run_agent_task_route_impl(
     # Keep the original execution deadline across prerequisite preparation and
     # task construction. This process-local bound is not a recovery option.
     max_seconds = execution.limits.get("max_seconds")
+    if execution.revision:
+        max_seconds, _ = execution_wall_clock_limits(execution)
     task._execution_deadline_monotonic = (
         execution.execution_context.started_at + float(max_seconds) if max_seconds is not None else None
     )
@@ -437,6 +440,8 @@ async def _run_agent_task_route_impl(
     if isinstance(task_meta.get("record_refs"), dict):
         execution.record_refs["agent_task"] = task_meta["record_refs"]
     execution.status = "success" if task.status == "completed" else str(task.status)
+    from ..long_task.Rework import retain_task_production
+    retain_task_production(execution)
     return task.result
 
 

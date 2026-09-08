@@ -28,6 +28,52 @@ if TYPE_CHECKING:
 _GUIDANCE_PREVIEW_CHARS = 800
 
 
+async def interrupt(
+    owner: "AgentExecution", content: str, *, author: str | None = None,
+) -> dict[str, object]:
+    """Supplement a future consumer, using the existing guidance/context owners."""
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Execution interrupt content must be non-empty text.")
+    async with _guidance_lock(owner):
+        receipt = _new_guidance_ref(owner, content, author=author, target="execution", meta={})
+        owner.guidance_items.append(receipt)
+        _record_guidance_diagnostic(owner, "received")
+        await _emit_guidance(owner, "agent_execution.guidance.received", receipt)
+        if owner._completed or owner._closed or owner._cancel_requested or owner._pause_boundary == "candidate_ready":
+            receipt["status"] = "ignored"
+            receipt["not_applied_reason"] = "no_future_producer_boundary"
+            await _emit_guidance(owner, "agent_execution.guidance.ignored", receipt)
+            return cast(dict[str, object], DataFormatter.sanitize(receipt))
+        task = owner.task_record
+        if task is not None:
+            forwarded = await task.async_add_guidance(
+                content, guidance_id=receipt["id"], author=author,
+                meta={"execution_id": owner.id},
+            )
+            _merge_task_guidance(owner, receipt, forwarded)
+            await _emit_guidance(owner, "agent_execution.guidance.forwarded", receipt)
+            return cast(dict[str, object], DataFormatter.sanitize(receipt))
+        owner.task_context.put(
+            role="information", content=content, entry_id=receipt["id"], required=True,
+            source_ref=receipt["id"], metadata={"source": "execution_interrupt", "author": author},
+        )
+        receipt["context_entry_id"] = receipt["id"]
+        receipt["status"] = "inserted"
+        owner._pending_guidance.append(receipt)
+        await _emit_guidance(owner, "agent_execution.guidance.inserted", receipt)
+        return cast(dict[str, object], DataFormatter.sanitize(receipt))
+
+
+def record_interrupt_consumption(owner: "AgentExecution", package: Any, *, request_id: str) -> None:
+    refs = {str(block.source_ref) for block in package.blocks}
+    for receipt in owner.guidance_items:
+        if receipt.get("status") == "inserted" and receipt.get("context_entry_id") in refs:
+            receipt["status"] = "consumed"
+            receipt["request_id"] = request_id
+            _record_guidance_diagnostic(owner, "consumed")
+    owner._pending_guidance = [item for item in owner._pending_guidance if item.get("status") != "consumed"]
+
+
 async def add_guidance(
     owner: "AgentExecution",
     content: Any,

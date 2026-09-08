@@ -33,6 +33,8 @@ from agently.types.data import (
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
     AgentExecutionStatus,
+    AgentExecutionControlResult,
+    AgentExecutionControlCapabilities,
     AgentExecutionStrategy,
     AgentInteractionHandler,
     AgentReviewHandler,
@@ -70,6 +72,7 @@ class AgentExecution(Protocol):
     """Response-style contract for one bounded Agent execution object."""
 
     id: str
+    revision: int
     agent: BaseAgent
     plugin_manager: PluginManager
     settings: Settings
@@ -338,7 +341,52 @@ class AgentExecution(Protocol):
         parent_run_context: RunContext | None = None,
     ) -> "AgentExecution": ...
 
-    def get_result(self) -> "AgentExecutionResult": ...
+    def get_result(self, *, revision: int | None = None) -> "AgentExecutionResult": ...
+
+    @property
+    def control_capabilities(self) -> AgentExecutionControlCapabilities: ...
+
+    async def async_rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object: ...
+
+    def rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object: ...
+
+    async def async_pause(self) -> AgentExecutionControlResult: ...
+
+    async def async_interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]: ...
+
+    def interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]: ...
+
+    def pause(self) -> AgentExecutionControlResult: ...
+
+    async def async_resume(self) -> object: ...
+
+    def resume(self) -> object: ...
+
+    def save(self) -> dict[str, object]: ...
+
+    async def async_save(self) -> dict[str, object]: ...
+
+    def load(self, snapshot: Mapping[str, object]) -> "AgentExecution": ...
+
+    async def async_load(self, snapshot: Mapping[str, object]) -> "AgentExecution": ...
+
+    async def async_cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult: ...
+
+    def cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult: ...
+
+    async def async_close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult: ...
+
+    def close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult: ...
 
     def validate(self, handler: OutputValidateHandler) -> "AgentExecution":
         """Hard-check the final returned output; never intermediate producer steps."""

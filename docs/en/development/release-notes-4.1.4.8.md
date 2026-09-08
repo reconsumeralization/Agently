@@ -108,8 +108,12 @@ Refactor checkpoint: the latest 26/27 runs completed framework delivery but
 semantic inspection found an invented attendance threshold and an expanded
 deployment restriction, respectively. Example 28 prepared its missing contract
 but timed out in later production. These are retained Prompt-audit findings,
-not semantic release acceptance. Unified rework and control/snapshot APIs also
-remain pending; this candidate is not yet ready for release.
+not semantic release acceptance. Unified execution controls now cover settled outer
+pause/resume/save/load, cancellation/close, supplementary information and same-object
+rework revisions with retained readers and cumulative budgets. Active-child/provider
+checkpoints, disconnected clarification and nested-budget restoration remain unsupported.
+See [execution controls](../start/auto-orchestration.md#execution-controls).
+This checkpoint does not establish release readiness.
 
 ## Compatibility And Release Gate
 

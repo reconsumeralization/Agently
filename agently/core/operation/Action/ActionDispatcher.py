@@ -28,7 +28,7 @@ from agently.core.operation.ExecutionResource import (
     ExecutionResourceError,
 )
 from agently.core.operation.PolicyApproval import merge_access_control_policy
-from agently.core.runtime.RuntimeContext import bind_runtime_context
+from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_agent_execution_context
 from agently.types.data import (
     ActionApproval,
     ActionCall,
@@ -45,6 +45,7 @@ from agently.types.data import (
 from agently.utils import Settings, SettingsNamespace
 
 from .ActionRegistry import ActionRegistry
+from agently.core.application.AgentExecution.Context import AgentExecutionContext
 
 
 class ActionDispatcher:
@@ -722,6 +723,8 @@ class ActionDispatcher:
                 "executor_type": str(spec.get("executor_type", "")),
             }
 
+        raw_context = get_current_agent_execution_context()
+        execution_context = raw_context if isinstance(raw_context, AgentExecutionContext) else None
         original_action_input = dict(action_input)
         sanitized_override, stripped_policy_keys = self._sanitize_policy_override(
             policy_override,
@@ -795,6 +798,13 @@ class ActionDispatcher:
                 status="error",
                 error=message,
             )
+        if execution_context is not None:
+            try:
+                execution_context._check_action_replay(action_id, replay_safe=spec.get("replay_safe") is True)
+            except PermissionError as error:
+                return self._execution_resource_error_result(
+                    spec=spec, action_call=action_call, status="blocked", error=str(error),
+                )
         policy = self._merge_policy(execution_settings, spec, sanitized_override)
         if isinstance(trusted_policy_override, dict) and trusted_policy_override:
             # Host-trusted grants (e.g. a policy approval resolved through the
@@ -907,6 +917,8 @@ class ActionDispatcher:
                     owner_id=str(requirement.get("owner_id", "")),
                 )
                 ensured_handles.append(handle)
+                if execution_context is not None:
+                    execution_context._record_resource_handles([str(handle.get("handle_id", ""))])
                 resource_key = str(handle.get("resource_key", requirement.get("resource_key", "")))
                 if resource_key:
                     environment_handles[resource_key] = handle
@@ -992,6 +1004,9 @@ class ActionDispatcher:
                 status="error",
                 error=str(error),
             )
+
+        if execution_context is not None:
+            execution_context._record_action_dispatch(action_id)
 
         timeout = policy.get("timeout_seconds", None)
         timeout_seconds = float(timeout) if isinstance(timeout, (int, float)) else 0.0

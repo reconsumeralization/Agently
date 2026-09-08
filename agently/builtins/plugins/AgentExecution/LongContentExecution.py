@@ -13,6 +13,13 @@ class LongContentExecution(AgentExecution):
     supported_strategies = frozenset({"auto"})
     DEFAULT_SETTINGS = {"max_sections": 12, "continuity_chars": 4_000}
 
+    def _assert_rework_supported(self) -> None:
+        if self._producer_state.get("kind") != "long_content":
+            raise RuntimeError("Long-content rework requires its retained plan and sections.")
+
+    async def _async_rework_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        return await self._async_produce(options)
+
     async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
         settings = SettingsNamespace(self.request.settings, f"plugins.AgentExecution.{self.name}")
         config = LongContentExecutionConfig(
