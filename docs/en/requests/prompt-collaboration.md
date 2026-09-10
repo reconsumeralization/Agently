@@ -13,6 +13,62 @@ run or a production-approved business plan. The flow and two tightly related
 node contracts are shown together to inspect their handoff. Adapt the group to
 the question; neither one node nor three nodes is a mandatory presentation limit.
 
+## Multi-Round Progress and Changes
+
+When Prompt collaboration, Flow design or experiment evaluation takes several
+rounds, begin each substantive round's response with a current-item table and
+a change-log table, before the detailed design or findings.
+
+Put **Status on the left and Item on the right**. Keep item numbers stable.
+Show additions, modifications, removals and abandonment explicitly: *new text*,
+~~old text~~ → *replacement*, and ❌ ~~abandoned item~~, accompanied by text
+status labels. Keep confirmed decisions distinct from applied or verified work.
+Explain whether removal eliminates duplicate work or abandons a goal.
+
+Record **time with timezone, discussion version, affected item, change/reason,
+and implementation status**. D01/D02 can simply mean discussion revisions.
+Use actual known times; label unavailable historical times instead of inventing
+them. Append later decisions and outcomes, including implementation, removal
+and reopening, so earlier history remains available. Mark proposed changes
+as pending until decided under the existing collaboration agreement.
+
+The following is a synthetic presentation example; timestamps and states are
+illustrative, not evidence of actual work. These tables are for developer
+collaboration, not fields to add to the application's model prompt.
+
+**Current items · D03**
+
+| Status | Item |
+|---|---|
+| ✅ Confirmed | 1. Business goal and scope |
+| 🔄 In progress · modified | 2. ~~Review every request separately~~ → *Review coupled requests together* |
+| ⏳ Pending | 3. Evaluate representative scenarios |
+| ❌ Abandoned | 4. ~~Add an unused summary request~~ |
+| ➖ Removed | 5. ~~Store a duplicate input snapshot~~ |
+| 🆕 Pending · added | 6. *Check early retrieval deduplication and concurrency limits* |
+
+**Change log · example times in UTC+08:00**
+
+| Time | Discussion version | Item | Change and reason | Implementation status |
+|---|---|---|---|---|
+| 2026-09-07 14:10 | D01 | 1–5 | Establish initial scope. | ✅ Recorded |
+| 2026-09-07 14:25 | D03 | 2 | Joint review makes dependencies easier to inspect. | ✅ Applied to review plan |
+| 2026-09-07 14:25 | D03 | 4 | No consumer for the summary. | ❌ Abandoned; removed from design |
+| 2026-09-07 14:25 | D03 | 5 | Existing records already preserve the input. | ✅ Duplicate removed; tracing retained |
+| 2026-09-07 14:25 | D03 | 6 | Early retrieval requires controlled execution. | ⏳ Confirmed; not implemented |
+| 2026-09-07 14:40 | D03 | 6 | Propose payload-based deduplication. | 💬 Awaiting confirmation |
+
+Highlight only this round's differences in the current-item table; retain older
+wording in the change history. Show the round's log delta with access to the
+full record. When nothing changed, say so. Reopen completed items explicitly
+when new evidence invalidates them.
+
+Reuse an existing plan, review note or experiment record. Short work can keep
+the tables in the conversation; longer work may use an existing project file
+for handoff and recovery. Group large lists by phase, keeping unresolved and
+changed work visible. Do not require another tracker, rigid data schema or
+approval gate. Routine tool updates do not each create a discussion version.
+
 ## 1. Confirm the Request Inventory
 
 **Scenario:** turn meeting-action follow-up product requirements into a design

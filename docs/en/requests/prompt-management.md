@@ -29,6 +29,13 @@ It also applies to explicit Prompt review and solution design. Choose it because
 contracts and handoffs can answer the question, not because particular words
 appear; an unrelated mechanical fix does not require this review.
 
+For multi-round work, begin each substantive response with a status-left/item-right
+table and a timestamped, versioned change-log table. Distinguish confirmed,
+applied, verified and abandoned changes; reuse existing records. See
+[the multi-round guidance and example](prompt-collaboration.md#multi-round-progress-and-changes).
+
+Follow an explicit request to batch reviews, skip details, or delegate decisions.
+
 For a complex workflow, first show the entire in-scope flow from source inputs
 to final consumers. Highlight and label model nodes and their responsibilities;
 distinguish Host, Action/tool and human work. Label key input/output edges,
