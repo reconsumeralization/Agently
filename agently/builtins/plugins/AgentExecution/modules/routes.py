@@ -18,7 +18,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from agently.utils import DataFormatter
 
-from .long_output import LongOutputDelivery, normalized_terminal
+from .long_output import LongOutputDelivery, LongOutputError, normalized_terminal
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -192,14 +192,16 @@ async def run_model_request_route(
                     meta={**stream_meta, "specific_event": event},
                 )
     if long_output_delivery is not None:
-        terminal = normalized_terminal(await result.async_get_meta())
-        if terminal == "length":
+        if long_output_delivery.needs_continuation(
+            await result.async_get_meta(), await result.async_get_text(),
+        ):
             await long_output_delivery.accept_initial(
                 result,
                 streaming_events=structured_stream_events,
             )
             data = await long_output_delivery.run_continuation_flow()
         else:
+            long_output_delivery.validate_complete_carrier(await result.async_get_text())
             data = await result.async_get_data(
                 type=type,
                 ensure_keys=ensure_keys,
@@ -208,6 +210,13 @@ async def run_model_request_route(
                 max_retries=max_retries,
                 raise_ensure_failure=raise_ensure_failure,
             )
+            accepted_result = result._accepted_retry_result or result
+            if accepted_result is not result:
+                if long_output_delivery.needs_continuation(
+                    await accepted_result.async_get_meta(), await accepted_result.async_get_text(),
+                ):
+                    raise LongOutputError("A length-limited validation replacement cannot use the ordinary completion path.")
+                long_output_delivery.validate_complete_carrier(await accepted_result.async_get_text())
             validation_handlers = execution.request.extension_handlers.get(
                 "validate_handlers",
                 [],

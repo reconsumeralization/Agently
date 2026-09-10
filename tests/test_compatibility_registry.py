@@ -95,6 +95,8 @@ def test_in_development_manifest_declares_4_1_4_8_owner_boundaries() -> None:
 
     execution_contract = manifest["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution.ensure_long_output" in execution_contract["surface"]
+    assert "AgentExecution.auto_continue" in execution_contract["surface"]
+    assert execution_contract["preferred_continuation_surface"] == "AgentExecution.auto_continue"
     assert "first request keeps its original contract" in execution_contract["contract"]
     assert "cannot be combined with an explicit AgentTask strategy" in execution_contract["contract"]
 

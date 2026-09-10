@@ -32,6 +32,7 @@ from .production import ProductionOptions
 from .lifecycle import pause_at, resume_route, release_owned_resources
 from .result_views import _business_data_from_full_data
 from .output_validation import validate_final_output
+from .field_long_content import has_long_content, run_field_long_content
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
 from .review import run_declared_reviews
@@ -78,6 +79,7 @@ async def async_execute_route(
         request_owned_validation = (
             route == "model_request"
             and owner.__class__._async_produce is AgentExecution._async_produce
+            and not has_long_content(owner.request.prompt.to_prompt_object().output)
         )
         registered = owner.request.extension_handlers.get("validate_handlers", [])
         local_handlers = owner.request.extension_handlers.get(inherit=False)
@@ -187,12 +189,15 @@ async def produce_default_route(
     if route == "agent_task":
         result = await run_agent_task_route(owner, route_meta)
     elif route == "model_request":
-        result = await run_model_request_route(
-            owner, type=options.type, ensure_keys=options.ensure_keys,
-            ensure_all_keys=options.ensure_all_keys, validate_handler=options.validate_handler,
-            key_style=options.key_style, max_retries=options.max_retries,
-            raise_ensure_failure=options.raise_ensure_failure,
-        )
+        if has_long_content(owner.request.prompt.to_prompt_object().output):
+            result = await run_field_long_content(owner, options)
+        else:
+            result = await run_model_request_route(
+                owner, type=options.type, ensure_keys=options.ensure_keys,
+                ensure_all_keys=options.ensure_all_keys, validate_handler=options.validate_handler,
+                key_style=options.key_style, max_retries=options.max_retries,
+                raise_ensure_failure=options.raise_ensure_failure,
+            )
     else:
         raise NotImplementedError(f"Execution {owner.name!r} has no producer for route {route!r}.")
     if route != "agent_task":

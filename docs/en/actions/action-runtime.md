@@ -161,7 +161,7 @@ it against the original contract.
 
 Older custom planning handlers or ActionFlow plugins that return only
 `next_action="response"` without a response value keep the compatible final
-ModelRequest fallback. `ensure_long_output` also keeps its independent delivery
+ModelRequest fallback. `auto_continue` also keeps its independent delivery
 path for now. These are fallback paths, not the default ActionLoop topology.
 
 For application code, prefer `enable_*` helpers when the goal is to give the

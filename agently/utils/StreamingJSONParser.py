@@ -19,6 +19,7 @@ import copy
 
 from agently.utils import DataLocator, DataPathBuilder, StreamingJSONCompleter
 from agently.types.data import StreamingData
+from ._json_prefix import PrefixEvidence, inspect_json_prefix
 
 if TYPE_CHECKING:
     from agently.types.data import PromptOutputStructure
@@ -38,6 +39,28 @@ class StreamingJSONParser:
     """
 
     DEFAULT_MAX_INCOMPLETE_PARSE_CHARS = 1024
+
+    @staticmethod
+    def _inspect_json_prefix(text: str, *, terminal_complete: bool = False) -> PrefixEvidence:
+        """Return exact closed paths and an open string's decoded/escape state.
+
+        This strict JSON evidence is separate from provisional JSON5 repair.
+        It raises ValueError for malformed, duplicate-key or trailing content.
+        """
+        start = text.lstrip()
+        if not start.startswith("```"):
+            return inspect_json_prefix(text, terminal_complete=terminal_complete)
+        first_line, separator, content = start.partition("\n")
+        if first_line.lower().rstrip("\r") not in {"```", "```json"}:
+            raise ValueError("Unsupported JSON framing")
+        if not separator:
+            return PrefixEvidence()
+        framing_complete = content.rstrip().endswith("\n```")
+        if framing_complete:
+            content = content.rstrip()[:-4]
+        evidence = inspect_json_prefix(content, terminal_complete=terminal_complete)
+        evidence.root_complete = evidence.root_complete and framing_complete
+        return evidence
 
     def __init__(
         self,

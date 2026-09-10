@@ -86,6 +86,8 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(agent.input("next turn").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.input("reuse draft").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.ensure_long_output(), AgentExecution)
+        assert_type(execution.auto_continue(), AgentExecution)
+        assert_type(execution.auto_continue(False).input("updated draft"), AgentExecution)
         assert_type(execution.artifact("result.txt"), AgentExecution)
         assert_type(agent.goal("ship", ["tests pass"]), AgentExecution)
         assert_type(agent.goal("explain", turn_on_long_task=False), AgentExecution)

@@ -32,11 +32,13 @@ from agently.builtins.plugins.PromptGenerator.modules.output_contract import (
 from agently.core.model import Prompt
 from agently.core.orchestration import TriggerFlow
 from agently.types.data import OutputValidateContext, StreamingData
-from agently.utils import DataFormatter, DataLocator, DataPathBuilder
+from agently.utils import DataFormatter, DataLocator, DataPathBuilder, StreamingJSONParser
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
+    from agently.core.model import ModelRequest
     from agently.types.data import OutputValidateHandler
+    from .structured_string_continuation import StructuredStringContinuation
 
 
 _TRUSTED_COMPLETION_SOURCES = {"observed_boundary", "final_reconciliation"}
@@ -97,7 +99,7 @@ class _ContinuationEnvelope(BaseModel):
     anchor: str
     updates: list[_ContinuationUpdate] = Field(default_factory=list)
     state_summary: str = ""
-    is_final: bool
+    completion: Literal["complete", "incomplete", "undetermined"]
 
 
 @dataclass(frozen=True)
@@ -271,7 +273,7 @@ def _compile_slots(output_schema: Any) -> tuple[list[_AssemblySlot], Any]:
     return slots, initial
 
 
-def normalized_terminal(meta: Mapping[str, Any] | None) -> Literal["complete", "length"]:
+def normalized_terminal(meta: Mapping[str, Any] | None) -> Literal["complete", "length", "unknown"]:
     terminal = dict(meta or {})
     finish_reason = str(terminal.get("finish_reason") or "").strip().lower()
     status = str(terminal.get("status") or "").strip().lower()
@@ -281,15 +283,29 @@ def normalized_terminal(meta: Mapping[str, Any] | None) -> Literal["complete", "
         if isinstance(incomplete_details, Mapping)
         else ""
     )
-    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
-        return "length"
-    if status == "incomplete" and incomplete_reason in {"", "max_output_tokens"}:
-        return "length"
-    if finish_reason in {"stop", "end_turn"} or status in {"completed", "success", "succeeded"}:
-        return "complete"
+    complete_reasons = {"stop", "end_turn"}
+    length_reasons = {"length", "max_tokens", "max_output_tokens"}
+    complete_statuses = {"completed", "success", "succeeded"}
+    # Explicit negative/unknown facts must not be masked by a positive sibling.
+    supported = (
+        finish_reason in {"", *complete_reasons, *length_reasons}
+        and status in {"", "incomplete", *complete_statuses}
+        and incomplete_reason in {"", "max_output_tokens"}
+    )
+    if supported:
+        if finish_reason in length_reasons or incomplete_reason == "max_output_tokens":
+            return "length"
+        if status == "incomplete":
+            if not finish_reason:
+                return "unknown"
+        elif finish_reason in complete_reasons or status in complete_statuses:
+            return "complete"
+        elif not finish_reason and not status:
+            return "unknown"
     raise LongOutputError(
         "ensure_long_output requires an explicit normalized terminal fact; "
-        f"received status={status or 'missing'}, finish_reason={finish_reason or 'missing'}."
+        f"received status={status or 'missing'}, finish_reason={finish_reason or 'missing'}, "
+        f"incomplete_reason={incomplete_reason or 'missing'}."
     )
 
 
@@ -306,23 +322,32 @@ class LongOutputDelivery:
         key_style: Literal["dot", "slash"],
         max_retries: int,
         raise_ensure_failure: bool,
+        request: "ModelRequest | None" = None,
     ) -> None:
         self.execution = execution
+        self.request = request if request is not None else execution.request
+        self.is_stage = request is not None
+        self.storage_id = execution.id
+        self.workspace = (
+            execution.task_workspace._derive(execution_id=f"{execution.id}-long-output")
+            if self.is_stage else execution.task_workspace
+        )
+        self.meta: dict[str, Any] = {}
         self.ensure_keys = ensure_keys
         self.ensure_all_keys = ensure_all_keys
         self.validate_handler = validate_handler
         self.key_style: Literal["dot", "slash"] = key_style
         self.max_retries = max_retries
         self.raise_ensure_failure = raise_ensure_failure
-        current_prompt = execution.request.prompt.get()
+        current_prompt = self.request.prompt.get()
         self.prompt_snapshot = (
             dict(current_prompt)
             if isinstance(current_prompt, Mapping)
             else dict(execution.prompt_snapshot)
         )
         self.validation_prompt = Prompt(
-            execution.request.plugin_manager,
-            execution.request.settings,
+            self.request.plugin_manager,
+            self.request.settings,
             prompt_dict=self.prompt_snapshot,
             name=f"{execution.agent.name}-LongOutputValidationPrompt",
         )
@@ -348,6 +373,7 @@ class LongOutputDelivery:
         self.current_manifest_ref: dict[str, Any] | None = None
         self.replayed_unit_count = 0
         self.request_count = 1
+        self._field_continuation: StructuredStringContinuation | None = None
 
     def preflight(self) -> None:
         if self.structured:
@@ -373,14 +399,37 @@ class LongOutputDelivery:
                 )
             self.value = ""
 
+    def validate_complete_carrier(self, raw: str) -> None:
+        """A complete terminal must not hide a repaired or discarded JSON tail."""
+        if not self.structured:
+            return
+        try:
+            evidence = StreamingJSONParser._inspect_json_prefix(raw, terminal_complete=True)
+        except ValueError as error:
+            raise LongOutputError("Expected one complete JSON carrier; malformed or trailing content was observed.") from error
+        if not evidence.root_complete:
+            raise LongOutputError("Expected one complete JSON carrier; the observed carrier is unfinished.")
+
+    def needs_continuation(self, meta: Mapping[str, Any] | None, raw: str) -> bool:
+        """Use provider facts first, then a real JSON boundary, never punctuation."""
+        terminal = normalized_terminal(meta)
+        if terminal == "complete":
+            return False
+        if self.structured:
+            # This also rejects malformed prefixes and discarded trailing material.
+            evidence = StreamingJSONParser._inspect_json_prefix(raw)
+            if terminal == "unknown" and evidence.root_complete:
+                return False
+        return True
+
     def _build_slot_value_model(self, slot: _AssemblySlot) -> type[BaseModel]:
         declared = _get_path(self.output_schema, slot.path)
         if slot.kind == "list":
             declared, _constraints = _unwrap_output_declaration(declared)
             declared = declared[0] if isinstance(declared, list) and declared else Any
         prompt = Prompt(
-            self.execution.request.plugin_manager,
-            self.execution.request.settings,
+            self.request.plugin_manager,
+            self.request.settings,
             prompt_dict={
                 "output": {"value": declared},
                 "output_format": "json",
@@ -418,6 +467,8 @@ class LongOutputDelivery:
 
     @property
     def current_digest(self) -> str:
+        if self._field_continuation is not None:
+            return self._field_continuation.current_digest
         materialized = _canonical_json(self.value) if self.structured else str(self.value)
         return _sha256_text(materialized)
 
@@ -428,7 +479,9 @@ class LongOutputDelivery:
         return str(self.units[-1].get("digest") or "")
 
     async def _write_verified(self, relative_path: str, content: str) -> dict[str, Any]:
-        write_result = await self.execution.task_workspace.write_file(
+        if self.is_stage:
+            relative_path = (self.workspace.fallback_root / relative_path).relative_to(self.workspace.root).as_posix()
+        write_result = await self.workspace.write_file(
             relative_path,
             content,
             append=False,
@@ -451,7 +504,7 @@ class LongOutputDelivery:
 
     async def _persist_raw_segment(self, text: str, *, response_id: str) -> dict[str, Any]:
         return await self._write_verified(
-            f"long_output/{self.execution.id}/segments/{self.segment_index:06d}-{response_id}.txt",
+            f"long_output/{self.storage_id}/segments/{self.segment_index:06d}-{response_id}.txt",
             text,
         )
 
@@ -476,11 +529,11 @@ class LongOutputDelivery:
         digest = _sha256_text(serialized)
         unit_ref = await self._write_verified(
             (
-                f"long_output/{self.execution.id}/units/"
+                f"long_output/{self.storage_id}/units/"
                 f"{resolved_unit_index:08d}-{digest[:16]}.json"
                 if operation != "append_text"
                 else
-                f"long_output/{self.execution.id}/units/"
+                f"long_output/{self.storage_id}/units/"
                 f"{resolved_unit_index:08d}-{digest[:16]}.txt"
             ),
             serialized,
@@ -513,7 +566,7 @@ class LongOutputDelivery:
         }
         manifest_text = _canonical_json(manifest)
         manifest_ref = await self._write_verified(
-            f"long_output/{self.execution.id}/manifests/{self.revision:06d}.json",
+            f"long_output/{self.storage_id}/manifests/{self.revision:06d}.json",
             manifest_text,
         )
         self.current_manifest_ref = manifest_ref
@@ -565,6 +618,8 @@ class LongOutputDelivery:
         return readback.content
 
     async def _replay_latest_manifest(self) -> Any:
+        if self._field_continuation is not None:
+            return await self._field_continuation._replay_latest_manifest()
         manifest_text = await self._read_verified_ref(
             self.current_manifest_ref,
             label="latest long-output manifest",
@@ -727,8 +782,20 @@ class LongOutputDelivery:
         *,
         streaming_events: list[StreamingData],
     ) -> None:
+        if self.is_stage:
+            self.storage_id = f"{self.execution.id}/{result.id}"
         response_id = str(result.response_id or result.id)
         raw_text = await result.async_get_text()
+        if self.structured:
+            evidence = StreamingJSONParser._inspect_json_prefix(raw_text)
+            if evidence.open_string_path is not None:
+                from .structured_string_continuation import StructuredStringContinuation
+
+                self._field_continuation = StructuredStringContinuation(self)
+                await self._field_continuation.accept_initial(
+                    result, streaming_events=streaming_events,
+                )
+                return
         await self._persist_raw_segment(raw_text, response_id=response_id)
         committed = 0
         if not self.structured:
@@ -917,9 +984,18 @@ class LongOutputDelivery:
                 next_index = len(committed_for_slot)
             else:
                 next_index = 1 if committed_for_slot else 0
+            declaration = _get_path(self.output_schema, slot.path)
             state.append(
                 {
                     "path_key": slot.key,
+                    **(
+                        {"description": str(declaration[1])}
+                        if slot.kind == "list"
+                        and isinstance(declaration, tuple)
+                        and len(declaration) > 1
+                        and declaration[1]
+                        else {}
+                    ),
                     "operation": (
                         "append_item"
                         if slot.kind == "list"
@@ -1038,53 +1114,55 @@ class LongOutputDelivery:
             name=f"{self.execution.agent.name}-LongOutputContinuation",
             inherit_agent_prompt=False,
             inherit_extension_handlers=False,
+            model_key=getattr(self.request, "_model_key", None),
         )
+        local_settings = self.request.settings.get(inherit=False)
+        if isinstance(local_settings, dict):
+            request.settings.update(deepcopy(local_settings))
         original_instruct = deepcopy(self.prompt_snapshot.get("instruct"))
         request.prompt.update(self.prompt_snapshot)
         request.prompt.set("tools", None)
         request.prompt.set("action_results", None)
-        request.prompt.set(
-            "input",
-            {
-                "long_output_continuation": self._continuation_input(),
-                "original_input": self.prompt_snapshot.get("input"),
-            },
-        )
-        request.prompt.set(
-            "instruct",
-            {
-                "long_output_delivery_protocol": [
-                    "Continue the original requested deliverable; do not restart or summarize it.",
-                    "Return only the private continuation envelope declared by the output schema.",
-                    "Start the JSON object immediately with base_revision, then base_digest, then anchor; close all three control fields before starting updates.",
-                    "Do not emit markdown, commentary, or the original business JSON root. Business values belong only inside updates[*].value.",
-                    "Echo base_revision, base_digest, and anchor exactly from long_output_continuation.",
-                    "For plain text, continuity_context is read-only accepted business text evidence: document_start preserves global title/heading/numbering style, accepted_tail ends at the exact join, and accepted_character_count is the host-counted total that replaces any estimate. Start append_text immediately after accepted_tail's final character and preserve the conventions visible in document_start. If accepted_tail ends inside an unfinished token, sentence, line, or Markdown construct, continue it with zero leading whitespace; if it contains a complete phrase missing only punctuation, emit only the missing punctuation before continuing; otherwise add the paragraph or line separator required by the document. Do not echo continuity_context as a control field, repeat accepted text inside append_text, or restate any heading/section already visible there or marked complete in state_summary. If the accepted artifact already contains its conclusion and meets the original contract according to accepted_character_count, return updates=[] with is_final=true instead of appending a second conclusion or filler.",
-                    "For structured output, continuity_context is read-only trusted accepted business evidence. When complete_snapshot=true, accepted_json is canonical JSON evidence text for the exact assembled value so far: read it to preserve language, naming, design choices, and cross-field facts, but never treat it as the response shape, copy it into updates, or modify accepted units. When complete_snapshot=false, only bounded accepted_head and accepted_tail evidence excerpts are available; do not invent claims about omitted middle content, and preserve essential cumulative facts in state_summary. accepted_serialized_character_count is host-counted.",
-                    "Use only offered path_key and operation combinations. path_key is the sole model-returned slot identity: copy its complete offered value, including both the pN prefix and mnemonic suffix, exactly; never substitute an original business field name.",
-                    "Assembly slots are offered in schema order. A later slot may be withheld while an earlier exact-count list is incomplete; finish the offered slot and never invent or address a slot that is not offered.",
-                    "Each update value is exactly one complete business item and must satisfy the offered value_contract.",
-                    "Preserve every JSON kind in value_contract exactly: a nested schema with type array must be a JSON array, never a keyed object such as option_a/option_b; do not invent wrapper fields.",
-                    "For an intentionally empty offered list, use operation declare_empty_list with unit_index 0 and value []; never use it after an item or prior empty declaration.",
-                    "A list slot with empty_is_declared=true is already complete as an empty list: skip it and continue with another missing slot.",
-                    "For an intentionally empty offered text field, use operation declare_empty_text with unit_index 0 and value \"\"; never use it after text or a prior empty declaration.",
-                    "A text slot with empty_is_declared=true is already complete as empty text: skip it unless a declared not-null rule requires later append_text content.",
-                    "For structured output, an offered append_text slot is an unset atomic JSON string: one closed update completes it. Already committed structured string slots are not offered and must never be addressed again. If one logical string cannot fit the 4000-character unit bound, the original output contract must represent it as an ordered list of chunks instead.",
-                    "unit_index is the zero-based assembly position for that path_key; it is not an index field inside the business value.",
-                    "For append_item, use next_unit_index for the first complete new list item and increment unit_index by one for each following item.",
-                    "For list slots, min_items and max_items are authoritative total-count bounds when present. Do not declare final before min_items is reached, never emit an item at or beyond max_items, and skip a list slot once its current next_unit_index equals max_items.",
-                    "For append_text, emit a new closed text block of at most 4000 characters and use next_unit_index.",
-                    "For plain-text output, emit exactly one append_text update in this envelope; do not split one response into multiple text updates. Unless the final remainder is shorter, make that one block 1500 to 3500 characters.",
-                    "For set_value, set only an offered missing value and use unit_index 0.",
-                    "For structured output, emit no more than four updates in one envelope so every update can close before the provider output limit.",
-                    "If repair_feedback.reason_code is continuation_header_incomplete, continuation_update_rejected, or continuation_no_complete_update, first close the three control fields and emit at most one corrected update in this recovery envelope.",
-                    "Never repeat an already accepted unit. Repeated content that is genuinely required may still appear inside a new unit.",
-                    "Set is_final=true only after the complete original deliverable has been covered.",
-                    "Keep state_summary under 2000 characters and include only continuity facts needed by the next request.",
-                ],
-                "original_deliverable_instructions": original_instruct,
-            },
-        )
+        continuation_input = {
+            "original_input": self.prompt_snapshot.get("input"),
+            "long_output_continuation": self._continuation_input(),
+        }
+        # JSON preserves the exact text join without YAML presentation indentation.
+        # This changes only the private carrier, not its values or accepted bytes.
+        request.prompt.set("input", {
+            "long_output_continuation": continuation_input["long_output_continuation"],
+            "original_input": continuation_input["original_input"],
+        } if self.structured else json.dumps(continuation_input, ensure_ascii=False))
+        request.prompt.append("info", {"original_deliverable_instructions": original_instruct})
+        protocol = [
+            "Inspect the accepted ending before adding text. A missing terminal signal does not prove missing content; if this deliverable is already complete, confirm completion with no updates.",
+            "Continue only the current request deliverable defined by [input.original_input] and [info.original_deliverable_instructions]. Surrounding task or document plans are context, not additional output.",
+            "Even when the original request asks for a complete rewrite, the accepted prefix is already part of that rewrite. Append its missing suffix; do not execute the original request again.",
+            "Input references in the original instructions refer to [input.original_input]; original output references describe business values, not this private envelope.",
+            "Return only the private envelope in [output], with business content inside [output.updates]. Start with base_revision, base_digest, then anchor, copying them exactly from [input.long_output_continuation] before any updates.",
+            "Use only offered assembly_slots: copy the complete path_key and allowed operation. Each value must satisfy its value_contract and any slot description. unit_index is the zero-based assembly position, not a field inside the business value.",
+            "Never repeat or modify accepted units. Repeated content genuinely required within a new unit remains allowed.",
+        ]
+        if self.structured:
+            protocol.extend([
+                "For structured output, continuity_context is read-only accepted business evidence, not a response shape or update target. Preserve its language, naming and cross-field facts. complete_snapshot=false means the middle is omitted; do not invent facts about it.",
+                "Finish offered slots in schema order; later slots may be withheld behind an incomplete exact-count list. Never address a slot that is not offered.",
+                "For append_item, emit complete items from next_unit_index onward. Preserve nested JSON kinds and wrappers exactly. Honor min_items/max_items as total list bounds, not the size of this response.",
+                "For an intentionally empty offered list or text slot, use its empty_operation with unit_index=0 and value=[] or value=\"\" respectively. Never repeat an empty declaration or use it after accepted content.",
+                "An offered append_text slot is an unset atomic JSON string: one complete update closes it. Committed strings are immutable and not offered again. Emit at most 4000 characters; a larger logical value needs an original chunk-list contract.",
+                "For set_value, supply the missing value with unit_index=0. Emit at most four updates per envelope, leaving room to close it.",
+            ])
+        else:
+            protocol.extend([
+                "For plain text, continuity_context.accepted_tail is the exact join; document_start supplies formatting conventions. Finish the open word, sentence, item or construct first. Add only whitespace needed by the text, not transport indentation. accepted_character_count is Host-measured.",
+                "Emit one append_text update using next_unit_index, or none if nothing remains. There is no minimum block length. Complete the remaining deliverable in this update when it fits value_contract and the response window; otherwise close a useful block and leave room to close the envelope. Do not add filler, another conclusion, or later workflow content merely to continue.",
+            ])
+        protocol.extend([
+            "Apply repair_feedback when present. After an incomplete envelope or rejected update, use one smaller corrected update that can close; preserve every accepted unit.",
+            "Set completion=complete when the current request deliverable is complete after these updates, even if the surrounding task has later stages; otherwise use incomplete. If the supplied context is insufficient to decide or continue safely, use undetermined rather than guessing or adding filler.",
+            "Keep state_summary under 2000 characters: only next-use continuity facts, or the concrete evidence gap for undetermined. Leave it empty when none are needed.",
+        ])
+        request.prompt.set("instruct", {"long_output_delivery_protocol": protocol})
         request.output(_ContinuationEnvelope, format="json")
         return request
 
@@ -1148,7 +1226,7 @@ class LongOutputDelivery:
         self,
         *,
         response_id: str,
-        provider_terminal: Literal["complete", "length"],
+        provider_terminal: Literal["complete", "length", "unknown"],
         reason_code: str,
         reason: str,
         action: str,
@@ -1218,7 +1296,7 @@ class LongOutputDelivery:
         self,
         result: Any,
     ) -> tuple[
-        Literal["complete", "length"],
+        Literal["complete", "length", "unknown"],
         list[StreamingData],
         _ContinuationEnvelope | None,
         str | None,
@@ -1228,8 +1306,18 @@ class LongOutputDelivery:
             events.append(event)
         meta = await result.async_get_meta()
         terminal = normalized_terminal(meta)
-        if terminal == "complete":
+        raw = await result.async_get_text()
+        try:
+            evidence = StreamingJSONParser._inspect_json_prefix(raw)
+        except ValueError as error:
+            return terminal, events, None, str(error)[:500]
+        if terminal == "complete" or evidence.root_complete:
             try:
+                evidence = StreamingJSONParser._inspect_json_prefix(
+                    raw, terminal_complete=True,
+                )
+                if not evidence.root_complete:
+                    raise ValueError("The private continuation envelope is unfinished.")
                 parsed = await result.async_get_data(
                     type="parsed",
                     ensure_keys=[
@@ -1238,7 +1326,7 @@ class LongOutputDelivery:
                         "anchor",
                         "updates",
                         "state_summary",
-                        "is_final",
+                        "completion",
                     ],
                     max_retries=0,
                     raise_ensure_failure=False,
@@ -1422,6 +1510,8 @@ class LongOutputDelivery:
         return prepared, candidate, rejected_reason
 
     async def request_and_commit_next(self) -> dict[str, Any]:
+        if self._field_continuation is not None:
+            return await self._field_continuation.request_and_commit_next()
         request = self._build_continuation_request()
         result = request.get_result(
             parent_run_context=self.execution.agent_execution_run_context,
@@ -1438,7 +1528,7 @@ class LongOutputDelivery:
         response_id = str(result.response_id or result.id)
         raw_text = await result.async_get_text()
         await self._persist_raw_segment(raw_text, response_id=response_id)
-        if terminal == "complete" and envelope is None:
+        if envelope_error is not None:
             reason = (
                 "Provider-complete continuation did not satisfy the private "
                 f"envelope contract: {envelope_error or 'validation failed'}"
@@ -1460,14 +1550,14 @@ class LongOutputDelivery:
                 "terminal": terminal,
             }
         try:
-            if terminal == "complete":
+            if envelope is not None:
                 assert isinstance(envelope, _ContinuationEnvelope)
                 base_revision = envelope.base_revision
                 base_digest = envelope.base_digest
                 anchor = envelope.anchor
                 updates = envelope.updates
                 state_summary = envelope.state_summary[:_MAX_STATE_SUMMARY_CHARS]
-                is_final = envelope.is_final
+                is_final = envelope.completion == "complete"
                 completion_source = "final_reconciliation"
             else:
                 (
@@ -1510,8 +1600,12 @@ class LongOutputDelivery:
             raise LongOutputError(
                 "Continuation response did not match the current manifest revision, digest, and anchor."
             )
-        continuation_units_before = self.continuation_unit_count
         prepared, candidate, rejected_reason = self._prepare_valid_update_prefix(updates)
+        if envelope is not None and envelope.completion == "undetermined":
+            raise LongOutputError(
+                "Continuation completion is undetermined: "
+                + (state_summary or "The supplied context does not establish safe completion.")
+            )
         new_records: list[dict[str, Any]] = []
         for update, slot in prepared:
             new_records.append(
@@ -1579,7 +1673,7 @@ class LongOutputDelivery:
                     + ", ".join(missing_required_paths[:20])
                 )[:500],
             }
-        elif committed:
+        elif committed or is_final:
             self.repair_feedback = None
         else:
             self.repair_feedback = {
@@ -1626,6 +1720,11 @@ class LongOutputDelivery:
                 source="long_output",
                 meta={"stream_kind": "status", "status": "continuing"},
             )
+        elif is_final:
+            # A fully observed, correlated final acknowledgement is progress
+            # even when no new business text is needed. Original replay and
+            # validation still decide whether the candidate may be delivered.
+            self.no_progress_count = 0
         else:
             if rejected_reason is not None:
                 reason_code = "continuation_update_rejected"
@@ -1674,18 +1773,17 @@ class LongOutputDelivery:
                 ),
             )
         return {
-            "progress": committed > 0,
+            "progress": committed > 0 or bool(is_final),
             "is_final": bool(
                 is_final
                 and rejected_reason is None
-                and terminal == "complete"
-                and (committed > 0 or continuation_units_before > 0)
+                and envelope is not None
             ),
             "terminal": terminal,
         }
 
     async def _run_custom_validators(self, candidate: Any, result_object: BaseModel | None) -> None:
-        handlers = self.execution.request.extension_handlers.get("validate_handlers", [])
+        handlers = self.request.extension_handlers.get("validate_handlers", [])
         resolved = list(handlers) if isinstance(handlers, list) else []
         if self.validate_handler is not None:
             if isinstance(self.validate_handler, list):
@@ -1706,7 +1804,7 @@ class LongOutputDelivery:
                 retry_count=0,
                 max_retries=self.max_retries,
                 prompt=self.validation_prompt,
-                settings=self.execution.request.settings,
+                settings=self.request.settings,
                 request_run_context=getattr(
                     self.execution._model_request_result,
                     "request_run_context",
@@ -1823,6 +1921,9 @@ class LongOutputDelivery:
         return missing_paths
 
     def _validate_ensure_keys(self, candidate: Any) -> None:
+        if self._field_continuation is not None:
+            self._field_continuation.validate_ensure_keys(candidate)
+            return
         missing_paths = self._missing_ensure_paths(candidate)
         if missing_paths:
             raise _FinalValidationError(
@@ -1850,17 +1951,18 @@ class LongOutputDelivery:
         candidate_text = _canonical_json(candidate) if self.structured else str(candidate)
         final_ref = await self._write_verified(
             (
-                f"long_output/{self.execution.id}/final/result.json"
+                f"long_output/{self.storage_id}/final/result.json"
                 if self.structured
-                else f"long_output/{self.execution.id}/final/result.txt"
+                else f"long_output/{self.storage_id}/final/result.txt"
             ),
             candidate_text,
         )
         self.final_result = candidate
         self.final_result_object = result_object
         self.final_ref = final_ref
-        self.execution._long_output_result_object = result_object
-        validation_handlers = self.execution.request.extension_handlers.get(
+        if not self.is_stage:
+            self.execution._long_output_result_object = result_object
+        validation_handlers = self.request.extension_handlers.get(
             "validate_handlers",
             [],
         )
@@ -1869,7 +1971,7 @@ class LongOutputDelivery:
             or self.validate_handler is not None
             or validation_handlers
         )
-        self.execution._long_output_meta = {
+        self.meta = {
             "enabled": True,
             "status": "completed",
             "request_count": self.request_count,
@@ -1898,7 +2000,9 @@ class LongOutputDelivery:
                 else "transport_and_schema"
             ),
         }
-        self.execution.diagnostics["long_output"] = dict(self.execution._long_output_meta)
+        if not self.is_stage:
+            self.execution._long_output_meta = dict(self.meta)
+        self.execution.diagnostics["long_output"] = dict(self.meta)
         return candidate
 
     async def run_continuation_flow(self) -> Any:

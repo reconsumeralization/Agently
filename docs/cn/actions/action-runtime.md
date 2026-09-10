@@ -150,7 +150,7 @@ validator、result reader 和 Session finalizer。决策 JSON 不会成为业务
 
 旧 custom planning handler 或 ActionFlow plugin 如果只返回
 `next_action="response"` 而没有 response 值，会保留兼容的最终 ModelRequest fallback。
-`ensure_long_output` 当前也保留独立交付路径。这些是 fallback，不是默认 ActionLoop 拓扑。
+`auto_continue` 当前也保留独立交付路径。这些是 fallback，不是默认 ActionLoop 拓扑。
 
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用

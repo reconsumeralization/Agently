@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from copy import deepcopy
 
 import asyncio
 from collections.abc import Mapping
@@ -25,10 +26,11 @@ from typing import Any, TYPE_CHECKING, TypedDict, cast
 from pydantic import BaseModel, Field
 
 from agently.core.orchestration import TriggerFlow
+from agently.core.model.Prompt import Prompt
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import DataFormatter
 
-from .model_stage import run_model_stage
+from .model_stage import ModelStageResult, run_model_stage
 
 if TYPE_CHECKING:
     from agently.core.orchestration import TriggerFlowExecution
@@ -48,8 +50,6 @@ class _PlanQuestionData(TypedDict):
 
 class _PlanReadinessData(TypedDict):
     plan_ready: bool
-    planning_goal: str
-    final_deliverable: str
     readiness_summary: str
     questions: list[_PlanQuestionData]
 
@@ -66,9 +66,10 @@ class _PlanQuestion(BaseModel):
 
 class _PlanReadiness(BaseModel):
     plan_ready: bool
-    planning_goal: str = Field(min_length=1, max_length=2_000)
-    final_deliverable: str = Field(min_length=1, max_length=2_000)
-    readiness_summary: str = Field(min_length=1, max_length=2_000)
+    readiness_summary: str = Field(
+        min_length=1, max_length=2_000,
+        description="A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions.",
+    )
     questions: list[_PlanQuestion] = Field(default_factory=list)
 
 
@@ -87,15 +88,65 @@ class _PlanExecutionRuntime:
         self.execution = execution
         self.config = config
 
+    async def _run_stage(
+        self,
+        *,
+        stage: str,
+        stage_input: dict[str, Any],
+        stage_info: dict[str, Any],
+        stage_instructions: list[str],
+        output: object | None = None,
+        preserve_external_output: bool = False,
+    ) -> ModelStageResult:
+        """Project plan-local context; stage identity stays in Host diagnostics."""
+        prompt = deepcopy(dict(self.execution.prompt_snapshot))
+        prompt["input"] = {
+            "original_input": DataFormatter.sanitize(self.execution.prompt_snapshot.get("input")),
+            "execution_stage_input": DataFormatter.sanitize(stage_input),
+        }
+        info = [] if prompt.get("info") is None else [prompt["info"]]
+        if stage_info:
+            info.append({"stage_information": DataFormatter.sanitize(stage_info)})
+        if info:
+            prompt["info"] = info
+        else:
+            prompt.pop("info", None)
+        original_instruct = prompt.get("instruct")
+        prompt["instruct"] = ([original_instruct] if original_instruct is not None else []) + [
+            {"agent_execution_stage": [
+                *stage_instructions,
+                "Return only this stage's declared result; do not expose hidden chain-of-thought.",
+            ]}
+        ]
+        return await run_model_stage(
+            self.execution, producer="plan", stage=stage,
+            stage_input=stage_input, stage_info=stage_info,
+            stage_instructions=stage_instructions, output=output,
+            preserve_external_output=preserve_external_output,
+            prompt_projection=prompt,
+        )
+
     async def analyze(
         self,
         *,
         clarification_round: int,
         clarifications: list[_PlanClarificationData],
     ) -> _PlanReadinessData:
-        value = await run_model_stage(
-            self.execution,
-            producer="plan",
+        final_output_contract = None
+        if self.execution.prompt_snapshot.get("output") is not None:
+            # Render the original declaration without inheriting or modifying
+            # the root prompt; field descriptions may contain planning facts.
+            contract_prompt = Prompt(
+                self.execution.agent.plugin_manager,
+                self.execution.request.settings,
+                prompt_dict=deepcopy({
+                    key: self.execution.prompt_snapshot[key]
+                    for key in ("output", "output_format", "ensure_all_keys")
+                    if key in self.execution.prompt_snapshot
+                }),
+            )
+            final_output_contract = contract_prompt.to_text()
+        value = await self._run_stage(
             stage=f"readiness_{clarification_round + 1}",
             stage_input={
                 "clarification_round": clarification_round,
@@ -105,6 +156,7 @@ class _PlanExecutionRuntime:
                    if self.execution.revision else {}),
             },
             stage_info={
+                **({"final_output_contract": final_output_contract} if final_output_contract is not None else {}),
                 "max_questions_per_round": self.config.max_questions_per_round,
                 "remaining_clarification_rounds": max(
                     0,
@@ -113,9 +165,12 @@ class _PlanExecutionRuntime:
             },
             stage_instructions=[
                 "Determine whether the supplied request contains enough information to produce an actionable plan.",
+                *(["Include the requirements in [info.stage_information.final_output_contract] in this assessment; "
+                   "that contract describes the final plan, not this readiness response."]
+                  if final_output_contract is not None else []),
                 "Ask only for facts whose absence materially changes the plan; "
                 "use explicit assumptions for ordinary optional preferences.",
-                f"Return at most {self.config.max_questions_per_round} concise clarification questions.",
+                "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
                 "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
                 "Do not produce the final plan in this readiness stage.",
             ],
@@ -132,23 +187,19 @@ class _PlanExecutionRuntime:
         readiness: _PlanReadinessData,
         clarifications: list[_PlanClarificationData],
     ) -> object:
-        result = await run_model_stage(
-            self.execution,
-            producer="plan",
+        result = await self._run_stage(
             stage="final_plan",
             stage_input={
-                "validated_readiness": readiness,
+                "validated_readiness": {
+                    key: value for key, value in readiness.items()
+                    if key not in {"plan_ready", "questions"}
+                },
                 "clarifications": clarifications,
                 **({"revision_feedback": self.execution._rework_feedback,
                     "previous_candidate": self.execution._revision_history[self.execution.revision - 1].result}
                    if self.execution.revision else {}),
             },
-            stage_info={
-                "result_role": "terminal actionable plan",
-                "structured_output_declared": bool(
-                    self.execution.prompt_snapshot.get("output")
-                ),
-            },
+            stage_info={},
             stage_instructions=[
                 "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
                 "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
@@ -467,12 +518,9 @@ def _normalize_readiness(
     plan_ready = value.get("plan_ready")
     if not isinstance(plan_ready, bool):
         raise TypeError("Plan Execution readiness field `plan_ready` must be Boolean.")
-    normalized_text: dict[str, str] = {}
-    for key in ("planning_goal", "final_deliverable", "readiness_summary"):
-        item = str(value.get(key) or "").strip()
-        if not item:
-            raise ValueError(f"Plan Execution readiness field `{key}` cannot be empty.")
-        normalized_text[key] = item
+    readiness_summary = str(value.get("readiness_summary") or "").strip()
+    if not readiness_summary:
+        raise ValueError("Plan Execution readiness field `readiness_summary` cannot be empty.")
     raw_questions = value.get("questions", [])
     if not isinstance(raw_questions, list):
         raise TypeError("Plan Execution readiness field `questions` must be a list.")
@@ -499,9 +547,7 @@ def _normalize_readiness(
         raise ValueError("Non-ready plan output must contain a clarification question.")
     return {
         "plan_ready": plan_ready,
-        "planning_goal": normalized_text["planning_goal"],
-        "final_deliverable": normalized_text["final_deliverable"],
-        "readiness_summary": normalized_text["readiness_summary"],
+        "readiness_summary": readiness_summary,
         "questions": questions,
     }
 

@@ -22,6 +22,7 @@ from .core import (
     TriggerFlowBlueprint,
 )
 from .types.data import (
+    LongContent,
     AgentExecutionStreamData,
     AgentExecutionStreamHandler,
     AgentlyModelResultEvent,
@@ -54,6 +55,7 @@ from .types.trigger_flow import (
 Agently = AgentlyMain()
 
 __all__ = [
+    "LongContent",
     "Agently",
     "__version__",
     "Agent",

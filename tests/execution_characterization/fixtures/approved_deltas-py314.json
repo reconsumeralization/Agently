@@ -1,0 +1,3990 @@
+{
+  "baseline_commit": "17f8ab170cfbc36427c75b0906a508cafcceff18",
+  "reasons": {
+    "plan_output_contract": "Maintainer-approved S11: expose the original final output contract to plan readiness through one literal reference; no change to final schema, validation, result, request count or lifecycle.",
+    "pattern_to_execution": "Approved producer migration: selector/route, lifecycle events, stage keys and _DocumentSection type location. Renamed YAML keys reorder rendered input; instructions and payload values are preserved.",
+    "prompt_owned_goals": "Approved Prompt-owned goal and success_criteria appear in the existing execution Prompt projection. Calls and output values stay unchanged; semantic Prompt audit remains separate.",
+    "restored_business_review": "Approved final-business review subject and persisted-original-request context. Terminal resume still dispatches zero requests and preserves the full envelope.",
+    "approved_long_content_prompt": "Approved complete chapter planning, body-only writers, one actual summary per non-final chapter and retained readback bodies. Same final business bytes, validation, rejection and artifact; two chapters now use four requests.",
+    "approved_conditional_continuation": "Approved exact JSON input carrier, referenced original instructions, concise delivery protocol and private completion enum. Same request count, business bytes, stream, validation and stale-identity failure.",
+    "plan_prompt_clarity": "Maintainer-approved S12: clarify three readiness field descriptions and trim model-only duplicate controls; preserve full Host readiness, final contract, results, request counts and lifecycle. Includes unchanged earlier producer migration at combined paths.",
+    "plan_no_restatement": "Maintainer-approved S13: remove planning_goal/final_deliverable from internal readiness schema and onward projection; retain original caller contract, clarification replies, readiness summary and all prior approved migrations. No change to business result, calls or lifecycle."
+  },
+  "changes": {
+    "direct_text": [],
+    "direct_json": [],
+    "concurrent_readers": [],
+    "mutation_and_fresh": [],
+    "provider_failure": [],
+    "fluent_isolation": [],
+    "validation_repair": [],
+    "validation_exhaustion": [],
+    "review_warn": [],
+    "review_block": [],
+    "artifact_review": [],
+    "artifact_escape": [],
+    "default_review_artifact": [],
+    "plan_ready": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "stage_information",
+          "final_output_contract"
+        ],
+        "operation": "add",
+        "after": "user:\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"steps\": [\n    <str>, // An ordered step.\n    ...\n  ]\n}\n\nField requirements:\n- steps[*]: An ordered step.; required key; null or empty values are allowed\n\n[OUTPUT]:\nassistant:",
+        "reason": "plan_output_contract"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Include the requirements in [info.stage_information.final_output_contract] in this assessment; that contract describes the final plan, not this readiness response.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "final_deliverable"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "planning_goal"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "readiness_summary"
+        ],
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "after": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]",
+          "A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "847e43e383bade061e02351eba2920ab632894bdf95831c97e2f408c856c34fd",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info"
+        ],
+        "operation": "remove",
+        "before": [
+          {
+            "agent_pattern": "plan",
+            "pattern_stage": "final_plan",
+            "stage_information": {
+              "result_role": "terminal actionable plan",
+              "structured_output_declared": true
+            }
+          }
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "readiness_summary": "Inputs are sufficient."
+          },
+          "clarifications": []
+        },
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "178c98e288ae7820c901c4e483af1e749c7e190f7eadaf945150b02d46182eb2",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_clarification": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "exchange.pending",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "exchange.pending",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          13,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          14,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          15,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          16,
+          "path"
+        ],
+        "before": "exchange.resolved",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          17,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          18,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "exchange.resolved",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "exchanges",
+          0,
+          "request",
+          "audit_metadata",
+          "source"
+        ],
+        "before": "AgentPattern:plan",
+        "after": "AgentExecution:plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "stage_information",
+          "final_output_contract"
+        ],
+        "operation": "add",
+        "after": "user:\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"steps\": [\n    <str>, // An ordered step.\n    ...\n  ]\n}\n\nField requirements:\n- steps[*]: An ordered step.; required key; null or empty values are allowed\n\n[OUTPUT]:\nassistant:",
+        "reason": "plan_output_contract"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Include the requirements in [info.stage_information.final_output_contract] in this assessment; that contract describes the final plan, not this readiness response.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "final_deliverable"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "planning_goal"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "readiness_summary"
+        ],
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "after": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]",
+          "A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "847e43e383bade061e02351eba2920ab632894bdf95831c97e2f408c856c34fd",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_2",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          0,
+          "stage_information",
+          "final_output_contract"
+        ],
+        "operation": "add",
+        "after": "user:\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"steps\": [\n    <str>, // An ordered step.\n    ...\n  ]\n}\n\nField requirements:\n- steps[*]: An ordered step.; required key; null or empty values are allowed\n\n[OUTPUT]:\nassistant:",
+        "reason": "plan_output_contract"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 1,
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 1,
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Include the requirements in [info.stage_information.final_output_contract] in this assessment; that contract describes the final plan, not this readiness response.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "final_deliverable"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "planning_goal"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "readiness_summary"
+        ],
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "after": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]",
+          "A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "fe5c9ffc7826692aaf694ba766c477e67558a563ef551be14c29ce8065960434",
+        "after_sha256": "5fa638ec4f4346e9b897ce96547dc1f3b2ad903d68cff4d117bbaaaa5ef84130",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "info"
+        ],
+        "operation": "remove",
+        "before": [
+          {
+            "agent_pattern": "plan",
+            "pattern_stage": "final_plan",
+            "stage_information": {
+              "result_role": "terminal actionable plan",
+              "structured_output_declared": true
+            }
+          }
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "readiness_summary": "Inputs are sufficient."
+          },
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": [
+            {
+              "questions": [
+                {
+                  "question": "Which environment?",
+                  "why_needed": "Choose the deployment steps."
+                }
+              ],
+              "response": "Staging environment."
+            }
+          ]
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "9d0b1515212fa2ee97697fb21d8a5c167593ca871cc98c0215ad81a14da50caf",
+        "after_sha256": "a12d06e8a297cd48522ae73129d0e72738b68908f612d57cd3ef8b0427f5c5e5",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_budget": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.failed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.failed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "stage_information",
+          "final_output_contract"
+        ],
+        "operation": "add",
+        "after": "user:\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"steps\": [\n    <str>, // An ordered step.\n    ...\n  ]\n}\n\nField requirements:\n- steps[*]: An ordered step.; required key; null or empty values are allowed\n\n[OUTPUT]:\nassistant:",
+        "reason": "plan_output_contract"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Include the requirements in [info.stage_information.final_output_contract] in this assessment; that contract describes the final plan, not this readiness response.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "final_deliverable"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "planning_goal"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "readiness_summary"
+        ],
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "after": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]",
+          "A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "847e43e383bade061e02351eba2920ab632894bdf95831c97e2f408c856c34fd",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info"
+        ],
+        "operation": "remove",
+        "before": [
+          {
+            "agent_pattern": "plan",
+            "pattern_stage": "final_plan",
+            "stage_information": {
+              "result_role": "terminal actionable plan",
+              "structured_output_declared": true
+            }
+          }
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "readiness_summary": "Inputs are sufficient."
+          },
+          "clarifications": []
+        },
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "178c98e288ae7820c901c4e483af1e749c7e190f7eadaf945150b02d46182eb2",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": null,
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "plan_validation": [
+      {
+        "path": [
+          "events",
+          0,
+          "path"
+        ],
+        "before": "pattern.started",
+        "after": "route.selected",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          2,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.started.completed",
+        "after": "runtime.progress.route_selection.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          3,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "runtime.progress.route_selection.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          4,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.route.selected.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          5,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          6,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          7,
+          "path"
+        ],
+        "before": "pattern.stage.started",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          8,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.started.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          9,
+          "path"
+        ],
+        "before": "pattern.stage.completed",
+        "after": "execution.stage.started",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          10,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.stage.completed.completed",
+        "after": "runtime.progress.execution.stage.started.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          11,
+          "path"
+        ],
+        "before": "pattern.completed",
+        "after": "execution.stage.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "events",
+          12,
+          "path"
+        ],
+        "before": "runtime.progress.pattern.completed.completed",
+        "after": "runtime.progress.execution.stage.completed.completed",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "agent_pattern"
+        ],
+        "operation": "remove",
+        "before": "plan",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "pattern_stage"
+        ],
+        "operation": "remove",
+        "before": "readiness_1",
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "info",
+          0,
+          "stage_information",
+          "final_output_contract"
+        ],
+        "operation": "add",
+        "after": "user:\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"steps\": [\n    <str>, // An ordered step.\n    ...\n  ]\n}\n\nField requirements:\n- steps[*]: An ordered step.; required key; null or empty values are allowed\n\n[OUTPUT]:\nassistant:",
+        "reason": "plan_output_contract"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "clarification_round": 0,
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Include the requirements in [info.stage_information.final_output_contract] in this assessment; that contract describes the final plan, not this readiness response.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most [info.stage_information.max_questions_per_round] concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Determine whether the supplied request contains enough information to produce an actionable plan.",
+          "Ask only for facts whose absence materially changes the plan; use explicit assumptions for ordinary optional preferences.",
+          "Return at most 3 concise clarification questions.",
+          "Set plan_ready=true only when no clarification question remains, and then return questions=[].",
+          "Do not produce the final plan in this readiness stage.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "final_deliverable"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "planning_goal"
+        ],
+        "operation": "remove",
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "output",
+          "readiness_summary"
+        ],
+        "before": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]"
+        ],
+        "after": [
+          "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=2000)]",
+          "A concise user-facing explanation of what is sufficient or still missing to start planning; do not repeat individual questions."
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "915b23d499cc6a3f414aa43c3bb46436c558c7c81a70380624cecc5042c78a1b",
+        "after_sha256": "847e43e383bade061e02351eba2920ab632894bdf95831c97e2f408c856c34fd",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info"
+        ],
+        "operation": "remove",
+        "before": [
+          {
+            "agent_pattern": "plan",
+            "pattern_stage": "final_plan",
+            "stage_information": {
+              "result_role": "terminal actionable plan",
+              "structured_output_declared": true
+            }
+          }
+        ],
+        "reason": "plan_prompt_clarity"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_stage_input"
+        ],
+        "operation": "add",
+        "after": {
+          "validated_readiness": {
+            "readiness_summary": "Inputs are sufficient."
+          },
+          "clarifications": []
+        },
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "pattern_stage_input"
+        ],
+        "operation": "remove",
+        "before": {
+          "validated_readiness": {
+            "plan_ready": true,
+            "planning_goal": "Plan a release.",
+            "final_deliverable": "A release plan.",
+            "readiness_summary": "Inputs are sufficient.",
+            "questions": []
+          },
+          "clarifications": []
+        },
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_execution_stage"
+        ],
+        "operation": "add",
+        "after": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          0,
+          "agent_pattern_stage"
+        ],
+        "operation": "remove",
+        "before": [
+          "Produce the actionable plan requested by the user; do not execute the planned deliverable.",
+          "Ground the plan in the original request, supplied constraints, and explicit clarification replies.",
+          "Make scope, assumptions, ordered work, dependencies, acceptance checks, risks, and human decision points concrete when relevant.",
+          "Do not repeat the readiness questionnaire or claim that the planned work has already been completed.",
+          "Honor the caller's structured output contract when one is declared; otherwise return readable Markdown.",
+          "Return only this stage's declared result; do not expose hidden chain-of-thought."
+        ],
+        "reason": "pattern_to_execution"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "d71ad1ff810c5a83dc30ffc78c3c2f0346588741f8b453f546b47582c0777f75",
+        "after_sha256": "178c98e288ae7820c901c4e483af1e749c7e190f7eadaf945150b02d46182eb2",
+        "reason": "plan_no_restatement"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "plan",
+        "reason": "pattern_to_execution"
+      }
+    ],
+    "long_content": [
+      {
+        "path": [
+          "dispatches"
+        ],
+        "before": 3,
+        "after": 4,
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "events"
+        ],
+        "before": [
+          {
+            "path": "pattern.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.agent_execution.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "validation.passed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.validation.passed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "artifact.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.artifact.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "artifact.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.artifact.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "result",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.result.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          }
+        ],
+        "after": [
+          {
+            "path": "route.selected",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.agent_execution.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route_selection.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route_selection.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route.selected.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "validation.passed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.validation.passed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "artifact.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.artifact.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "artifact.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.artifact.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "result",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.result.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          }
+        ],
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "files",
+          "workspace/.agently/files/<EXECUTION:1>-long-content-document/revision-0/chapter-1.md"
+        ],
+        "operation": "add",
+        "after": "First body — 中文。",
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "files",
+          "workspace/.agently/files/<EXECUTION:1>-long-content-document/revision-0/chapter-2.md"
+        ],
+        "operation": "add",
+        "after": "Second body.",
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "requests"
+        ],
+        "before": [
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "result_role": "one coherent long-form text document"
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_plan",
+                  "stage_information": {
+                    "max_sections": 12,
+                    "assembly": "host-ordered Markdown headings and section bodies"
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Design the complete document before drafting any section.",
+                    "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+                    "Use between 1 and 12 sections.",
+                    "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+                    "Do not write section prose in this planning stage.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "document_title": [
+                  "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=500)]"
+                ],
+                "sections": [
+                  "typing.Annotated[list[agently.builtins.plugins.AgentPattern.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_plan', 'stage_information': {'max_sections': 12, 'assembly': 'host-ordered Markdown headings and section bodies'}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Design the complete document before drafting any section.\n  - Return an ordered section plan whose briefs collectively cover the original request\n    without filler or overlap.\n  - Use between 1 and 12 sections.\n  - Give every section a unique stable section_id, a reader-facing title, and a concrete\n    writing brief.\n  - Do not write section prose in this planning stage.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  result_role: one coherent long-form text document\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"document_title\": <str>, //\n  \"sections\": [\n      {\n        \"section_id\": <str>, //\n        \"title\": <str>, //\n        \"brief\": <str> //\n      },\n      ...\n    ] //\n}\n\nField requirements:\n- document_title: required; must not be null; length: 1..500 characters\n- sections: required; must not be null; item count: >= 1\n- sections[*].section_id: required; must not be null; length: 1..120 characters\n- sections[*].title: required; must not be null; length: 1..300 characters\n- sections[*].brief: required; must not be null; length: 1..2000 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "section_index": 0,
+                  "current_section": {
+                    "section_id": "context",
+                    "title": "Context",
+                    "brief": "State the context."
+                  }
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_1",
+                  "stage_information": {
+                    "document_plan": {
+                      "document_title": "Guide",
+                      "sections": [
+                        {
+                          "section_id": "context",
+                          "title": "Context",
+                          "brief": "State the context."
+                        },
+                        {
+                          "section_id": "checks",
+                          "title": "Checks",
+                          "brief": "List the checks."
+                        }
+                      ]
+                    },
+                    "accepted_predecessor_continuity": [],
+                    "continuity_note_max_chars": 4000,
+                    "is_final_section": false
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Write only the current section body while satisfying its brief and the original request contract.",
+                    "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+                    "Do not repeat the document title or section heading; the host adds headings during assembly.",
+                    "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+                    "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+                    "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]"
+                ],
+                "continuity_note": [
+                  "str"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_1', 'stage_information': {'document_plan': {'document_title': 'Guide', 'sections': [{'section_id': 'context', 'title': 'Context', 'brief': 'State the context.'}, {'section_id': 'checks', 'title': 'Checks', 'brief': 'List the checks.'}]}, 'accepted_predecessor_continuity': [], 'continuity_note_max_chars': 4000, 'is_final_section': False}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Write only the current section body while satisfying its brief and the original\n    request contract.\n  - Use the complete document plan for global coherence and the bounded predecessor\n    notes only for continuity.\n  - Do not repeat the document title or section heading; the host adds headings during\n    assembly.\n  - Do not claim facts that are absent from the supplied request, evidence, or tool\n    results; label necessary assumptions.\n  - Return a concise continuity_note containing only facts, terminology, commitments,\n    or transitions that a later section must preserve.\n  - Keep continuity_note within 4000 characters; it may be empty for the final section.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  current_section:\n    brief: State the context.\n    section_id: context\n    title: Context\n  section_index: 0\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str>, //\n  \"continuity_note\": <str> //\n}\n\nField requirements:\n- body: required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "section_index": 1,
+                  "current_section": {
+                    "section_id": "checks",
+                    "title": "Checks",
+                    "brief": "List the checks."
+                  }
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_2",
+                  "stage_information": {
+                    "document_plan": {
+                      "document_title": "Guide",
+                      "sections": [
+                        {
+                          "section_id": "context",
+                          "title": "Context",
+                          "brief": "State the context."
+                        },
+                        {
+                          "section_id": "checks",
+                          "title": "Checks",
+                          "brief": "List the checks."
+                        }
+                      ]
+                    },
+                    "accepted_predecessor_continuity": [
+                      {
+                        "section_id": "context",
+                        "title": "Context",
+                        "note": "Use the term Deployment."
+                      }
+                    ],
+                    "continuity_note_max_chars": 4000,
+                    "is_final_section": true
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Write only the current section body while satisfying its brief and the original request contract.",
+                    "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+                    "Do not repeat the document title or section heading; the host adds headings during assembly.",
+                    "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+                    "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+                    "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]"
+                ],
+                "continuity_note": [
+                  "str"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_2', 'stage_information': {'document_plan': {'document_title': 'Guide', 'sections': [{'section_id': 'context', 'title': 'Context', 'brief': 'State the context.'}, {'section_id': 'checks', 'title': 'Checks', 'brief': 'List the checks.'}]}, 'accepted_predecessor_continuity': [{'section_id': 'context', 'title': 'Context', 'note': 'Use the term Deployment.'}], 'continuity_note_max_chars': 4000, 'is_final_section': True}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Write only the current section body while satisfying its brief and the original\n    request contract.\n  - Use the complete document plan for global coherence and the bounded predecessor\n    notes only for continuity.\n  - Do not repeat the document title or section heading; the host adds headings during\n    assembly.\n  - Do not claim facts that are absent from the supplied request, evidence, or tool\n    results; label necessary assumptions.\n  - Return a concise continuity_note containing only facts, terminology, commitments,\n    or transitions that a later section must preserve.\n  - Keep continuity_note within 4000 characters; it may be empty for the final section.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  current_section:\n    brief: List the checks.\n    section_id: checks\n    title: Checks\n  section_index: 1\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str>, //\n  \"continuity_note\": <str> //\n}\n\nField requirements:\n- body: required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          }
+        ],
+        "after": [
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {},
+              "instruct": "为 [input] 规划完整文档，每章回答一个不同的核心问题。将重复内容安排在一个主章节中充分说明，其他章节仅引用。[output.part_plan] 的写作安排应明确本章新增贡献及与前文的承接，不写正文。",
+              "output": {
+                "part_plan": [
+                  "typing.Annotated[list[agently.builtins.plugins.AgentExecution.modules.long_content_flow._Part], MinLen(min_length=1), MaxLen(max_length=12)]"
+                ],
+                "document_title": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "整篇文档的标题"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INSTRUCT]:\n为 [input] 规划完整文档，每章回答一个不同的核心问题。将重复内容安排在一个主章节中充分说明，其他章节仅引用。[output.part_plan] 的写作安排应明确本章新增贡献及与前文的承接，不写正文。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"part_plan\": [\n      {\n        \"part_title\": <str>, // 本段文档的标题\n        \"part_brief\": <str> // 本段文档内容的概要\n      },\n      ...\n    ], //\n  \"document_title\": <str> // 整篇文档的标题\n}\n\nField requirements:\n- part_plan: required; must not be null; item count: 1..12\n- part_plan[*].part_title: 本段文档的标题; required; must not be null; length: >= 1 characters\n- part_plan[*].part_brief: 本段文档内容的概要; required; must not be null; length: >= 1 characters\n- document_title: 整篇文档的标题; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {
+                "current_section": {
+                  "part_title": "Context",
+                  "part_brief": "State the context."
+                },
+                "待写章节的计划": [
+                  {
+                    "part_title": "Checks",
+                    "part_brief": "List the checks."
+                  }
+                ],
+                "已写章节的实际摘要": [],
+                "previous_tail": []
+              },
+              "instruct": "遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。",
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "[info.current_section] 指定的当前章节完整正文。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- current_section: {'part_title': 'Context', 'part_brief': 'State the context.'}\n- 待写章节的计划: [{'part_title': 'Checks', 'part_brief': 'List the checks.'}]\n- 已写章节的实际摘要: []\n- previous_tail: []\n\n[INSTRUCT]:\n遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str> // [info.current_section] 指定的当前章节完整正文。\n}\n\nField requirements:\n- body: [info.current_section] 指定的当前章节完整正文。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "First body — 中文。",
+              "info": {
+                "chapter_title": "Context",
+                "sections": []
+              },
+              "instruct": "概括 [input] 的全章内容，结合 [info.sections] 理解结构，返回 [output]；不补写正文中没有的结论。",
+              "output": {
+                "summary": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- chapter_title: Context\n- sections: []\n\n[INSTRUCT]:\n概括 [input] 的全章内容，结合 [info.sections] 理解结构，返回 [output]；不补写正文中没有的结论。\n\n[INPUT]:\nFirst body — 中文。\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"summary\": <str> // 全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。\n}\n\nField requirements:\n- summary: 全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {
+                "current_section": {
+                  "part_title": "Checks",
+                  "part_brief": "List the checks."
+                },
+                "待写章节的计划": [],
+                "已写章节的实际摘要": [
+                  {
+                    "chapter_title": "Context",
+                    "sections": [],
+                    "summary": "First body — 中文。"
+                  }
+                ],
+                "previous_tail": []
+              },
+              "instruct": "遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。",
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "[info.current_section] 指定的当前章节完整正文。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- current_section: {'part_title': 'Checks', 'part_brief': 'List the checks.'}\n- 待写章节的计划: []\n- 已写章节的实际摘要: [{'chapter_title': 'Context', 'sections': [], 'summary': 'First body — 中文。'}]\n- previous_tail: []\n\n[INSTRUCT]:\n遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str> // [info.current_section] 指定的当前章节完整正文。\n}\n\nField requirements:\n- body: [info.current_section] 指定的当前章节完整正文。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          }
+        ],
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "long_content",
+        "reason": "approved_long_content_prompt"
+      }
+    ],
+    "long_content_rejected": [
+      {
+        "path": [
+          "dispatches"
+        ],
+        "before": 3,
+        "after": 4,
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "events"
+        ],
+        "before": [
+          {
+            "path": "pattern.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.agent_execution.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "pattern.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.pattern.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "validation.failed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.validation.failed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "error",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          }
+        ],
+        "after": [
+          {
+            "path": "route.selected",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.agent_execution.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route_selection.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route_selection.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.route.selected.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.started",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.started.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "execution.stage.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.execution.stage.completed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "validation.failed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "runtime.progress.validation.failed.completed",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          },
+          {
+            "path": "error",
+            "event": "done",
+            "delta": null,
+            "is_complete": true,
+            "completion_source": null
+          }
+        ],
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "files",
+          "workspace/.agently/files/<EXECUTION:1>-long-content-document/revision-0/chapter-1.md"
+        ],
+        "operation": "add",
+        "after": "First body — 中文。",
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "files",
+          "workspace/.agently/files/<EXECUTION:1>-long-content-document/revision-0/chapter-2.md"
+        ],
+        "operation": "add",
+        "after": "Second body.",
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "requests"
+        ],
+        "before": [
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "result_role": "one coherent long-form text document"
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_plan",
+                  "stage_information": {
+                    "max_sections": 12,
+                    "assembly": "host-ordered Markdown headings and section bodies"
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Design the complete document before drafting any section.",
+                    "Return an ordered section plan whose briefs collectively cover the original request without filler or overlap.",
+                    "Use between 1 and 12 sections.",
+                    "Give every section a unique stable section_id, a reader-facing title, and a concrete writing brief.",
+                    "Do not write section prose in this planning stage.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "document_title": [
+                  "typing.Annotated[str, MinLen(min_length=1), MaxLen(max_length=500)]"
+                ],
+                "sections": [
+                  "typing.Annotated[list[agently.builtins.plugins.AgentPattern.modules.long_content_flow._DocumentSection], MinLen(min_length=1)]"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_plan', 'stage_information': {'max_sections': 12, 'assembly': 'host-ordered Markdown headings and section bodies'}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Design the complete document before drafting any section.\n  - Return an ordered section plan whose briefs collectively cover the original request\n    without filler or overlap.\n  - Use between 1 and 12 sections.\n  - Give every section a unique stable section_id, a reader-facing title, and a concrete\n    writing brief.\n  - Do not write section prose in this planning stage.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  result_role: one coherent long-form text document\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"document_title\": <str>, //\n  \"sections\": [\n      {\n        \"section_id\": <str>, //\n        \"title\": <str>, //\n        \"brief\": <str> //\n      },\n      ...\n    ] //\n}\n\nField requirements:\n- document_title: required; must not be null; length: 1..500 characters\n- sections: required; must not be null; item count: >= 1\n- sections[*].section_id: required; must not be null; length: 1..120 characters\n- sections[*].title: required; must not be null; length: 1..300 characters\n- sections[*].brief: required; must not be null; length: 1..2000 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "section_index": 0,
+                  "current_section": {
+                    "section_id": "context",
+                    "title": "Context",
+                    "brief": "State the context."
+                  }
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_1",
+                  "stage_information": {
+                    "document_plan": {
+                      "document_title": "Guide",
+                      "sections": [
+                        {
+                          "section_id": "context",
+                          "title": "Context",
+                          "brief": "State the context."
+                        },
+                        {
+                          "section_id": "checks",
+                          "title": "Checks",
+                          "brief": "List the checks."
+                        }
+                      ]
+                    },
+                    "accepted_predecessor_continuity": [],
+                    "continuity_note_max_chars": 4000,
+                    "is_final_section": false
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Write only the current section body while satisfying its brief and the original request contract.",
+                    "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+                    "Do not repeat the document title or section heading; the host adds headings during assembly.",
+                    "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+                    "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+                    "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]"
+                ],
+                "continuity_note": [
+                  "str"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_1', 'stage_information': {'document_plan': {'document_title': 'Guide', 'sections': [{'section_id': 'context', 'title': 'Context', 'brief': 'State the context.'}, {'section_id': 'checks', 'title': 'Checks', 'brief': 'List the checks.'}]}, 'accepted_predecessor_continuity': [], 'continuity_note_max_chars': 4000, 'is_final_section': False}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Write only the current section body while satisfying its brief and the original\n    request contract.\n  - Use the complete document plan for global coherence and the bounded predecessor\n    notes only for continuity.\n  - Do not repeat the document title or section heading; the host adds headings during\n    assembly.\n  - Do not claim facts that are absent from the supplied request, evidence, or tool\n    results; label necessary assumptions.\n  - Return a concise continuity_note containing only facts, terminology, commitments,\n    or transitions that a later section must preserve.\n  - Keep continuity_note within 4000 characters; it may be empty for the final section.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  current_section:\n    brief: State the context.\n    section_id: context\n    title: Context\n  section_index: 0\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str>, //\n  \"continuity_note\": <str> //\n}\n\nField requirements:\n- body: required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": {
+                "original_input": "Write a two-section guide.",
+                "pattern_stage_input": {
+                  "section_index": 1,
+                  "current_section": {
+                    "section_id": "checks",
+                    "title": "Checks",
+                    "brief": "List the checks."
+                  }
+                }
+              },
+              "info": [
+                {
+                  "agent_pattern": "long_content",
+                  "pattern_stage": "section_2",
+                  "stage_information": {
+                    "document_plan": {
+                      "document_title": "Guide",
+                      "sections": [
+                        {
+                          "section_id": "context",
+                          "title": "Context",
+                          "brief": "State the context."
+                        },
+                        {
+                          "section_id": "checks",
+                          "title": "Checks",
+                          "brief": "List the checks."
+                        }
+                      ]
+                    },
+                    "accepted_predecessor_continuity": [
+                      {
+                        "section_id": "context",
+                        "title": "Context",
+                        "note": "Use the term Deployment."
+                      }
+                    ],
+                    "continuity_note_max_chars": 4000,
+                    "is_final_section": true
+                  }
+                }
+              ],
+              "instruct": [
+                {
+                  "agent_pattern_stage": [
+                    "Write only the current section body while satisfying its brief and the original request contract.",
+                    "Use the complete document plan for global coherence and the bounded predecessor notes only for continuity.",
+                    "Do not repeat the document title or section heading; the host adds headings during assembly.",
+                    "Do not claim facts that are absent from the supplied request, evidence, or tool results; label necessary assumptions.",
+                    "Return a concise continuity_note containing only facts, terminology, commitments, or transitions that a later section must preserve.",
+                    "Keep continuity_note within 4000 characters; it may be empty for the final section.",
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought."
+                  ]
+                }
+              ],
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]"
+                ],
+                "continuity_note": [
+                  "str"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- {'agent_pattern': 'long_content', 'pattern_stage': 'section_2', 'stage_information': {'document_plan': {'document_title': 'Guide', 'sections': [{'section_id': 'context', 'title': 'Context', 'brief': 'State the context.'}, {'section_id': 'checks', 'title': 'Checks', 'brief': 'List the checks.'}]}, 'accepted_predecessor_continuity': [{'section_id': 'context', 'title': 'Context', 'note': 'Use the term Deployment.'}], 'continuity_note_max_chars': 4000, 'is_final_section': True}}\n\n[INSTRUCT]:\n- agent_pattern_stage:\n  - Write only the current section body while satisfying its brief and the original\n    request contract.\n  - Use the complete document plan for global coherence and the bounded predecessor\n    notes only for continuity.\n  - Do not repeat the document title or section heading; the host adds headings during\n    assembly.\n  - Do not claim facts that are absent from the supplied request, evidence, or tool\n    results; label necessary assumptions.\n  - Return a concise continuity_note containing only facts, terminology, commitments,\n    or transitions that a later section must preserve.\n  - Keep continuity_note within 4000 characters; it may be empty for the final section.\n  - Return only this stage's declared result; do not expose hidden chain-of-thought.\n\n\n[INPUT]:\noriginal_input: Write a two-section guide.\npattern_stage_input:\n  current_section:\n    brief: List the checks.\n    section_id: checks\n    title: Checks\n  section_index: 1\n\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str>, //\n  \"continuity_note\": <str> //\n}\n\nField requirements:\n- body: required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          }
+        ],
+        "after": [
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {},
+              "instruct": "为 [input] 规划完整文档，每章回答一个不同的核心问题。将重复内容安排在一个主章节中充分说明，其他章节仅引用。[output.part_plan] 的写作安排应明确本章新增贡献及与前文的承接，不写正文。",
+              "output": {
+                "part_plan": [
+                  "typing.Annotated[list[agently.builtins.plugins.AgentExecution.modules.long_content_flow._Part], MinLen(min_length=1), MaxLen(max_length=12)]"
+                ],
+                "document_title": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "整篇文档的标题"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INSTRUCT]:\n为 [input] 规划完整文档，每章回答一个不同的核心问题。将重复内容安排在一个主章节中充分说明，其他章节仅引用。[output.part_plan] 的写作安排应明确本章新增贡献及与前文的承接，不写正文。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"part_plan\": [\n      {\n        \"part_title\": <str>, // 本段文档的标题\n        \"part_brief\": <str> // 本段文档内容的概要\n      },\n      ...\n    ], //\n  \"document_title\": <str> // 整篇文档的标题\n}\n\nField requirements:\n- part_plan: required; must not be null; item count: 1..12\n- part_plan[*].part_title: 本段文档的标题; required; must not be null; length: >= 1 characters\n- part_plan[*].part_brief: 本段文档内容的概要; required; must not be null; length: >= 1 characters\n- document_title: 整篇文档的标题; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {
+                "current_section": {
+                  "part_title": "Context",
+                  "part_brief": "State the context."
+                },
+                "待写章节的计划": [
+                  {
+                    "part_title": "Checks",
+                    "part_brief": "List the checks."
+                  }
+                ],
+                "已写章节的实际摘要": [],
+                "previous_tail": []
+              },
+              "instruct": "遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。",
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "[info.current_section] 指定的当前章节完整正文。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- current_section: {'part_title': 'Context', 'part_brief': 'State the context.'}\n- 待写章节的计划: [{'part_title': 'Checks', 'part_brief': 'List the checks.'}]\n- 已写章节的实际摘要: []\n- previous_tail: []\n\n[INSTRUCT]:\n遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str> // [info.current_section] 指定的当前章节完整正文。\n}\n\nField requirements:\n- body: [info.current_section] 指定的当前章节完整正文。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "First body — 中文。",
+              "info": {
+                "chapter_title": "Context",
+                "sections": []
+              },
+              "instruct": "概括 [input] 的全章内容，结合 [info.sections] 理解结构，返回 [output]；不补写正文中没有的结论。",
+              "output": {
+                "summary": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- chapter_title: Context\n- sections: []\n\n[INSTRUCT]:\n概括 [input] 的全章内容，结合 [info.sections] 理解结构，返回 [output]；不补写正文中没有的结论。\n\n[INPUT]:\nFirst body — 中文。\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"summary\": <str> // 全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。\n}\n\nField requirements:\n- summary: 全章实际内容的简要记录。允许省略细节；保留的表述须维持原文的条件、例示、备选或建议状态，不改变原意。不重复目录标题和铺垫。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          },
+          {
+            "prompt": {
+              "input": "Write a two-section guide.",
+              "info": {
+                "current_section": {
+                  "part_title": "Checks",
+                  "part_brief": "List the checks."
+                },
+                "待写章节的计划": [],
+                "已写章节的实际摘要": [
+                  {
+                    "chapter_title": "Context",
+                    "sections": [],
+                    "summary": "First body — 中文。"
+                  }
+                ],
+                "previous_tail": []
+              },
+              "instruct": "遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。",
+              "output": {
+                "body": [
+                  "typing.Annotated[str, MinLen(min_length=1)]",
+                  "[info.current_section] 指定的当前章节完整正文。"
+                ]
+              },
+              "output_format": "json"
+            },
+            "prompt_text": "user:\n[INFO]:\n- current_section: {'part_title': 'Checks', 'part_brief': 'List the checks.'}\n- 待写章节的计划: []\n- 已写章节的实际摘要: [{'chapter_title': 'Context', 'sections': [], 'summary': 'First body — 中文。'}]\n- previous_tail: []\n\n[INSTRUCT]:\n遵循 [input] 的全文要求，本次只交付 [info.current_section] 指定的当前章节正文。[info.待写章节的计划] 是后文章节的完整范围；为空时本章结束全文，不预告后文章节。[info.已写章节的实际摘要] 是已收录正文的索引，仅用于必要承接。展开本章的新信息，已有说明只作简短引用，不重复铺陈。返回 [output]；正文不附写作安排。区分已有事实与方案建议；没有来源的数据只能作为明确标注的假设或待验证目标，不能写成现状或实测效果。各段落以及本章与前后章节的衔接应流畅自然。需要时简短回扣已有内容，避免把已讲清的论述整段重讲。[info.previous_tail] 非空时，以其中的上章末尾原文为具体衔接语境，只读不改。若 [info.待写章节的计划] 非空，本章阐述完整后与后文自然衔接，不必刻意预告或结束全文；为空时正常完成全文收束。\n\n[INPUT]:\nWrite a two-section guide.\n\n[OUTPUT REQUIREMENT]:\nData Format: JSON\nData Structure:\n{\n  \"body\": <str> // [info.current_section] 指定的当前章节完整正文。\n}\n\nField requirements:\n- body: [info.current_section] 指定的当前章节完整正文。; required; must not be null; length: >= 1 characters\n\n[OUTPUT]:\nassistant:"
+          }
+        ],
+        "reason": "approved_long_content_prompt"
+      },
+      {
+        "path": [
+          "route"
+        ],
+        "before": "agent_pattern",
+        "after": "long_content",
+        "reason": "approved_long_content_prompt"
+      }
+    ],
+    "action_once": [],
+    "resume_flat": [
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": {
+          "source": "Original fact"
+        },
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "input"
+        ],
+        "operation": "add",
+        "after": "Original request",
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "value"
+        ],
+        "before": {
+          "status": "completed",
+          "accepted": true,
+          "artifact_status": "accepted",
+          "task_id": "characterization-terminal",
+          "final_result": "retained business value",
+          "final_response": "Completed. Deliverable result: retained business value",
+          "iterations": 1,
+          "resumed": true
+        },
+        "after": "retained business value",
+        "reason": "restored_business_review"
+      }
+    ],
+    "resume_taskboard": [
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": {
+          "source": "Original fact"
+        },
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "prompt",
+          "input"
+        ],
+        "operation": "add",
+        "after": "Original request",
+        "reason": "restored_business_review"
+      },
+      {
+        "path": [
+          "review_calls",
+          0,
+          "value"
+        ],
+        "before": {
+          "status": "completed",
+          "accepted": true,
+          "artifact_status": "accepted",
+          "task_id": "characterization-terminal",
+          "final_result": "retained business value",
+          "final_response": "Completed. Deliverable result: retained business value",
+          "iterations": 1,
+          "resumed": true
+        },
+        "after": "retained business value",
+        "reason": "restored_business_review"
+      }
+    ],
+    "goal_direct": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Explain the source"
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "State the assumption"
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "3ee199869dc89c9089b69338703524fc200512097263ba4894c049dd2e0eddf6",
+        "after_sha256": "789ac8ae521b9fc7575ef2ec037d97f7e196ce846b341f91917763b7c4b4dc5f",
+        "reason": "prompt_owned_goals"
+      }
+    ],
+    "ensure_short": [],
+    "ensure_continuation": [
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": [
+          {
+            "original_deliverable_instructions": null
+          }
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input"
+        ],
+        "before": {
+          "long_output_continuation": {
+            "base_revision": 1,
+            "base_digest": "fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3",
+            "anchor": "fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3",
+            "continuity_context": {
+              "document_start": "prefix-",
+              "accepted_tail": "prefix-",
+              "accepted_character_count": 7
+            },
+            "assembly_slots": [
+              {
+                "path_key": "$text",
+                "operation": "append_text",
+                "next_unit_index": 1,
+                "is_set": true,
+                "value_contract": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              }
+            ],
+            "accepted_unit_count": 1,
+            "state_summary": "",
+            "repair_feedback": null
+          },
+          "original_input": "Return prefix-tail — 中文."
+        },
+        "after": "{\"original_input\": \"Return prefix-tail — 中文.\", \"long_output_continuation\": {\"base_revision\": 1, \"base_digest\": \"fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3\", \"anchor\": \"fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3\", \"continuity_context\": {\"document_start\": \"prefix-\", \"accepted_tail\": \"prefix-\", \"accepted_character_count\": 7}, \"assembly_slots\": [{\"path_key\": \"$text\", \"operation\": \"append_text\", \"next_unit_index\": 1, \"is_set\": true, \"value_contract\": {\"type\": \"string\", \"minLength\": 1, \"maxLength\": 4000}}], \"accepted_unit_count\": 1, \"state_summary\": \"\", \"repair_feedback\": null}}",
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          "long_output_delivery_protocol"
+        ],
+        "before": [
+          "Continue the original requested deliverable; do not restart or summarize it.",
+          "Return only the private continuation envelope declared by the output schema.",
+          "Start the JSON object immediately with base_revision, then base_digest, then anchor; close all three control fields before starting updates.",
+          "Do not emit markdown, commentary, or the original business JSON root. Business values belong only inside updates[*].value.",
+          "Echo base_revision, base_digest, and anchor exactly from long_output_continuation.",
+          "For plain text, continuity_context is read-only accepted business text evidence: document_start preserves global title/heading/numbering style, accepted_tail ends at the exact join, and accepted_character_count is the host-counted total that replaces any estimate. Start append_text immediately after accepted_tail's final character and preserve the conventions visible in document_start. If accepted_tail ends inside an unfinished token, sentence, line, or Markdown construct, continue it with zero leading whitespace; if it contains a complete phrase missing only punctuation, emit only the missing punctuation before continuing; otherwise add the paragraph or line separator required by the document. Do not echo continuity_context as a control field, repeat accepted text inside append_text, or restate any heading/section already visible there or marked complete in state_summary. If the accepted artifact already contains its conclusion and meets the original contract according to accepted_character_count, return updates=[] with is_final=true instead of appending a second conclusion or filler.",
+          "For structured output, continuity_context is read-only trusted accepted business evidence. When complete_snapshot=true, accepted_json is canonical JSON evidence text for the exact assembled value so far: read it to preserve language, naming, design choices, and cross-field facts, but never treat it as the response shape, copy it into updates, or modify accepted units. When complete_snapshot=false, only bounded accepted_head and accepted_tail evidence excerpts are available; do not invent claims about omitted middle content, and preserve essential cumulative facts in state_summary. accepted_serialized_character_count is host-counted.",
+          "Use only offered path_key and operation combinations. path_key is the sole model-returned slot identity: copy its complete offered value, including both the pN prefix and mnemonic suffix, exactly; never substitute an original business field name.",
+          "Assembly slots are offered in schema order. A later slot may be withheld while an earlier exact-count list is incomplete; finish the offered slot and never invent or address a slot that is not offered.",
+          "Each update value is exactly one complete business item and must satisfy the offered value_contract.",
+          "Preserve every JSON kind in value_contract exactly: a nested schema with type array must be a JSON array, never a keyed object such as option_a/option_b; do not invent wrapper fields.",
+          "For an intentionally empty offered list, use operation declare_empty_list with unit_index 0 and value []; never use it after an item or prior empty declaration.",
+          "A list slot with empty_is_declared=true is already complete as an empty list: skip it and continue with another missing slot.",
+          "For an intentionally empty offered text field, use operation declare_empty_text with unit_index 0 and value \"\"; never use it after text or a prior empty declaration.",
+          "A text slot with empty_is_declared=true is already complete as empty text: skip it unless a declared not-null rule requires later append_text content.",
+          "For structured output, an offered append_text slot is an unset atomic JSON string: one closed update completes it. Already committed structured string slots are not offered and must never be addressed again. If one logical string cannot fit the 4000-character unit bound, the original output contract must represent it as an ordered list of chunks instead.",
+          "unit_index is the zero-based assembly position for that path_key; it is not an index field inside the business value.",
+          "For append_item, use next_unit_index for the first complete new list item and increment unit_index by one for each following item.",
+          "For list slots, min_items and max_items are authoritative total-count bounds when present. Do not declare final before min_items is reached, never emit an item at or beyond max_items, and skip a list slot once its current next_unit_index equals max_items.",
+          "For append_text, emit a new closed text block of at most 4000 characters and use next_unit_index.",
+          "For plain-text output, emit exactly one append_text update in this envelope; do not split one response into multiple text updates. Unless the final remainder is shorter, make that one block 1500 to 3500 characters.",
+          "For set_value, set only an offered missing value and use unit_index 0.",
+          "For structured output, emit no more than four updates in one envelope so every update can close before the provider output limit.",
+          "If repair_feedback.reason_code is continuation_header_incomplete, continuation_update_rejected, or continuation_no_complete_update, first close the three control fields and emit at most one corrected update in this recovery envelope.",
+          "Never repeat an already accepted unit. Repeated content that is genuinely required may still appear inside a new unit.",
+          "Set is_final=true only after the complete original deliverable has been covered.",
+          "Keep state_summary under 2000 characters and include only continuity facts needed by the next request."
+        ],
+        "after": [
+          "Inspect the accepted ending before adding text. A missing terminal signal does not prove missing content; if this deliverable is already complete, confirm completion with no updates.",
+          "Continue only the current request deliverable defined by [input.original_input] and [info.original_deliverable_instructions]. Surrounding task or document plans are context, not additional output.",
+          "Even when the original request asks for a complete rewrite, the accepted prefix is already part of that rewrite. Append its missing suffix; do not execute the original request again.",
+          "Input references in the original instructions refer to [input.original_input]; original output references describe business values, not this private envelope.",
+          "Return only the private envelope in [output], with business content inside [output.updates]. Start with base_revision, base_digest, then anchor, copying them exactly from [input.long_output_continuation] before any updates.",
+          "Use only offered assembly_slots: copy the complete path_key and allowed operation. Each value must satisfy its value_contract and any slot description. unit_index is the zero-based assembly position, not a field inside the business value.",
+          "Never repeat or modify accepted units. Repeated content genuinely required within a new unit remains allowed.",
+          "For plain text, continuity_context.accepted_tail is the exact join; document_start supplies formatting conventions. Finish the open word, sentence, item or construct first. Add only whitespace needed by the text, not transport indentation. accepted_character_count is Host-measured.",
+          "Emit one append_text update using next_unit_index, or none if nothing remains. There is no minimum block length. Complete the remaining deliverable in this update when it fits value_contract and the response window; otherwise close a useful block and leave room to close the envelope. Do not add filler, another conclusion, or later workflow content merely to continue.",
+          "Apply repair_feedback when present. After an incomplete envelope or rejected update, use one smaller corrected update that can close; preserve every accepted unit.",
+          "Set completion=complete when the current request deliverable is complete after these updates, even if the surrounding task has later stages; otherwise use incomplete. If the supplied context is insufficient to decide or continue safely, use undetermined rather than guessing or adding filler.",
+          "Keep state_summary under 2000 characters: only next-use continuity facts, or the concrete evidence gap for undetermined. Leave it empty when none are needed."
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          "original_deliverable_instructions"
+        ],
+        "operation": "remove",
+        "before": null,
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "completion"
+        ],
+        "operation": "add",
+        "after": [
+          "Literal[complete, incomplete, undetermined]"
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "is_final"
+        ],
+        "operation": "remove",
+        "before": [
+          "bool"
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "dd30b8565be594879c415c3b67b9ed7f8de8162e023e0fb36958e8ca7e2b479b",
+        "after_sha256": "ee40aa54bac39040ca38ddc78affd91564cb3619a128e8663b6e056ef047e8e2",
+        "reason": "approved_conditional_continuation"
+      }
+    ],
+    "ensure_stale": [
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info"
+        ],
+        "operation": "add",
+        "after": [
+          {
+            "original_deliverable_instructions": null
+          }
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input"
+        ],
+        "before": {
+          "long_output_continuation": {
+            "base_revision": 1,
+            "base_digest": "fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3",
+            "anchor": "fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3",
+            "continuity_context": {
+              "document_start": "prefix-",
+              "accepted_tail": "prefix-",
+              "accepted_character_count": 7
+            },
+            "assembly_slots": [
+              {
+                "path_key": "$text",
+                "operation": "append_text",
+                "next_unit_index": 1,
+                "is_set": true,
+                "value_contract": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              }
+            ],
+            "accepted_unit_count": 1,
+            "state_summary": "",
+            "repair_feedback": null
+          },
+          "original_input": "Return prefix-tail — 中文."
+        },
+        "after": "{\"original_input\": \"Return prefix-tail — 中文.\", \"long_output_continuation\": {\"base_revision\": 1, \"base_digest\": \"fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3\", \"anchor\": \"fb4f887386c290b35d300522786f747ab48352918a3d77b5eb76256366469bb3\", \"continuity_context\": {\"document_start\": \"prefix-\", \"accepted_tail\": \"prefix-\", \"accepted_character_count\": 7}, \"assembly_slots\": [{\"path_key\": \"$text\", \"operation\": \"append_text\", \"next_unit_index\": 1, \"is_set\": true, \"value_contract\": {\"type\": \"string\", \"minLength\": 1, \"maxLength\": 4000}}], \"accepted_unit_count\": 1, \"state_summary\": \"\", \"repair_feedback\": null}}",
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          "long_output_delivery_protocol"
+        ],
+        "before": [
+          "Continue the original requested deliverable; do not restart or summarize it.",
+          "Return only the private continuation envelope declared by the output schema.",
+          "Start the JSON object immediately with base_revision, then base_digest, then anchor; close all three control fields before starting updates.",
+          "Do not emit markdown, commentary, or the original business JSON root. Business values belong only inside updates[*].value.",
+          "Echo base_revision, base_digest, and anchor exactly from long_output_continuation.",
+          "For plain text, continuity_context is read-only accepted business text evidence: document_start preserves global title/heading/numbering style, accepted_tail ends at the exact join, and accepted_character_count is the host-counted total that replaces any estimate. Start append_text immediately after accepted_tail's final character and preserve the conventions visible in document_start. If accepted_tail ends inside an unfinished token, sentence, line, or Markdown construct, continue it with zero leading whitespace; if it contains a complete phrase missing only punctuation, emit only the missing punctuation before continuing; otherwise add the paragraph or line separator required by the document. Do not echo continuity_context as a control field, repeat accepted text inside append_text, or restate any heading/section already visible there or marked complete in state_summary. If the accepted artifact already contains its conclusion and meets the original contract according to accepted_character_count, return updates=[] with is_final=true instead of appending a second conclusion or filler.",
+          "For structured output, continuity_context is read-only trusted accepted business evidence. When complete_snapshot=true, accepted_json is canonical JSON evidence text for the exact assembled value so far: read it to preserve language, naming, design choices, and cross-field facts, but never treat it as the response shape, copy it into updates, or modify accepted units. When complete_snapshot=false, only bounded accepted_head and accepted_tail evidence excerpts are available; do not invent claims about omitted middle content, and preserve essential cumulative facts in state_summary. accepted_serialized_character_count is host-counted.",
+          "Use only offered path_key and operation combinations. path_key is the sole model-returned slot identity: copy its complete offered value, including both the pN prefix and mnemonic suffix, exactly; never substitute an original business field name.",
+          "Assembly slots are offered in schema order. A later slot may be withheld while an earlier exact-count list is incomplete; finish the offered slot and never invent or address a slot that is not offered.",
+          "Each update value is exactly one complete business item and must satisfy the offered value_contract.",
+          "Preserve every JSON kind in value_contract exactly: a nested schema with type array must be a JSON array, never a keyed object such as option_a/option_b; do not invent wrapper fields.",
+          "For an intentionally empty offered list, use operation declare_empty_list with unit_index 0 and value []; never use it after an item or prior empty declaration.",
+          "A list slot with empty_is_declared=true is already complete as an empty list: skip it and continue with another missing slot.",
+          "For an intentionally empty offered text field, use operation declare_empty_text with unit_index 0 and value \"\"; never use it after text or a prior empty declaration.",
+          "A text slot with empty_is_declared=true is already complete as empty text: skip it unless a declared not-null rule requires later append_text content.",
+          "For structured output, an offered append_text slot is an unset atomic JSON string: one closed update completes it. Already committed structured string slots are not offered and must never be addressed again. If one logical string cannot fit the 4000-character unit bound, the original output contract must represent it as an ordered list of chunks instead.",
+          "unit_index is the zero-based assembly position for that path_key; it is not an index field inside the business value.",
+          "For append_item, use next_unit_index for the first complete new list item and increment unit_index by one for each following item.",
+          "For list slots, min_items and max_items are authoritative total-count bounds when present. Do not declare final before min_items is reached, never emit an item at or beyond max_items, and skip a list slot once its current next_unit_index equals max_items.",
+          "For append_text, emit a new closed text block of at most 4000 characters and use next_unit_index.",
+          "For plain-text output, emit exactly one append_text update in this envelope; do not split one response into multiple text updates. Unless the final remainder is shorter, make that one block 1500 to 3500 characters.",
+          "For set_value, set only an offered missing value and use unit_index 0.",
+          "For structured output, emit no more than four updates in one envelope so every update can close before the provider output limit.",
+          "If repair_feedback.reason_code is continuation_header_incomplete, continuation_update_rejected, or continuation_no_complete_update, first close the three control fields and emit at most one corrected update in this recovery envelope.",
+          "Never repeat an already accepted unit. Repeated content that is genuinely required may still appear inside a new unit.",
+          "Set is_final=true only after the complete original deliverable has been covered.",
+          "Keep state_summary under 2000 characters and include only continuity facts needed by the next request."
+        ],
+        "after": [
+          "Inspect the accepted ending before adding text. A missing terminal signal does not prove missing content; if this deliverable is already complete, confirm completion with no updates.",
+          "Continue only the current request deliverable defined by [input.original_input] and [info.original_deliverable_instructions]. Surrounding task or document plans are context, not additional output.",
+          "Even when the original request asks for a complete rewrite, the accepted prefix is already part of that rewrite. Append its missing suffix; do not execute the original request again.",
+          "Input references in the original instructions refer to [input.original_input]; original output references describe business values, not this private envelope.",
+          "Return only the private envelope in [output], with business content inside [output.updates]. Start with base_revision, base_digest, then anchor, copying them exactly from [input.long_output_continuation] before any updates.",
+          "Use only offered assembly_slots: copy the complete path_key and allowed operation. Each value must satisfy its value_contract and any slot description. unit_index is the zero-based assembly position, not a field inside the business value.",
+          "Never repeat or modify accepted units. Repeated content genuinely required within a new unit remains allowed.",
+          "For plain text, continuity_context.accepted_tail is the exact join; document_start supplies formatting conventions. Finish the open word, sentence, item or construct first. Add only whitespace needed by the text, not transport indentation. accepted_character_count is Host-measured.",
+          "Emit one append_text update using next_unit_index, or none if nothing remains. There is no minimum block length. Complete the remaining deliverable in this update when it fits value_contract and the response window; otherwise close a useful block and leave room to close the envelope. Do not add filler, another conclusion, or later workflow content merely to continue.",
+          "Apply repair_feedback when present. After an incomplete envelope or rejected update, use one smaller corrected update that can close; preserve every accepted unit.",
+          "Set completion=complete when the current request deliverable is complete after these updates, even if the surrounding task has later stages; otherwise use incomplete. If the supplied context is insufficient to decide or continue safely, use undetermined rather than guessing or adding filler.",
+          "Keep state_summary under 2000 characters: only next-use continuity facts, or the concrete evidence gap for undetermined. Leave it empty when none are needed."
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "instruct",
+          "original_deliverable_instructions"
+        ],
+        "operation": "remove",
+        "before": null,
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "completion"
+        ],
+        "operation": "add",
+        "after": [
+          "Literal[complete, incomplete, undetermined]"
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "output",
+          "is_final"
+        ],
+        "operation": "remove",
+        "before": [
+          "bool"
+        ],
+        "reason": "approved_conditional_continuation"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "dd30b8565be594879c415c3b67b9ed7f8de8162e023e0fb36958e8ca7e2b479b",
+        "after_sha256": "ee40aa54bac39040ca38ddc78affd91564cb3619a128e8663b6e056ef047e8e2",
+        "reason": "approved_conditional_continuation"
+      }
+    ],
+    "ensure_task_conflict": [],
+    "flat_task": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "234c48eb411c5107551196e59e5c95844404e03811f64b0d57edf042b83f6548",
+        "after_sha256": "cb9b5a01acd3bdd62841b27fe704a1adc6a5f4fde06381b1aee00ba7adcf4b49",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "f09d8ce01851801168745a1a7054f675ea6a91742c064d29e62b1ef830c66a0d",
+        "after_sha256": "83a1dc409b59af55966f2b8e98f2317ef8e866d13c88b1501545ca0c9c07f35b",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "392ff9dcf6f1d94af56f26b973b34709b86b8a1b58e59bd9e64632baaf414c03",
+        "after_sha256": "e56b9b0876eafed3a704865149430d1fd750bb0e9f62a68196b8e504e63df306",
+        "reason": "prompt_owned_goals"
+      }
+    ],
+    "taskboard_task": [
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          0,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "e8f5ee9a67c11b510a57aec0cb1233900c2b668c214fada005d06af673dc695f",
+        "after_sha256": "083fe4c34cff20392de51108cb8174a2ed491a8fc75480a3830b5e55675f0470",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt",
+          "info",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          1,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "e7fb1465ba450d73f5403ed2b898b2aeb7762bebb3b728e60a48bb493ca611f8",
+        "after_sha256": "159416f40ad304684c6b9f977acdd8ec051579225b8b858bfdf6b5dbd43201d2",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          2,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "5047845679007e73ead9b13d7b462e9b12f02fda29feffb0dfb4a8cb099e07c5",
+        "after_sha256": "3e7e89036173e8953428d59f2776d4759a98c4526b5d9fa84d4e04964189d6cf",
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "goal"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the supplied fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt",
+          "input",
+          "execution_prompt",
+          "success_criteria"
+        ],
+        "operation": "add",
+        "after": [
+          "Return the fact."
+        ],
+        "reason": "prompt_owned_goals"
+      },
+      {
+        "path": [
+          "requests",
+          3,
+          "prompt_text"
+        ],
+        "operation": "text_sha256",
+        "before_sha256": "6bf6691feab1cc397d8810df00b3b9b50df1f767a235510a87f7e19d36e4bda8",
+        "after_sha256": "6a5ac817ebbea24c7a20c4721675ccbc5696c79a65bfd9e401b808cce80e64e5",
+        "reason": "prompt_owned_goals"
+      }
+    ]
+  }
+}

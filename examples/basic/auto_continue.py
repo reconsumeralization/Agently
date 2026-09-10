@@ -1,4 +1,4 @@
-"""Generate and validate one structured result across several model windows.
+"""Use auto_continue() to continue unfinished output, not to force long writing.
 
 This example uses a real OpenAI-compatible model. Configure QWEN_API_KEY,
 QWEN_BASE_URL, and QWEN_MODEL in the environment or a local .env file.
@@ -8,23 +8,33 @@ Expected key output (content values are model-owned):
   "component_count": 75,
   "first_refdes": "C001",
   "last_refdes": "C075",
-  "accepted_unit_count": 76,
-  "replayed_unit_count": 76,
+  "request_count": 1,
+  "accepted_unit_count": 0,
+  "replayed_unit_count": 0,
   "transport_complete": true,
   "schema_complete": true,
-  "validation_repair_count": 1,
+  "validation_repair_count": 0,
   "semantic_exhaustiveness": "not_claimed"
 }
 
-The exact request and repair counts are model-owned and may vary. One bounded
-Qwen run on 2026-07-28 completed in 16 model requests, retained all 75 component
-units, and used one final-validation repair request to add only the missing
-summary.
+Observed with local qwen3.8:27b-mlx on 2026-09-10, without a max_tokens override.
+The 75 items fit in one request, so no continuation manifest was needed: zero
+accepted/replayed units describes private staging, not missing business items.
+Request and repair counts depend on model output and may vary. Enabling this
+policy does not require continuation to occur.
+
+With this policy enabled, a normal provider stop still requires one complete
+JSON carrier. Multiple objects, trailing material and unfinished JSON fail;
+they are not merged, silently cropped, or classified as length continuation.
+If a necessary continuation confirms that nothing remains, a complete, normally
+stopped and correctly correlated empty acknowledgement proceeds to the original
+validation without adding filler. The real run recorded above did not exercise
+that branch; it remains a normal-completion example, not truncation evidence.
 
 How it works:
 original ModelRequest
--> provider length terminal
--> TriggerFlow continuation requests
+-> ordinary completion: validate and return (no continuation)
+-> provider length terminal: TriggerFlow continuation requests
 -> TaskWorkspace manifest replay and digest verification
 -> original schema plus declared 75-item coverage validation
 -> one AgentExecution result
@@ -123,9 +133,9 @@ async def main() -> None:
             },
             format="json",
         )
-        .set_prompt_options({"temperature": 0.1, "max_tokens": 400})
+        .set_prompt_options({"temperature": 0.1})
         .validate(validate_component_inventory)
-        .ensure_long_output()
+        .auto_continue()
     )
 
     async for _source, item in execution.get_async_generator(type="all"):
@@ -151,13 +161,11 @@ async def main() -> None:
                 "first_refdes": result["components"][0]["refdes"],
                 "last_refdes": result["components"][-1]["refdes"],
                 "request_count": long_output["request_count"],
-                "accepted_unit_count": long_output["accepted_unit_count"],
-                "replayed_unit_count": long_output["replayed_unit_count"],
+                "accepted_unit_count": long_output.get("accepted_unit_count", 0),
+                "replayed_unit_count": long_output.get("replayed_unit_count", 0),
                 "transport_complete": long_output["transport_complete"],
                 "schema_complete": long_output["schema_complete"],
-                "validation_repair_count": long_output[
-                    "validation_repair_count"
-                ],
+                "validation_repair_count": long_output.get("validation_repair_count", 0),
                 "semantic_exhaustiveness": long_output["semantic_exhaustiveness"],
             },
             ensure_ascii=False,

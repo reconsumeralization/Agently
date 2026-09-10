@@ -223,7 +223,18 @@ class AgentExecution(Protocol):
 
     def output(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 
-    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution": ...
+    def auto_continue(self, enabled: bool = True) -> "AgentExecution":
+        """Continue unfinished model output when needed; configure before start.
+
+        Defaults off. Normal completion adds no continuation request. Does not
+        select long_content, expand short answers, resume a task, or replace
+        rework. Original output validation still applies to the final result.
+        """
+        ...
+
+    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution":
+        """Compatibility alias for auto_continue(); prefer the shorter name."""
+        ...
 
     def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 

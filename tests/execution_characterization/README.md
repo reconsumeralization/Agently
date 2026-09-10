@@ -19,6 +19,15 @@ Normal CI needs neither the old Git object nor a network connection:
 python -m pytest -q tests/test_agent_execution_characterization.py
 ```
 
+Exact observations are environment-specific. The original fixture was recovered
+with Python 3.10.21; the `-py314` fixtures recover the **same old Git source**
+with Python 3.14.7. MIME defaults and generic-type representations differ between
+these environments. Python 3.14+ selects the latter pair; earlier interpreters
+use the original pair. These two environments are verified, not a claim that
+every other Python/dependency/OS combination has identical representations.
+Unknown differences still fail: do not normalize away schema, MIME or Prompt
+fields, silently select a candidate-derived baseline, or skip failed cases.
+
 For a fresh old/current comparison, export the fixed commit into an empty
 temporary directory. No branch or worktree is needed. Substitute the actual
 temporary path printed by `mktemp`; do not reuse a working checkout as the export
@@ -89,7 +98,13 @@ in the baseline; paired raw evidence contains both full texts. Boolean and
 numeric types, missing keys and list order are compared strictly.
 
 The approved groups are Pattern-to-Execution migration, Prompt-owned goal
-projections, and restored final-business review inputs. They do not authorize
+projections, restored final-business review inputs, complete chapter planning
+with separate actual chapter summaries, and conditional continuation's private
+carrier/protocol refinement. The last two groups have explicit current-side
+synthetic replies; the old side still uses its original replies. Two chapters
+now require four requests (plan, body, actual summary, body), preserving the
+final business bytes and final-only validation. Continuation keeps two requests,
+the accepted prefix, and the same stale-identity failure. They do not authorize
 unrelated output, request-count, instruction, schema or side-effect changes.
 Comparator negative controls intentionally change those facts and must fail.
 

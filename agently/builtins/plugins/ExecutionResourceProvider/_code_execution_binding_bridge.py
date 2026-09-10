@@ -1209,7 +1209,6 @@ class CodeExecutionBindingBridge:
         self._accepting = False
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
         call_tasks = tuple(self._call_tasks)
         if cancel_active:
             for task in call_tasks:
@@ -1229,6 +1228,9 @@ class CodeExecutionBindingBridge:
             task.cancel()
         if other_tasks:
             await asyncio.gather(*other_tasks, return_exceptions=True)
+        if self._server is not None:
+            # Server shutdown waits for connections; settle their owned tasks first.
+            await self._server.wait_closed()
         try:
             self._bound_socket_path.unlink(missing_ok=True)
         except OSError:

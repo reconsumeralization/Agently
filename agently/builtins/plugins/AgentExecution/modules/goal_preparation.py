@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+
+from pydantic import ConfigDict, Field, StringConstraints, create_model
+
+from agently.core.model.Prompt import Prompt
+from agently.utils import DataFormatter
 
 from .model_stage import run_model_stage
 from .limits import await_route_with_limits
@@ -69,27 +75,64 @@ async def prepare_missing_goal(execution: AgentExecution) -> dict[str, object] |
             ("goals", execution.goal_items), ("success_criteria", execution.success_criteria_items),
         ) if not values
     ]
-    schema: dict[str, object] = {
-        "status": (str, "Exactly ready or missing_information. ready requires every requested field to be non-empty.", True),
+    non_blank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, strict=True)]
+    # Pydantic's dynamic field-definition boundary accepts runtime type objects.
+    fields: dict[str, Any] = {
+        "status": (Literal["ready", "missing_information"], Field(
+            description="Whether the missing goal-contract fields can be inferred from the supplied information.")),
         **{
-            name: [(str, "Interpret the original request only; do not invent scope or acceptance thresholds.")]
+            name: (list[non_blank], Field(description=(
+                "Inferred outcomes." if name == "goals" else "Conditions describing the requested outcome."
+            ) + " Each item must be a non-blank string."))
             for name in missing
         },
-        "missing_information": [(str, "Required fact that cannot be inferred; non-empty only when status is missing_information.")],
+        "missing_information": (list[non_blank], Field(description=
+            "Required facts that cannot be inferred; each item must be a non-blank string. "
+            "With status=ready: []; every requested goal-contract list must be non-empty. "
+            "With status=missing_information: non-empty; goal-contract lists may be empty.")),
     }
+    schema = create_model("GoalPreparation", __config__=ConfigDict(extra="forbid"), **fields)
+    stage_info: dict[str, object] = {}
+    if execution.prompt_snapshot.get("output") is not None:
+        stage_info["final_output_contract"] = Prompt(
+            execution.agent.plugin_manager,
+            execution.request.settings,
+            prompt_dict=deepcopy({
+                key: execution.prompt_snapshot[key]
+                for key in ("output", "output_format", "ensure_all_keys")
+                if key in execution.prompt_snapshot
+            }),
+        ).to_text()
+    instructions = [
+        "Infer only [input.execution_stage_input.missing_fields] from the original request, "
+        "declared constraints and available context. Preserve explicit goals and success criteria; do not return replacements.",
+        *(["Include [info.stage_information.final_output_contract] when interpreting the requested outcome; "
+           "it describes the final deliverable, not this response."] if stage_info else []),
+        "Do not invent scope, business thresholds or required facts. Report unavailable facts in [output.missing_information].",
+        "Do not execute the task, generate its deliverable, or claim effects in this stage.",
+        "Return only this stage's declared result; do not expose hidden chain-of-thought.",
+    ]
+    prompt = deepcopy(dict(execution.prompt_snapshot))
+    prompt["input"] = {
+        "original_input": DataFormatter.sanitize(prompt.get("input")),
+        "execution_stage_input": {"missing_fields": missing},
+    }
+    info = [] if prompt.get("info") is None else [prompt["info"]]
+    if stage_info:
+        info.append({"stage_information": stage_info})
+    if info:
+        prompt["info"] = info
+    else:
+        prompt.pop("info", None)
+    original_instruct = prompt.get("instruct")
+    prompt["instruct"] = ([original_instruct] if original_instruct is not None else []) + [
+        {"agent_execution_stage": instructions}
+    ]
     preparation = run_model_stage(
         execution, producer="long_task", stage="goal_preparation",
         stage_input={"missing_fields": missing},
-        stage_info={"final_output_contract": execution.prompt_snapshot.get("output")},
-        stage_instructions=[
-            "Interpret only the missing goal-contract fields identified in [input.execution_stage_input.missing_fields].",
-            "Ground them in the original request, declared constraints, [info.stage_information.final_output_contract] "
-            "and available context. Preserve explicit goals and success criteria; do not return replacements.",
-            "Derived criteria describe the requested outcome, not new business thresholds or permission to expand scope.",
-            "If a required fact cannot be inferred, report missing_information instead of fabricating it. "
-            "Do not execute the task, generate its deliverable, or claim effects in this stage.",
-        ],
-        output=schema, inherit_extension_handlers=False,
+        stage_info=stage_info, stage_instructions=instructions,
+        output=schema, inherit_extension_handlers=False, prompt_projection=prompt,
     )
     # The nested task does not exist yet, so its clock cannot bound this work.
     stage = await await_route_with_limits(execution, preparation, enforce_execution_deadline=True)

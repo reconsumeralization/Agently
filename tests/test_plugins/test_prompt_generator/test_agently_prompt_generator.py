@@ -10,6 +10,26 @@ from agently.builtins.plugins.PromptGenerator.modules.output_contract import (
 )
 
 
+@pytest.mark.parametrize("output_format", ["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal"])
+@pytest.mark.parametrize("ensure", [None, True, "not_null"])
+def test_plain_tuple_descriptions_survive_every_format(output_format, ensure):
+    def field(value, description):
+        return (value, description) if ensure is None else (value, description, ensure)
+
+    prompt = Prompt(Agently.plugin_manager, Agently.settings, prompt_dict={
+        "output": {
+            "body": field(str, "Keep all supplied limitations."),
+            "sections": field([{"text": field(str, "Use the supplied source only.")}], "Preserve section order."),
+        },
+        "output_format": output_format,
+    })
+    rendered = prompt.to_text()
+    for description in ("Keep all supplied limitations.", "Use the supplied source only.", "Preserve section order."):
+        assert description in rendered
+        if ensure is None:
+            assert rendered.count(description) == 1
+
+
 def test_to_prompt_object():
     Agently.set_settings("plugins.PromptGenerator.activate", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)

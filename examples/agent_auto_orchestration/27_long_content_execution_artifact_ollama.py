@@ -7,7 +7,8 @@ Environment:
     Local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434/v1).
     AGENT_EXECUTION_OLLAMA_MODEL or OLLAMA_DEFAULT_MODEL (default qwen).
 
-The Execution owns one section-plan request plus one request per planned section.
+The Execution plans once, writes each chapter, and summarizes each non-final
+chapter once for its successors. Continuation is conditional, not a fixed node.
 The host assembles the Markdown in plan order, then TaskWorkspace writes and
 physically reads back the declared artifact before the advisory review runs.
 """
@@ -15,7 +16,7 @@ physically reads back the declared artifact before the advisory review runs.
 from __future__ import annotations
 
 import asyncio
-import shutil
+import tempfile
 import sys
 from pathlib import Path
 
@@ -47,15 +48,14 @@ SOURCE_FACTS = {
 
 
 async def main() -> None:
-    model = configure_ollama_qwen(max_tokens=2400)
-    if RUNTIME_ROOT.exists():
-        shutil.rmtree(RUNTIME_ROOT)
+    model = configure_ollama_qwen(max_tokens=None)
+    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    runtime_root = Path(tempfile.mkdtemp(prefix="run-", dir=RUNTIME_ROOT))
 
     agent = Agently.create_agent("long-content-execution-artifact-ollama").use_task_workspace(
-        RUNTIME_ROOT, mode="read_write"
+        runtime_root, mode="read_write"
     )
     agent.set_settings("plugins.AgentExecution.long_content.max_sections", 3)
-    agent.set_settings("plugins.AgentExecution.long_content.continuity_chars", 800)
     agent.set_settings("debug", True)
     execution = (
         agent.create_execution("long_content").input({"migration_facts": SOURCE_FACTS})
@@ -74,7 +74,7 @@ async def main() -> None:
     if execution_run is None:
         raise RuntimeError("Expected long-content Execution diagnostics.")
     artifact_ref = meta["logs"]["artifact_refs"][0]
-    artifact_text = (RUNTIME_ROOT / artifact_ref["path"]).read_text(encoding="utf-8")
+    artifact_text = (runtime_root / artifact_ref["path"]).read_text(encoding="utf-8")
 
     print(f"model={model}")
     print(f"execution_name={meta['plugin']}")
@@ -83,6 +83,7 @@ async def main() -> None:
     print(f"model_request_count={execution_run['model_request_count']}")
     print(f"assembly={execution_run['assembly']}")
     print(f"artifact_path={artifact_ref['path']}")
+    print(f"runtime_root={runtime_root}")
     print(f"artifact_readback_matches={artifact_text == document}")
     reviews = meta.get("reviews", [])
     if len(reviews) != 1:
@@ -95,12 +96,12 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Recorded local qwen3.5:9b execution-plugin run (2026-09-05):
-# model=qwen3.5:9b
+# Expected key output, local qwen3.8:27b-mlx run (2026-09-10):
+# model=qwen3.8:27b-mlx
 # execution_name=long_content
 # execution_status=success
 # section_count=3
-# model_request_count=4
+# model_request_count=6
 # assembly=host_ordered
 # artifact_path=reports/locale-migration-runbook.md
 # artifact_readback_matches=True
@@ -110,5 +111,7 @@ if __name__ == "__main__":
 # Document prose remains model-owned. Section count, host ordering, verified
 # artifact readback, and review source are the stable framework evidence.
 
-# Semantic audit: a billing-only Friday restriction became a general ban.
-# Model review passed but missed this deviation; Prompt audit remains open.
+# The six production requests exclude the separately configured review request;
+# seven provider requests were observed in total, without natural truncation.
+# Model review passed, but direct inspection still found unsupported operational
+# requirements. Advisory review success is not final semantic acceptance.

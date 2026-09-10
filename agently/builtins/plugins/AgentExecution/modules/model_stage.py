@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
@@ -45,6 +46,9 @@ async def run_model_stage(
     output: object | None = None,
     preserve_external_output: bool = False,
     inherit_extension_handlers: bool = True,
+    prompt_projection: Mapping[str, object] | None = None,
+    read_task_context: bool = True,
+    ensure_long_output: bool = False,
 ) -> ModelStageResult:
     """Run one explicit ModelRequest under the owning AgentExecution.
 
@@ -63,46 +67,51 @@ async def run_model_stage(
     if isinstance(local_settings, dict):
         request.settings.update(deepcopy(local_settings))
 
-    prompt_snapshot = deepcopy(dict(execution.prompt_snapshot))
+    prompt_snapshot = deepcopy(dict(execution.prompt_snapshot if prompt_projection is None else prompt_projection))
     if not preserve_external_output:
         for key in _OUTPUT_PROMPT_KEYS:
             prompt_snapshot.pop(key, None)
     request.prompt.update(prompt_snapshot)
-    request.prompt.set(
-        "input",
-        {
-            "original_input": DataFormatter.sanitize(execution.prompt_snapshot.get("input")),
-            "execution_stage_input": DataFormatter.sanitize(stage_input),
-        },
-    )
-    request.prompt.append(
-        "info",
-        {
-            "execution_plugin": producer,
-            "execution_stage": stage,
-            "stage_information": DataFormatter.sanitize(stage_info),
-        },
-    )
-    request.prompt.append(
-        "instruct",
-        {
-            "agent_execution_stage": [
-                *stage_instructions,
-                "Return only this stage's declared result; do not expose hidden chain-of-thought.",
-            ]
-        },
-    )
+    if prompt_projection is None:
+        request.prompt.set(
+            "input",
+            {
+                "original_input": DataFormatter.sanitize(execution.prompt_snapshot.get("input")),
+                "execution_stage_input": DataFormatter.sanitize(stage_input),
+            },
+        )
+        request.prompt.append(
+            "info",
+            {
+                "execution_plugin": producer,
+                "execution_stage": stage,
+                "stage_information": DataFormatter.sanitize(stage_info),
+            },
+        )
+        request.prompt.append(
+            "instruct",
+            {
+                "agent_execution_stage": [
+                    *stage_instructions,
+                    "Return only this stage's declared result; do not expose hidden chain-of-thought.",
+                ]
+            },
+        )
 
-    context_package = await execution.async_read_task_context(
-        consumer_id=f"agent_execution:{producer}:{stage}:{execution.id}",
-        phase=stage,
+    context_package = (
+        await execution.async_read_task_context(
+            consumer_id=f"agent_execution:{producer}:{stage}:{execution.id}",
+            phase=stage,
+        )
+        if read_task_context
+        else None
     )
     context_lanes: dict[str, list[dict[str, object]]] = {
         "instruct": [],
         "info": [],
         "examples": [],
     }
-    for block in context_package.blocks:
+    for block in context_package.blocks if context_package is not None else []:
         item = {
             "content": DataFormatter.sanitize(block.content),
             "role": block.role,
@@ -128,6 +137,23 @@ async def run_model_stage(
     # StateData merges lists with the parent; None shadows inherited callbacks.
     request.extension_handlers.set("validate_handlers", None)
 
+    delivery = None
+    if ensure_long_output:
+        from .long_output import LongOutputDelivery
+
+        request.settings.set("$agent_execution.ensure_long_output", True)
+        delivery = LongOutputDelivery(
+            execution,
+            request=request,
+            ensure_keys=None,
+            ensure_all_keys=None,
+            validate_handler=None,
+            key_style="dot",
+            max_retries=3,
+            raise_ensure_failure=True,
+        )
+        delivery.preflight()
+
     await execution.emit_stream(
         "execution.stage.started",
         {"plugin": producer, "stage": stage},
@@ -140,20 +166,36 @@ async def run_model_stage(
     )
     execution.record_model_response_id(result.id)
     try:
-        value = (
-            await result.async_get_data()
-            if output is not None or bool(execution.prompt_snapshot.get("output"))
-            else await result.async_get_text()
-        )
+        if delivery is not None:
+            from .long_output import LongOutputError
+
+            events = [item async for item in result.get_async_generator(type="instant")]
+            if delivery.needs_continuation(await result.async_get_meta(), await result.async_get_text()):
+                await delivery.accept_initial(result, streaming_events=events)
+                value = await delivery.run_continuation_flow()
+            else:
+                delivery.validate_complete_carrier(await result.async_get_text())
+                value = await result.async_get_data()
+                if result._accepted_retry_result is not None:
+                    if delivery.needs_continuation(
+                        await result._accepted_retry_result.async_get_meta(),
+                        await result._accepted_retry_result.async_get_text(),
+                    ):
+                        raise LongOutputError("A length-limited validation replacement cannot use the ordinary completion path.")
+                    delivery.validate_complete_carrier(await result._accepted_retry_result.async_get_text())
+        else:
+            value = (
+                await result.async_get_data()
+                if output is not None or bool(execution.prompt_snapshot.get("output"))
+                else await result.async_get_text()
+            )
     finally:
         accepted_result = result._accepted_retry_result or result
         if accepted_result is not result:
             execution.record_model_response_id(accepted_result.id)
         response_id = str(accepted_result.response_id or accepted_result.id)
-        execution.record_context_consumption(
-            context_package,
-            request_id=response_id,
-        )
+        if context_package is not None:
+            execution.record_context_consumption(context_package, request_id=response_id)
     await _record_action_logs(
         execution,
         result._accepted_retry_result or result,
@@ -178,11 +220,7 @@ async def _record_action_logs(
     result: "ModelRequestResult",
 ) -> None:
     full_result_data = result.full_result_data
-    extra = (
-        full_result_data.get("extra", {})
-        if isinstance(full_result_data, dict)
-        else {}
-    )
+    extra = full_result_data.get("extra", {}) if isinstance(full_result_data, dict) else {}
     if not isinstance(extra, dict):
         return
     action_logs = extra.get("action_logs", [])
@@ -190,7 +228,11 @@ async def _record_action_logs(
         for item in action_logs:
             await execution.record_action_log(
                 item,
-                route=(execution._selected_route[0] if execution._selected_route else execution.producer_route or execution.name),
+                route=(
+                    execution._selected_route[0]
+                    if execution._selected_route
+                    else execution.producer_route or execution.name
+                ),
                 source="action",
             )
     tool_logs = extra.get("tool_logs", [])
@@ -198,7 +240,11 @@ async def _record_action_logs(
         for item in tool_logs:
             await execution.record_action_log(
                 item,
-                route=(execution._selected_route[0] if execution._selected_route else execution.producer_route or execution.name),
+                route=(
+                    execution._selected_route[0]
+                    if execution._selected_route
+                    else execution.producer_route or execution.name
+                ),
                 source="tool",
             )
 

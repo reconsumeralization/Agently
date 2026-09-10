@@ -5,7 +5,7 @@ import os
 from agently import Agently
 
 
-def configure_ollama_qwen(*, max_tokens: int, temperature: float = 0.0) -> str:
+def configure_ollama_qwen(*, max_tokens: int | None, temperature: float = 0.0) -> str:
     """Configure the local OpenAI-compatible Ollama endpoint for Qwen examples."""
 
     model = os.getenv(
@@ -22,7 +22,7 @@ def configure_ollama_qwen(*, max_tokens: int, temperature: float = 0.0) -> str:
             "request_retry": {"max_attempts": 1, "after_output": False},
             "request_options": {
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                 "reasoning_effort": "none",
             },
         },

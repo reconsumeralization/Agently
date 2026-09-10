@@ -141,6 +141,8 @@ async def rework(
         owner._terminal_preserved_action_artifact_ids = set()
         owner._model_request_result = None
         owner._long_output_result_object = None
+        owner._producer_result_object = None
+        owner._restored_result_pending = False
         owner._long_output_meta = {}
         owner._seen_action_log_keys = set()
         owner._pause_requested = False
@@ -196,6 +198,10 @@ def restore_history(owner: AgentExecution, records: list[dict[str, Any]]) -> Non
         view._retained_meta = deepcopy(record["meta"])
         view.stream.items = [AgentExecutionStreamData.model_validate(item) for item in record["stream"]]
         view._completed = True
+        view._model_request_result = None
+        view._producer_result_object = None
+        view._long_output_result_object = None
+        view._restored_result_pending = True
         view._pause_requested = False
         view._pause_boundary = None
         view._pause_flow = None

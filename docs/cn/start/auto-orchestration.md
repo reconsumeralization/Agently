@@ -58,7 +58,7 @@ result = await execution.async_start()
 绑定进 `TaskContext`；具体模型响应对 Skill Context 的消费记录与可执行 capability
 evidence 分开。普通 Actions 进入 `model_request` AgentExecution action loop。
 默认每轮选择继续调用 Actions 或给出最终 response；终态 response 直接由同一个
-AgentExecution 交付。只有 legacy/custom fallback 或 `ensure_long_output` 这类独立交付
+AgentExecution 交付。只有 legacy/custom fallback 或 `auto_continue` 这类独立交付
 策略才追加最终生成请求。Skills 不创建 route，也不是 planner capability。
 
 公开 Agent API 仍由 core 持有；其工厂直接创建所选 AgentExecution 插件，
@@ -143,7 +143,7 @@ Agent/AgentExecution 不提供公开 `verify()`。
 
 `validate(handler)` 硬校验的是**当前调用的最终输出**：直接响应、最终计划、
 Host 组装的完整文档、长任务最终业务输出或自定义 Execution 返回值，
-不自动检查内部步骤。直接 ModelRequest 与 `ensure_long_output` 保留已有受控修复；
+不自动检查内部步骤。直接 ModelRequest 与 `auto_continue` 保留已有受控修复；
 其他最终校验仅执行一次，不重放内部步骤或副作用。后者的 context 使用
 `meta.scope="agent_execution_final"`，没有 provider response ID，`max_retries=0`。
 校验先于声明式产物交付及 review，但不会撤销任务已经产生的副作用。
@@ -223,17 +223,25 @@ print(meta["plugin"], meta["route"]["selected_route"])
 章节计划或任务步骤。直接请求的修复仍由 ModelRequest 负责。
 Artifact 写入、回读和可选 review 在最终校验后由同一个 execution 执行。
 
-`plan` 使用有界的就绪检查与规划请求。需要澄清时，连接式 handler 接收
+`plan` 使用有界的就绪检查与规划请求。就绪检查也会读取最终 `output(...)`
+的字段描述和约束，但自身仍返回独立的就绪判断，不提前填写最终计划。
+最终规划直接使用原始任务与已接受的澄清回复，不要求先重新生成一份目标和交付要求的复述。
+需要澄清时，连接式 handler 接收
 `ExecutionExchangeView`。缺失或拒绝的回答、澄清次数耗尽会产生明确的 blocked
 结果，不会伪造回答。本内置连接式流程尚不承诺持久化恢复计划。
 配置为 `plugins.AgentExecution.plan.max_clarification_rounds`（默认 3）及
 `max_questions_per_round`（默认 3）。
 
-`long_content` 先规划章节，再使用有界衔接上下文写作，最后由宿主按计划顺序组装
-完整正文，不让模型再复制一遍全文。配置为
-`plugins.AgentExecution.long_content.max_sections`（默认 12）及
-`continuity_chars`（默认 4000）。它输出纯文本，不能搭配结构化 `output(...)`
-或 `ensure_long_output()`。原生截断续写与多章节内容生产是不同职责。
+`long_content` 先规划章节，逐章生成正文，并在后续章节需要时生成一份实际章级
+摘要；宿主保留完整子目录，按计划顺序组装正文，不让模型再复制全文。
+配置 `plugins.AgentExecution.long_content.max_sections`（默认 12）。
+整个 `long_content` Execution 输出文本，不能搭配结构化 `output(...)`。
+结构内的长文则在普通请求上用 `(LongContent, "写作要求")` 或兼容字符串
+`("long_content", "写作要求")` 声明；框架独立生成正文并填回原结构。
+两种作用域不要混淆，详见[字段级长文声明](../requests/output-control.md)。
+章节请求使用底层条件续写，正常完成不追加请求；根 `.auto_continue()` 不会把
+组装后的全文重新请求。已发布 `.ensure_long_output()` 保留为同实现兼容入口。
+长文生产与请求续写的职责独立，通用结构内长字符串接续仍有未完成的验收项。
 
 自定义实现也注册到 `AgentExecution` 分类。可以继承内置实现复用生命周期，
 在同一个实例上覆盖带明确类型的受保护生产方法：
@@ -281,6 +289,7 @@ result = execution.start()
 已选定的长任务生产方若缺少 goal 或 success criteria，会在构造任务状态前调用模型，
 仅从原始请求推导缺失字段。显式声明与原始 Prompt 保持不变，metadata 记录模型来源；
 推导标准不能授权新工作或虚构业务门槛。必要事实不足时返回 blocked。
+推导会参考最终输出合同（含字段描述、格式和必填要求）；未声明输出时不添加空合同。
 补全阶段消耗同一 execution 的模型请求与时间预算，构造任务不会重新计时。
 任务创建前超时会抛出 `RuntimeStageStallError`；创建后沿用任务的 `timed_out`
 结果封装，并受 execution 剩余时间约束。
@@ -1388,6 +1397,11 @@ load 本身不调用模型或 Action。恢复新对象前先取消旧暂停对�
 RecordStore 及外部 ContextSource。快照只有 JSON 数据与资源身份，没有 settings、
 密钥、客户端或可执行 callback；缺失或变更的绑定明确失败。目前保守拒绝任何
 Skill 目录变化。累计模型调用数与 elapsed time 跨 load 保留，停机时间也计入。
+
+恢复后首次 `get_data_object()` 使用重绑的原输出 schema 在本地校验并重建对象，
+之后复用缓存；支持 Pydantic 嵌套/根类型及 `LongContent` 声明。load 不运行
+输出模型校验器，typed reader 不重新调用模型或最终 validate/artifact/review。
+历史 revision 从各自候选重建，不能读到新版本的类型化缓存；本地重建失败会抛错。
 
 ### 返工与历史版本
 

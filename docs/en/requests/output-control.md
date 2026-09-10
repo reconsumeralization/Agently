@@ -8,6 +8,30 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 > Languages: **English** · [中文](../../cn/requests/output-control.md)
 
+## Long-form fields (4.1.4.8 development line)
+
+Use `LongContent` to select long-form production explicitly. The final value is
+still a normal `str`:
+
+```python
+from agently import LongContent
+
+execution = agent.input("Write a report").output({
+    "body": (LongContent, "Writing requirements"),
+    "summary": (str, "Summarize the actual completed body"),
+}).auto_continue()
+```
+
+The string form `("long_content", "Writing requirements")` is compatible.
+Root output supports `.output((LongContent, "Document requirements"))`.
+Pydantic supports `body: LongContent = Field(description="Writing requirements")`
+with original field constraints. This annotated string type selects production;
+it is not a carrier format such as `format="json"`. Later fields consume the
+actual completed body. Ordinary `str` does not automatically select long-form
+production. `.auto_continue()` independently configures conditional continuation
+of an unfinished request. This is development-line behavior, not a claim of
+released availability or completed release acceptance.
+
 The validation pipeline runs the first time a structured response result is consumed, then caches the outcome on that response result. It has a fixed order, and each step contributes to the same retry budget.
 
 For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. By default, tuple `True` and runtime `ensure_keys` check path/key presence only; the value may be `None`, a blank string, `False`, `0`, an empty list, or another intentionally empty value. Use the explicit tuple marker `"not_null"` when a required path must also contain a meaningful value; it rejects `None`, blank strings, empty lists or wildcard matches, and lists containing missing required values while still accepting `False` and `0`.
@@ -17,6 +41,15 @@ into the initial structured-output prompt, not reserved for post-response
 checks. A direct Pydantic output model also remains the typed acceptance
 authority: a parsed dict that fails the model is corrected through the shared
 retry budget and is never returned as successful business data.
+
+The 4.1.4.8 development line preserves the JSON root shape of Pydantic
+`RootModel`. For example, `.output(RootModel[str], format="json")` requests
+a JSON string, not `{"root": "..."}`. `async_get_data()` returns the string;
+the typed reader returns the original RootModel instance. Braces and brackets
+inside that string are not mistaken for a root object or array. A Pydantic
+output without a valid typed result fails or uses the existing retry budget;
+it does not return `None` as parsing success. See the
+[root output example](../../../examples/basic/pydantic_root_output.py).
 
 ## Direct downstream interface contracts
 
@@ -146,7 +179,22 @@ explicitly. `yaml_literal` is explicit opt-in and is not selected by auto.
 
 ### Output that may exceed one model window
 
-Use `.ensure_long_output()` on an unstarted `AgentExecution` when one business
+The 4.1.4.8 development line recommends `.auto_continue()`; the released
+`.ensure_long_output()` spelling remains a compatibility alias to the same
+implementation. Use the old spelling on earlier versions. This means
+continuing unfinished output, not forcing length, resuming a task, or replacing
+`rework`. `str` describes the result type, `long_content` selects proactive
+long-form production, and `auto_continue` configures request delivery.
+On the 4.1.4.8 development line, field-level production uses the `LongContent`
+annotation described above, with `"long_content"` compatibility in the declaration
+type position. Ordinary `str` fields do not switch production strategies because
+their names or descriptions mention long-form writing.
+
+Existing `long_output` result metadata/events and the historical route marker
+`selected_by="ensure_long_output"` remain compatible; they describe this same
+continuation policy, not another capability.
+
+Use `.auto_continue()` on an unstarted `AgentExecution` when one business
 result may be larger than a provider output window:
 
 ```python
@@ -172,25 +220,68 @@ netlist = (
         },
         format="json",
     )
-    .ensure_long_output()
+    .auto_continue()
     .get_data()
 )
 ```
 
-The option defaults to off. `.ensure_long_output(False)` disables it on the
+The option defaults to off. `.auto_continue(False)` disables it on the
 same unstarted draft. It belongs to the execution rather than `.output(...)` or
 a result getter, so `get_data()`, `get_text()`, `get_data_object()`,
 `get_result()`, and generator consumers all observe one frozen policy. Calling
 it after the execution starts raises the normal one-run lifecycle error.
 
-The first model request is unchanged. If its normalized terminal is `stop`, the
-ordinary one-request result and validation path are used. If the provider
-reports `length` / `incomplete`, Agently starts a TriggerFlow-visible
-continuation loop. It persists accepted units in the execution's private
+A normal `stop` still requires one complete JSON carrier. Multiple root
+objects, duplicate keys, trailing material, or unfinished JSON fail explicitly;
+the delivery path never takes only the first object or mistakes malformed
+formatting for length truncation. The same check applies to internal long-form
+writer requests and accepted replacement responses from validation retries.
+Ordinary dict parsing without this option retains its existing tolerant policy.
+An accepted replacement with `length` or an unsafe terminal cannot borrow the
+initial response's `stop`: it fails explicitly rather than starting another
+continuation flow inside validation retries.
+
+The first model request is unchanged. Normal `stop` uses ordinary validation;
+explicit length truncation starts continuation. After a clean stream end with
+missing terminal evidence, one complete, unique, unrepaired JSON value can go
+straight to validation. Plain text or a trustworthy open JSON prefix uses one
+combined tail-check/continuation request, not a separate judge. Bare
+`status="incomplete"` is not proof of a length limit. TriggerFlow owns the loop.
+It persists accepted units in the execution's private
 TaskWorkspace, reads every write back with its SHA-256 digest, and replays the
 final candidate before applying the original Pydantic/schema, ensure, and
 custom validation contracts. Each structured update is also checked against
 the JSON Schema for its own assembly slot before it can advance the manifest.
+
+Continuation finishes the **current request**, not every later stage of a
+surrounding workflow. Its original instructions remain the deliverable contract;
+the continuation response only appends missing output, even if that original
+request was a rewrite. Plain-text continuation carries exact text as JSON data
+and asks to finish the remaining output in one closed block when it fits,
+without a minimum block length or fixed target size. Recovery from an
+unclosed/rejected update asks for a smaller block. It retains
+request-local model settings. This is distinct from planning and writing a
+multi-section document, or expanding an ordinary `stop` response semantically.
+
+Explicit failure, cancellation, filtering, unknown terminal reasons, or
+conflicting completion facts fail closed; they are not reasons to continue.
+The Responses-compatible adapter preserves `incomplete_details` so a non-length
+interruption is not mistaken for an output-window limit. Structured continuation
+slots retain both the list-level description and the per-item value contract.
+
+Private packets use `completion=complete/incomplete/undetermined`. A complete,
+correctly correlated completion packet may enter original-result replay and
+validation with zero updates, even if terminal metadata is missing or reports
+length. A partial packet cannot confirm completion. `undetermined` fails
+explicitly while retaining prior trusted progress; it does not blindly retry
+or return partial success. This is delivery ending, not semantic exhaustiveness.
+
+When initial JSON ends inside a string, field increments preserve its decoded
+prefix, pending escape and nested/array position, then reconstruct the original
+structure; no chunk-list schema is required. Host correlation replaces copied
+revision/digest fields for this packet. Closed fields stay immutable. The
+control header, unit_index and atomic slot bounds below describe the plain-text
+and legacy slot paths, not the open-string packet.
 
 Current lossless carriers are plain text and explicit/resolved `json`.
 `flat_markdown`, `hybrid`, `xml_field`, `yaml_literal`, and opaque custom
@@ -223,7 +314,7 @@ Continuation uses append-only revisions:
   fact. Missing list paths are not synthesized as empty, and an empty-list
   declaration is rejected after any item or prior declaration;
 - an explicitly closed empty string is retained by the same rule for text
-  slots. Before trusting continuation `is_final`, Agently requires every
+  slots. Before trusting continuation `completion=complete`, Agently requires every
   declared ensure path to have a manifest fact; missing required paths continue
   the delivery loop without consuming the caller's final-validation retry
   allowance;
@@ -261,8 +352,14 @@ Continuation uses append-only revisions:
   response that does not validate as the private envelope is persisted and
   recorded as bounded `continuation_envelope_invalid` no progress; the caller's
   `max_retries` remains reserved for final assembled-value validation;
-- a zero-update `is_final` assertion after a provider `length` terminal is still
-  no progress, not proof that the truncated business result was complete;
+- after the initial `length`, a complete unique zero-update
+  final acknowledgement may enter original-result replay and validation even
+  before any continuation unit exists. Identity must match, no update may be
+  rejected, and required manifest facts must exist. This is not no progress and
+  requires no filler. Unclosed packets, trailing material, duplicate keys,
+  stale identity and failed original validation cannot authorize success.
+  Explicit completion in a full packet can resolve missing or length terminal
+  evidence, never override failure, filtering or other unsafe facts;
 - continuation requests do not inherit Action/tool handlers, so output-only
   continuation cannot repeat side effects;
 - the private continuation envelope never appears in the public text stream.
@@ -297,7 +394,7 @@ inventory is exhaustive. Declare an expected count/key/reference rule through
 proven. Without such a rule, `semantic_exhaustiveness` remains `"not_claimed"`.
 
 See the runnable
-[`examples/basic/ensure_long_output.py`](../../../examples/basic/ensure_long_output.py)
+[`examples/basic/auto_continue.py`](../../../examples/basic/auto_continue.py)
 for a 75-component JSON inventory with an explicit count/order coverage
 validator and a bounded real-model request budget. The recorded 2026-07-28
 Qwen run retained all 75 component units across truncated windows and used one
@@ -468,7 +565,7 @@ is the same problem as recovering a truncated response:
 |---|---|
 | Long prose | Plan useful coverage, develop coherent sections, and manage continuity. |
 | Large structured data | Preserve fields, types, relationships, and collection completeness; use suitable schemas and Host reconstruction. |
-| Truncated delivery | Continue an incomplete result across output windows; native `ensure_long_output()` supports plain text and JSON. |
+| Truncated delivery | Continue an incomplete result across output windows; native `auto_continue()` supports plain text and JSON. |
 
 For long prose, a useful optional pattern is:
 
@@ -507,7 +604,7 @@ schema failures, unclear instructions, and learned brevity differ.
 [LongWriter](https://arxiv.org/abs/2408.07055) found an effect from limited
 long-output SFT samples in its studied models and explored plan/write
 decomposition; that is not proof that pretraining caused a particular provider
-response. `ensure_long_output()` reacts to normalized `length`/`incomplete`,
+response. `auto_continue()` uses length and raw-carrier completion evidence,
 not to a normal `stop` with inadequate coverage. It may support a planned
 writer's delivery but cannot replace writing strategy or quality review.
 

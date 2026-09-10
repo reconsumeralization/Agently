@@ -67,7 +67,7 @@ evidence. Ordinary Actions run through the normal `model_request`
 AgentExecution action loop. Its default rounds choose either Actions or a final
 response. A terminal response is delivered through that same AgentExecution;
 an extra final-generation request is used only for legacy/custom fallback or a
-separate delivery policy such as `ensure_long_output`. Skills never create a
+separate delivery policy such as `auto_continue`. Skills never create a
 route or planner capability.
 
 The public Agent API stays in core. Its factory directly constructs the selected
@@ -161,7 +161,7 @@ manufacture a rating. Numeric model scores are not used. Read reports from
 `validate(handler)` is the hard gate for the **final output of the current call**:
 a direct response, final plan, host-assembled document, AgentTask final output,
 or custom Execution's returned value. It never automatically checks intermediate
-producer/task outputs. Direct ModelRequest validation and `ensure_long_output`
+producer/task outputs. Direct ModelRequest validation and `auto_continue`
 retain their existing controlled repair behavior. Other final checks run once
 without replaying internal steps or side effects. Their context uses
 `meta.scope="agent_execution_final"`, no provider response ID, and
@@ -249,7 +249,11 @@ not an intermediate readiness response, section plan, or task step. Direct
 request repair remains request-owned. Artifact materialization/readback and
 optional review follow final validation on the same execution.
 
-`plan` uses bounded readiness and planning requests. A connected handler
+`plan` uses bounded readiness and planning requests. Readiness also receives
+the final `output(...)` field descriptions and constraints, while returning its
+own readiness judgment rather than filling the final plan. Final planning uses the
+original request and accepted clarification replies directly, without requiring
+a separate restatement of the goal and deliverable. A connected handler
 receives an `ExecutionExchangeView` when clarification is required.
 Missing/rejected answers and exhausted clarification attempts produce an
 explicit blocked outcome; they are not fabricated as accepted answers.
@@ -257,13 +261,21 @@ This built-in connected flow does not yet promise durable plan restoration.
 Its settings are `plugins.AgentExecution.plan.max_clarification_rounds` (default 3) and
 `max_questions_per_round` (default 3).
 
-`long_content` plans sections, writes them with bounded continuity context,
-and assembles full section bodies in plan order without a model recopy pass.
-Its settings are `plugins.AgentExecution.long_content.max_sections`
-(default 12) and `continuity_chars` (default 4000). It produces plain text:
-structured `output(...)` and `ensure_long_output()` cannot be combined with
-this producer. Native truncation recovery and multi-section writing are
-different behaviors.
+`long_content` plans sections, writes each body, and records one actual
+chapter-level summary only when a later chapter consumes it. The Host retains
+the complete heading directory and assembles bodies in order without model
+recopy. Configure `plugins.AgentExecution.long_content.max_sections` (default
+12). The whole-document Execution returns text and rejects structured
+`output(...)`. For a long-form field inside a structure, use
+`(LongContent, "writing requirements")` or the compatible
+`("long_content", "writing requirements")` on an ordinary request; the framework
+generates that body separately and fills the original structure. See
+[field-level declarations](../requests/output-control.md) for this distinct scope.
+Chapter requests use conditional continuation; normal completion adds no request.
+Root `.auto_continue()` does not request the assembled document again.
+Released `.ensure_long_output()` remains an alias to the same policy. Long-form
+production and request continuation are separate concerns; general in-structure
+long-string continuation still has open acceptance work.
 
 Custom implementations register in the same `AgentExecution` category.
 Subclass a bundled implementation to reuse its lifecycle and specialize the
@@ -319,6 +331,8 @@ asks the model to interpret only the missing fields before constructing its
 task state. Explicit declarations and the original Prompt stay unchanged;
 metadata records model provenance. Derived criteria cannot authorize new work
 or invent business thresholds. Insufficient facts produce a blocked outcome.
+Interpretation includes the final output contract (field descriptions, format,
+and requiredness); no empty contract is added when output is undeclared.
 Preparation consumes the same execution's model-request and time budgets;
 constructing the task does not restart the deadline. A timeout before task
 creation raises `RuntimeStageStallError`; after creation, the task retains its
@@ -1644,6 +1658,13 @@ clients or executable callbacks. Missing/changed bindings fail before readiness.
 The current format conservatively rejects any Skill catalog change. Model-call
 usage and elapsed time survive load, including time spent offline. A candidate
 pause resumes final policies without repeating production.
+
+After recovery, the first `get_data_object()` locally validates the saved
+candidate against the rebound original output schema and caches the typed
+object, including nested/root Pydantic types and `LongContent` declarations.
+Load does not run output-model validators. Typed reads do not repeat model
+requests or final validate/artifact/review policies; reconstruction errors raise.
+Historical revisions rebuild from their own candidate, never the latest cache.
 
 ### Rework and retained revisions
 

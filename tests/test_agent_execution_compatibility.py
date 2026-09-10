@@ -132,6 +132,8 @@ class MockAgentExecutionLongOutputRequester(MockAgentExecutionCompatibilityReque
     def generate_request_data(self):
         type(self).attempts += 1
         continuation_input = self.prompt.get("input")
+        if isinstance(continuation_input, str) and continuation_input.startswith("{"):
+            continuation_input = json.loads(continuation_input)
         payload = {
             "attempt": type(self).attempts,
             "tools": self.prompt.get("tools"),
@@ -193,7 +195,7 @@ class MockAgentExecutionLongOutputRequester(MockAgentExecutionCompatibilityReque
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "all requested output units are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -291,7 +293,7 @@ class MockAgentExecutionExactListLimitRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "exactly three items are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -333,7 +335,7 @@ class MockAgentExecutionNestedConstraintRequester(
                     },
                 ],
                 "state_summary": "both valid items are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -380,7 +382,7 @@ class MockAgentExecutionOrderedExactListRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "exact items precede their summary",
-                "is_final": is_final,
+                "completion": "complete" if is_final else "incomplete",
             },
             ensure_ascii=False,
         )
@@ -440,7 +442,7 @@ class MockAgentExecutionInvalidUnitLongOutputRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "invalid tails must be regenerated",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -490,7 +492,7 @@ class MockAgentExecutionFinalValidationRepairRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "all declared fields are now complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -514,7 +516,7 @@ class MockAgentExecutionUnrepairableFinalRequester(
                 "anchor": continuation["anchor"],
                 "updates": [],
                 "state_summary": "incorrectly claiming completion",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -541,12 +543,12 @@ class MockAgentExecutionMultiSegmentLongOutputRequester(MockAgentExecutionLongOu
             "anchor": continuation["anchor"],
             "updates": [update],
             "state_summary": "one more block remains",
-            "is_final": type(self).attempts >= 3,
+            "completion": "complete" if type(self).attempts >= 3 else "incomplete",
         }
         text = json.dumps(envelope, ensure_ascii=False)
         if type(self).attempts == 2:
             text = (
-                text[:-2]
+                text[:text.index('], "state_summary"')]
                 + ',{"path_key":"$text","operation":"append_text",'
                 '"unit_index":2,"value":"open'
             )
@@ -608,7 +610,7 @@ class MockAgentExecutionMultiUpdateTextRequester(MockAgentExecutionLongOutputReq
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "the final text block remains",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -643,7 +645,7 @@ class MockAgentExecutionStructuredContinuationLengthRequester(
                     "state_summary": "one component remains",
                 },
                 ensure_ascii=False,
-            )[:-1] + ',"is_final":'
+            )[:-1] + ',"completion":'
             return
         yield "message", json.dumps(
             {
@@ -659,7 +661,7 @@ class MockAgentExecutionStructuredContinuationLengthRequester(
                     }
                 ],
                 "state_summary": "all components are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -752,7 +754,7 @@ class MockAgentExecutionIncompleteHeaderRecoveryRequester(
                     }
                 ],
                 "state_summary": "header recovery completed",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -820,7 +822,7 @@ class MockAgentExecutionNestedSlotRequester(
                     }
                 ],
                 "state_summary": "nested groups complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -852,7 +854,7 @@ class MockAgentExecutionStructuredTextSlotRequester(
                     }
                 ],
                 "state_summary": "structured text and list are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -894,7 +896,7 @@ class MockAgentExecutionRepeatedStructuredTextRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": "completed text must remain immutable",
-                "is_final": type(self).attempts >= 3,
+                "completion": "complete" if type(self).attempts >= 3 else "incomplete",
             },
             ensure_ascii=False,
         )
@@ -904,7 +906,9 @@ class MockAgentExecutionExplicitEmptyListRequester(
     MockAgentExecutionLongOutputRequester
 ):
     name = "MockAgentExecutionExplicitEmptyListRequester"
-    initial_text = '{"items":[],"tail":"open'
+    # Exercise atomic empty-list replay; open-string prefix preservation has its
+    # own field-packet cases in test_structured_string_delivery.py.
+    initial_text = '{"items":[],"tail":'
 
     async def request_model(self, request_data: AgentlyRequestData):
         continuation = request_data.data.get("continuation")
@@ -926,7 +930,7 @@ class MockAgentExecutionExplicitEmptyListRequester(
                     }
                 ],
                 "state_summary": "empty items and tail are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -958,7 +962,7 @@ class MockAgentExecutionContinuationEmptyListRequester(
                     }
                 ],
                 "state_summary": "items is intentionally empty",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -968,7 +972,7 @@ class MockAgentExecutionStaleEmptyListRequester(
     MockAgentExecutionLongOutputRequester
 ):
     name = "MockAgentExecutionStaleEmptyListRequester"
-    initial_text = '{"items":[{"name":"a"}],"tail":"open'
+    initial_text = '{"items":[{"name":"a"}],"tail":'
 
     async def request_model(self, request_data: AgentlyRequestData):
         continuation = request_data.data.get("continuation")
@@ -990,7 +994,7 @@ class MockAgentExecutionStaleEmptyListRequester(
                     }
                 ],
                 "state_summary": "invalid empty reset",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -1035,7 +1039,7 @@ class MockAgentExecutionRequiredSlotBarrierRequester(
                 "anchor": continuation["anchor"],
                 "updates": [update],
                 "state_summary": "all required paths are complete",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -1085,7 +1089,7 @@ class MockAgentExecutionManySegmentLongOutputRequester(
                     }
                 ],
                 "state_summary": "continue until the declared final segment",
-                "is_final": type(self).attempts >= 13,
+                "completion": "complete" if type(self).attempts >= 13 else "incomplete",
             },
             ensure_ascii=False,
         )
@@ -1106,9 +1110,9 @@ class MockAgentExecutionNoProgressLongOutputRequester(MockAgentExecutionLongOutp
                 "anchor": continuation["anchor"],
                 "updates": [],
                 "state_summary": "no progress",
-                # A terminal assertion without a durable update must not be
-                # trusted as proof that the truncated result is complete.
-                "is_final": True,
+                # An incomplete response with no update is still no progress.
+                # Complete, validated empty acknowledgements are tested apart.
+                "completion": "incomplete",
             },
             ensure_ascii=False,
         )
@@ -1160,7 +1164,7 @@ class MockAgentExecutionLargeStructuredLongOutputRequester(
                 "anchor": continuation["anchor"],
                 "updates": updates,
                 "state_summary": f"generated through component {stop - 1}",
-                "is_final": stop == 75,
+                "completion": "complete" if stop == 75 else "incomplete",
             },
             ensure_ascii=False,
         )
@@ -1188,7 +1192,7 @@ class MockAgentExecutionStaleLongOutputRequester(MockAgentExecutionLongOutputReq
                     }
                 ],
                 "state_summary": "",
-                "is_final": True,
+                "completion": "complete",
             },
             ensure_ascii=False,
         )
@@ -1310,9 +1314,9 @@ def test_agent_execution_ensure_long_output_is_opt_in_and_fluent():
     execution = agent.input("long answer")
 
     assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is False
-    assert execution.ensure_long_output() is execution
+    assert execution.auto_continue() is execution
     assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is True
-    assert execution.ensure_long_output(False) is execution
+    assert execution.auto_continue(False) is execution
     assert typing_cast(BundledAgentExecution, execution)._ensure_long_output_enabled is False
 
 
@@ -1322,13 +1326,13 @@ def test_agent_execution_ensure_long_output_rejects_reconfiguration_after_start(
     execution = (
         agent.input("long answer")
         .output({"reply": (str,)}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     execution.start()
 
     with pytest.raises(RuntimeError, match="one independent run"):
-        execution.ensure_long_output(False)
+        execution.auto_continue(False)
 
 
 def test_agent_execution_ensure_long_output_short_path_reports_guarantee_level():
@@ -1338,7 +1342,7 @@ def test_agent_execution_ensure_long_output_short_path_reports_guarantee_level()
         agent.input("short answer")
         .output({"reply": (str,)}, format="json")
         .validate(lambda value, _context: bool(value["reply"]))
-        .ensure_long_output()
+        .auto_continue()
     )
 
     result = execution.get_data()
@@ -1360,7 +1364,7 @@ def test_agent_execution_ensure_long_output_continues_plain_text_losslessly(tmp_
 
     execution = (
         agent.input("write a long document")
-        .ensure_long_output()
+        .auto_continue()
     )
     result = execution.get_text()
     long_output = _get_long_output_meta(execution)
@@ -1411,7 +1415,7 @@ async def test_agent_execution_long_output_settles_stage_owned_continuation_task
         "ensure-long-output-stage-settlement",
     ).use_task_workspace(tmp_path)
 
-    execution = agent.input("write a long document").ensure_long_output()
+    execution = agent.input("write a long document").auto_continue()
     result = await execution.async_get_text()
 
     continuation_stage_ids = [
@@ -1452,7 +1456,7 @@ def test_agent_execution_ensure_long_output_separates_text_anchor_from_continuit
 
     result = (
         agent.input("write the complete document")
-        .ensure_long_output()
+        .auto_continue()
         .get_text()
     )
 
@@ -1489,13 +1493,150 @@ def test_agent_execution_ensure_long_output_stream_hides_private_envelopes(tmp_p
         MockAgentExecutionLongOutputRequester,
         "ensure-long-output-stream",
     ).use_task_workspace(tmp_path)
-    execution = agent.input("write a long document").ensure_long_output()
+    execution = agent.input("write a long document").auto_continue()
 
     deltas = list(execution.get_generator(type="delta"))
 
     assert "".join(deltas) == "alpha-omega"
     assert all("base_digest" not in delta for delta in deltas)
     assert execution.get_text() == "alpha-omega"
+
+
+def test_long_output_continuation_keeps_request_scope_carrier_and_local_settings(tmp_path):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputDelivery
+    from agently.builtins.plugins.AgentExecution.modules.execution import AgentExecution
+
+    agent = _create_long_output_test_agent(
+        MockAgentExecutionLongOutputRequester, "scoped-delivery",
+    ).use_task_workspace(tmp_path)
+    original_input = {"previous_body": "old version", "task": "current section"}
+    execution = agent.input(original_input).instruct("Return a complete corrected body.")
+    assert isinstance(execution, AgentExecution)
+    execution.request.settings.set("plugins.ModelRequester.OpenAICompatible.request_options.max_tokens", 1024)
+    owner = LongOutputDelivery(
+        execution, ensure_keys=None, ensure_all_keys=None, validate_handler=None,
+        key_style="dot", max_retries=0, raise_ensure_failure=True,
+    )
+    owner.preflight()
+    owner.value = "A line\n1. unfinished"
+    request = owner._build_continuation_request()
+    encoded = request.prompt.get("input")
+    assert isinstance(encoded, str)
+    decoded = json.loads(encoded)
+    assert decoded["original_input"] == original_input
+    assert decoded["long_output_continuation"]["continuity_context"]["accepted_tail"] == owner.value
+    assert request.settings.get("plugins.ModelRequester.OpenAICompatible.request_options.max_tokens") == 1024
+    instructions = request.prompt.get("instruct")
+    assert isinstance(instructions, dict)
+    assert "original_deliverable_instructions" not in instructions
+    assert "Return a complete corrected body." in str(request.prompt.get("info"))
+    protocol = "\n".join(instructions["long_output_delivery_protocol"])
+    # Prompt contract checks, not assertions of model semantic adherence.
+    assert "current request deliverable" in protocol
+    assert "accepted prefix is already part of that rewrite" in protocol
+    assert "no minimum block length" in protocol
+    assert "For structured output," not in protocol
+    assert execution.request.prompt.get("input") == original_input
+
+
+@pytest.mark.parametrize("meta", [
+    {"status": "failed", "finish_reason": "stop"},
+    {"status": "cancelled", "finish_reason": "length"},
+    {"status": "completed", "finish_reason": "content_filter"},
+    {"status": "completed", "finish_reason": "unknown_reason"},
+    {"status": "incomplete", "finish_reason": "stop"},
+    {"status": "incomplete", "finish_reason": "stop", "incomplete_details": {"reason": "content_filter"}},
+    {"status": "completed", "finish_reason": "length", "incomplete_details": {"reason": "content_filter"}},
+])
+def test_long_output_rejects_unsafe_or_conflicting_terminal_facts(meta):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputError, normalized_terminal
+
+    with pytest.raises(LongOutputError):
+        normalized_terminal(meta)
+
+
+@pytest.mark.parametrize("meta", [
+    {"status": "failed", "finish_reason": "stop"},
+    {"status": "incomplete", "finish_reason": "stop", "incomplete_details": {"reason": "content_filter"}},
+])
+def test_long_output_does_not_continue_an_unsafe_initial_response(tmp_path, monkeypatch, meta):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputError
+
+    original = MockAgentExecutionLongOutputRequester.broadcast_response
+
+    async def broadcast_response(self, response_generator):
+        async for event, value in original(self, response_generator):
+            yield event, meta if event == "meta" else value
+
+    monkeypatch.setattr(MockAgentExecutionLongOutputRequester, "broadcast_response", broadcast_response)
+    MockAgentExecutionLongOutputRequester.reset()
+    agent = _create_long_output_test_agent(
+        MockAgentExecutionLongOutputRequester, "unsafe-terminal-no-continuation",
+    ).use_task_workspace(tmp_path)
+    with pytest.raises(LongOutputError):
+        agent.input("produce the requested text").auto_continue().get_text()
+    assert MockAgentExecutionLongOutputRequester.attempts == 1
+    assert not list(tmp_path.glob("long_output/*/manifests/*.json"))
+
+
+@pytest.mark.parametrize("meta, expected", [
+    ({"finish_reason": "stop"}, "complete"),
+    ({"status": "completed"}, "complete"),
+    ({"status": "completed", "finish_reason": "length"}, "length"),
+    ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "length"),
+    ({"status": "incomplete"}, "unknown"),
+    ({}, "unknown"),
+])
+def test_long_output_preserves_positive_terminal_signals(meta, expected):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import normalized_terminal
+
+    assert normalized_terminal(meta) == expected
+
+
+@pytest.mark.parametrize("pydantic_schema", [False, True])
+def test_long_output_preserves_list_level_description(pydantic_schema):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputDelivery
+
+    description = "Names of deployment risks only; do not include benefits."
+
+    class Output(BaseModel):
+        names: list[str] = Field(description=description, min_length=2, max_length=4)
+
+    agent = _create_test_agent("continuation-list-description")
+    execution = agent.input("Identify risks and benefits.").output(
+        Output if pydantic_schema else {"names": ([(str, "one risk name")], description, True)},
+        format="json",
+    )
+    assert isinstance(execution, BundledAgentExecution)
+    owner = LongOutputDelivery(
+        execution, ensure_keys=None, ensure_all_keys=None, validate_handler=None,
+        key_style="dot", max_retries=0, raise_ensure_failure=True,
+    )
+    owner.preflight()
+    slot = owner._slot_state()[0]
+    assert slot["description"] == description
+    assert slot["value_contract"]["type"] == "string"
+    if pydantic_schema:
+        assert (slot["min_items"], slot["max_items"]) == (2, 4)
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_long_output_prompt_contains_only_relevant_carrier_rules(structured):
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputDelivery
+
+    execution = _create_test_agent("continuation-carrier-rules").input("Produce the requested output.")
+    if structured:
+        execution.output({"names": [(str, "one name")]}, format="json")
+    assert isinstance(execution, BundledAgentExecution)
+    owner = LongOutputDelivery(
+        execution, ensure_keys=None, ensure_all_keys=None, validate_handler=None,
+        key_style="dot", max_retries=0, raise_ensure_failure=True,
+    )
+    owner.preflight()
+    prompt = str(owner._build_continuation_request().prompt.get("instruct"))
+    assert "around 400 characters" not in prompt
+    assert ("For plain text," in prompt) is (not structured)
+    assert ("For structured output," in prompt) is structured
 
 
 def test_agent_execution_ensure_long_output_preserves_complete_structured_units(tmp_path):
@@ -1517,7 +1658,7 @@ def test_agent_execution_ensure_long_output_preserves_complete_structured_units(
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
     result = execution.get_data()
     result_object = execution.get_data_object()
@@ -1554,7 +1695,7 @@ def test_agent_execution_ensure_long_output_validates_only_final_assembled_value
         agent.input("generate exactly three components")
         .output({"components": [{"name": (str,)}]}, format="json")
         .validate(require_three_components)
-        .ensure_long_output()
+        .auto_continue()
         .get_data()
     )
 
@@ -1572,7 +1713,7 @@ def test_agent_execution_ensure_long_output_replays_root_list(tmp_path):
     execution = (
         agent.input("generate every component")
         .output([{"name": (str, "component name", True)}], format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
     result = execution.get_data()
     result_object = execution.get_data_object()
@@ -1594,7 +1735,7 @@ def test_agent_execution_ensure_long_output_keeps_valid_prefix_and_regenerates_i
     execution = (
         agent.input("generate every component")
         .output({"components": [{"name": (str, "component name", True)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     result = execution.get_data()
@@ -1635,7 +1776,7 @@ def test_agent_execution_ensure_long_output_enforces_constrained_list_bounds(
     execution = (
         agent.input("generate exactly three items")
         .output(ExactThreeItemOutput, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -1666,7 +1807,7 @@ def test_agent_execution_ensure_long_output_rejects_nested_constraint_violation_
     execution = (
         agent.input("generate exactly two valid connected items")
         .output(ExactTwoNestedBoundOutput, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     with warnings.catch_warnings(record=True) as caught:
@@ -1708,7 +1849,7 @@ def test_agent_execution_ensure_long_output_orders_exact_lists_and_exposes_conte
     execution = (
         agent.input("generate exactly three items followed by their summary")
         .output(ExactThreeItemWithSummaryOutput, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -1765,7 +1906,7 @@ def test_agent_execution_ensure_long_output_repairs_final_validation_without_los
                 format="json",
             )
             .validate(require_summary)
-            .ensure_long_output()
+            .auto_continue()
         )
 
     result = execution.get_data(max_retries=1)
@@ -1813,7 +1954,7 @@ def test_agent_execution_ensure_long_output_bounds_final_validation_repairs(tmp_
                 format="json",
             )
             .validate(require_summary)
-            .ensure_long_output()
+            .auto_continue()
         )
 
     with pytest.raises(Exception, match="summary"):
@@ -1839,7 +1980,7 @@ def test_agent_execution_ensure_long_output_assembles_more_than_seventy_units(tm
                 "reason": "all 75 components are required",
             }
         )
-        .ensure_long_output()
+        .auto_continue()
     )
     result = execution.get_data()
 
@@ -1859,7 +2000,7 @@ def test_agent_execution_stream_preserves_structured_completion_provenance(tmp_p
     execution = (
         agent.input("generate every component")
         .output({"components": [{"name": (str,)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     items = list(execution.get_generator(type="instant"))
@@ -1878,7 +2019,7 @@ def test_agent_execution_ensure_long_output_commits_closed_updates_from_truncate
         "ensure-long-output-multi-segment",
     ).use_task_workspace(tmp_path)
 
-    execution = agent.input("write three blocks").ensure_long_output()
+    execution = agent.input("write three blocks").auto_continue()
 
     assert execution.get_text() == "alpha-beta-gamma"
     assert MockAgentExecutionMultiSegmentLongOutputRequester.attempts == 3
@@ -1894,7 +2035,7 @@ def test_agent_execution_ensure_long_output_commits_one_text_update_per_continua
         "ensure-long-output-one-text-update",
     ).use_task_workspace(tmp_path)
 
-    execution = agent.input("write three blocks").ensure_long_output()
+    execution = agent.input("write three blocks").auto_continue()
 
     assert execution.get_text() == "alpha-beta-gamma"
     assert MockAgentExecutionMultiUpdateTextRequester.attempts == 3
@@ -1919,7 +2060,7 @@ def test_agent_execution_ensure_long_output_commits_structured_prefix_from_trunc
     execution = (
         agent.input("write all components")
         .output({"components": [{"name": (str,)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -1943,7 +2084,7 @@ def test_agent_execution_ensure_long_output_commits_large_deferred_prefix(
     execution = (
         agent.input("write all components")
         .output({"components": [{"name": (str,)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -1971,7 +2112,7 @@ def test_agent_execution_ensure_long_output_recovers_after_length_before_header_
     execution = (
         agent.input("write all components")
         .output({"components": [{"name": (str,)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -2028,10 +2169,10 @@ def test_agent_execution_ensure_long_output_recovers_after_length_before_header_
     delivery_protocol = " ".join(
         continuation_instruct["long_output_delivery_protocol"]
     )
-    assert "a nested schema with type array must be a JSON array" in (
+    assert "Preserve nested JSON kinds and wrappers exactly" in (
         delivery_protocol
     )
-    assert "emit at most one corrected update" in delivery_protocol
+    assert "use one smaller corrected update that can close" in delivery_protocol
 
 
 def test_agent_execution_ensure_long_output_owns_complete_envelope_recovery(
@@ -2042,7 +2183,7 @@ def test_agent_execution_ensure_long_output_owns_complete_envelope_recovery(
         MockAgentExecutionInvalidCompleteEnvelopeRequester,
         "ensure-long-output-complete-envelope-recovery",
     ).use_task_workspace(tmp_path)
-    execution = agent.input("write the complete text").ensure_long_output()
+    execution = agent.input("write the complete text").auto_continue()
 
     assert execution.get_text() == "alpha-omega"
     assert MockAgentExecutionInvalidCompleteEnvelopeRequester.attempts == 4
@@ -2078,7 +2219,7 @@ def test_agent_execution_ensure_long_output_bounds_incomplete_header_no_progress
     execution = (
         agent.input("write all components")
         .output({"components": [{"name": (str,)}]}, format="json")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     with pytest.raises(
@@ -2128,7 +2269,7 @@ def test_agent_execution_ensure_long_output_normalizes_nested_slot_values_withou
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     with warnings.catch_warnings(record=True) as caught:
@@ -2184,7 +2325,7 @@ def test_agent_execution_ensure_long_output_replays_initial_structured_text_slot
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -2217,7 +2358,7 @@ def test_agent_execution_ensure_long_output_rejects_append_to_completed_structur
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -2247,7 +2388,7 @@ def test_agent_execution_ensure_long_output_preserves_observed_empty_list(
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -2274,7 +2415,7 @@ def test_agent_execution_ensure_long_output_continuation_declares_empty_list(
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data() == {
@@ -2309,7 +2450,7 @@ def test_agent_execution_ensure_long_output_rejects_stale_empty_list_declaration
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     with pytest.raises(
@@ -2348,7 +2489,7 @@ def test_agent_execution_ensure_long_output_requires_manifest_fact_before_final(
             },
             format="json",
         )
-        .ensure_long_output()
+        .auto_continue()
     )
 
     assert execution.get_data(max_retries=0) == {
@@ -2378,7 +2519,7 @@ def test_agent_execution_ensure_long_output_many_segments_do_not_grow_call_stack
         "ensure-long-output-many-segments",
     ).use_task_workspace(tmp_path)
 
-    result = agent.input("write every segment").ensure_long_output().get_text()
+    result = agent.input("write every segment").auto_continue().get_text()
 
     assert result.endswith("segment-13;")
     assert MockAgentExecutionManySegmentLongOutputRequester.attempts == 13
@@ -2397,7 +2538,7 @@ def test_agent_execution_ensure_long_output_fails_closed_after_repeated_no_progr
     ).use_task_workspace(tmp_path)
 
     with pytest.raises(RuntimeError, match="no durable progress"):
-        agent.input("write a long result").ensure_long_output().get_text()
+        agent.input("write a long result").auto_continue().get_text()
 
     assert MockAgentExecutionNoProgressLongOutputRequester.attempts == 4
 
@@ -2409,7 +2550,7 @@ def test_agent_execution_ensure_long_output_rejects_stale_digest_without_committ
         "ensure-long-output-stale-digest",
     ).use_task_workspace(tmp_path)
 
-    execution = agent.input("write a long result").ensure_long_output()
+    execution = agent.input("write a long result").auto_continue()
     with pytest.raises(RuntimeError, match="manifest revision, digest, and anchor"):
         execution.get_text()
 
@@ -2454,7 +2595,7 @@ def test_agent_execution_ensure_long_output_fails_when_manifest_replay_changes(
     monkeypatch.setattr(TaskWorkspace, "read_file", read_file_with_changed_replay)
 
     with pytest.raises(RuntimeError, match="TaskWorkspace replay mismatch"):
-        agent.input("write a long result").ensure_long_output().get_text()
+        agent.input("write a long result").auto_continue().get_text()
 
 
 def test_agent_execution_ensure_long_output_respects_execution_model_request_budget(tmp_path):
@@ -2466,7 +2607,7 @@ def test_agent_execution_ensure_long_output_respects_execution_model_request_bud
     execution = (
         agent.create_execution(limits={"max_model_requests": 2})
         .input("write three blocks")
-        .ensure_long_output()
+        .auto_continue()
     )
 
     with pytest.raises(RuntimeError, match="max_model_requests"):
@@ -2489,7 +2630,7 @@ def test_agent_execution_ensure_long_output_rejects_unsupported_format_before_di
         (
             agent.input("write a long result")
             .output({"result": (str,)}, format="yaml_literal")
-            .ensure_long_output()
+            .auto_continue()
             .get_data()
         )
 
@@ -2507,7 +2648,7 @@ def test_agent_execution_ensure_long_output_does_not_mix_with_agent_task(tmp_pat
         (
             agent.input("plan and execute a complex task")
             .strategy("task")
-            .ensure_long_output()
+            .auto_continue()
             .get_data()
         )
 

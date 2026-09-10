@@ -110,8 +110,25 @@ async def async_get_data_object(
         raise_ensure_failure=raise_ensure_failure,
         parent_run_context=parent_run_context,
     )
+    if owner._producer_result_object is not None:
+        return owner._producer_result_object
     if owner._ensure_long_output_enabled and owner._long_output_result_object is not None:
         return owner._long_output_result_object
+    if owner._restored_result_pending:
+        from copy import deepcopy
+
+        # Snapshots retain data, never live parser/model objects. Rebind only
+        # the trusted caller's schema and validate once when a typed view is
+        # requested, without replaying production or final policies.
+        if owner.request.prompt.get("output") is not None:
+            options = owner._production_options
+            strict = options.ensure_all_keys if options is not None else None
+            output_model = owner.request.prompt.to_output_model(strict_output=strict)
+            owner._producer_result_object = output_model.model_validate(
+                deepcopy(_business_data_from_full_data(owner, owner.result))
+            )
+        owner._restored_result_pending = False
+        return owner._producer_result_object
     model_result = getattr(owner, "_model_request_result", None)
     if model_result is None:
         return None

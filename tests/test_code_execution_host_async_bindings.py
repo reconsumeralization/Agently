@@ -617,6 +617,67 @@ async def test_bridge_cancellation_marks_active_parallel_and_queued_exclusive_ca
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finish", [True, False])
+async def test_bridge_close_drains_within_budget_or_cancels(tmp_path: Path, finish: bool) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    settled = asyncio.Event()
+
+    async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        started.set()
+        try:
+            await release.wait()
+            return arguments
+        finally:
+            settled.set()
+
+    bridge = CodeExecutionBindingBridge(
+        bindings=[_binding(handler)],
+        limits=_limits(call_timeout_seconds=10, drain_timeout_seconds=0.05),
+        socket_path=tmp_path / "runtime" / "bridge.sock",
+        container_socket_path="/workspace/build/runtime/bridge.sock",
+    )
+    await bridge.async_start()
+    call = asyncio.create_task(_send_frame(bridge, _call_frame(bridge, request_id="drain")))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    closing = asyncio.create_task(bridge.async_close(cancel_active=False))
+    if finish:
+        release.set()
+    await asyncio.wait_for(closing, timeout=1)
+    await asyncio.gather(call, return_exceptions=True)
+    assert settled.is_set()
+    assert bridge.call_records[0]["status"] == ("success" if finish else "cancelled")
+    assert not bridge.socket_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_cleans_up_idle_connections(tmp_path: Path) -> None:
+    async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        return arguments
+
+    bridge = CodeExecutionBindingBridge(
+        bindings=[_binding(handler)],
+        limits=_limits(frame_timeout_seconds=10),
+        socket_path=tmp_path / "runtime" / "bridge.sock",
+        container_socket_path="/workspace/build/runtime/bridge.sock",
+    )
+    await bridge.async_start()
+    reader, writer = await asyncio.open_unix_connection(str(bridge.host_socket_path))
+
+    async def wait_for_client() -> None:
+        while not bridge._client_tasks:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_client(), timeout=1)
+    await asyncio.wait_for(bridge.async_close(cancel_active=True), timeout=1)
+    assert await reader.read() == b""
+    writer.close()
+    await writer.wait_closed()
+    assert not bridge._client_tasks
+    assert not bridge.socket_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_injected_python_client_reports_separate_value_and_ordered_logs(
     tmp_path: Path,
 ) -> None:

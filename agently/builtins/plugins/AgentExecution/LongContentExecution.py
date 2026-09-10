@@ -11,7 +11,7 @@ class LongContentExecution(AgentExecution):
     name = "long_content"
     producer_route = "long_content"
     supported_strategies = frozenset({"auto"})
-    DEFAULT_SETTINGS = {"max_sections": 12, "continuity_chars": 4_000}
+    DEFAULT_SETTINGS = {"max_sections": 12}
 
     def _assert_rework_supported(self) -> None:
         if self._producer_state.get("kind") != "long_content":
@@ -24,7 +24,6 @@ class LongContentExecution(AgentExecution):
         settings = SettingsNamespace(self.request.settings, f"plugins.AgentExecution.{self.name}")
         config = LongContentExecutionConfig(
             max_sections=_positive_int(settings.get("max_sections", 12), "max_sections"),
-            continuity_chars=_positive_int(settings.get("continuity_chars", 4_000), "continuity_chars"),
         )
         return "long_content", await run_long_content_execution(self, config)
 

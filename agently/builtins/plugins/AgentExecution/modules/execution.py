@@ -314,6 +314,8 @@ class AgentExecution:
         self._model_request_result: Any = None
         self._ensure_long_output_enabled = False
         self._long_output_result_object: Any = None
+        self._producer_result_object: Any = None
+        self._restored_result_pending = False
         self._long_output_meta: dict[str, Any] = {}
         self.artifact_declarations: list["_AgentArtifactDeclaration"] = []
         self.artifact_results: list["AgentArtifactResult"] = []
@@ -893,12 +895,23 @@ class AgentExecution:
         target._draft.output(*args, **kwargs)
         return target._refresh_prompt_snapshot()
 
-    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution":
-        """Require this execution to preserve and validate output across model windows."""
+    def auto_continue(self, enabled: bool = True) -> "AgentExecution":
+        """Enable conditional continuation of unfinished model output for this draft.
+
+        Normal completion adds no continuation request. This does not select
+        long_content, expand short answers, resume a task, or replace rework.
+        Defaults off on each new draft; all result readers share this policy.
+        Configure before starting the execution. Existing validation still applies.
+        """
 
         target = self._reconfiguration_target()
         target._ensure_long_output_enabled = bool(enabled)
         return target
+
+    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution":
+        """Compatibility alias for auto_continue(); prefer the shorter name."""
+
+        return self.auto_continue(enabled)
 
     def attachment(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         target = self._reconfiguration_target()

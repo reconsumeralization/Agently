@@ -26,6 +26,17 @@ CASES = (
 )
 
 
+def fixture_paths() -> tuple[Path, Path]:
+    """Keep exact observations for the two characterized Python representations.
+
+    Each baseline comes from the same immutable old source, not the candidate.
+    Unknown environment differences still fail exact comparison.
+    """
+    suffix = "-py314" if sys.version_info >= (3, 14) else ""
+    return (HERE / "fixtures" / f"baseline{suffix}.json",
+            HERE / "fixtures" / f"approved_deltas{suffix}.json")
+
+
 def run_probe(source: Path, api: str, case: str) -> dict[str, Any]:
     env = {key: value for key, value in os.environ.items()
            if key in {"PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT"}}

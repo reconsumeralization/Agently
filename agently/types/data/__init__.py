@@ -33,6 +33,8 @@ class AVOID_COPY:
 
 EMPTY = AVOID_COPY()
 
+from .output import LongContent
+
 from .context import (
     ContextBlock,
     ContextBudget,

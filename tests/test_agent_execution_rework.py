@@ -14,27 +14,29 @@ from test_builtin_agent_executions import (
 @pytest.mark.asyncio
 async def test_long_content_rework_reuses_prefix_and_invalidates_dependants(tmp_path):
     plan = {"document_title": "Guide", "sections": [
-        {"section_id": "context", "title": "Context", "brief": "Context"},
-        {"section_id": "design", "title": "Design", "brief": "Design"},
-        {"section_id": "checks", "title": "Checks", "brief": "Checks"},
+        {"section_id": "section-1", "title": "Context", "brief": "Context"},
+        {"section_id": "section-2", "title": "Design", "brief": "Design"},
+        {"section_id": "section-3", "title": "Checks", "brief": "Checks"},
     ]}
     agent = create_execution_agent(tmp_path, "revision-document", [
-        plan, {"body": "Original context", "continuity_note": "Context remains."},
-        {"body": "Original design", "continuity_note": "Original decision."},
-        {"body": "Original checks", "continuity_note": ""},
-        {"plan": plan, "invalidated_section_ids": ["design"]},
-        {"body": "Revised design", "continuity_note": "Revised decision."},
-        {"body": "Revised checks", "continuity_note": ""},
+        {"document_title": plan["document_title"], "part_plan": [
+            {"part_title": item["title"], "part_brief": item["brief"]} for item in plan["sections"]]},
+        {"body": "Original context"}, {"summary": "Context remains."},
+        {"body": "Original design"}, {"summary": "Original decision."},
+        {"body": "Original checks"},
+        {"plan": plan, "invalidated_section_ids": ["section-2"]},
+        {"body": "Revised design"}, {"summary": "Revised decision."},
+        {"body": "Revised checks"},
     ])
-    run = agent.create_execution("long_content", limits={"max_model_requests": 7}).input("Write the guide")
+    run = agent.create_execution("long_content", limits={"max_model_requests": 10}).input("Write the guide")
     old = run.get_result()
     first = await run.async_run()
     second = await run.async_rework("Change the design and its checks")
     assert first != second and await old.async_get_data() == first
     assert isinstance(second, str)
     assert "Original context" in second and "Revised checks" in second
-    assert ScriptedExecutionRequester.model_dispatches == 7
-    assert run.execution_context.model_request_count == 7
+    assert ScriptedExecutionRequester.model_dispatches == 10
+    assert run.execution_context.model_request_count == 10
     prompt = json.dumps(ScriptedExecutionRequester.requests[-1], default=str)
     assert "Revised decision." in prompt and "Original decision." not in prompt
 

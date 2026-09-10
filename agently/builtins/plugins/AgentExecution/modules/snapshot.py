@@ -8,9 +8,9 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from agently.core.application.AgentExecution import AgentExecutionStream
 from agently.core.storage import RecordStoreContextSource
@@ -41,6 +41,8 @@ def _hash(value: object) -> str:
 
 
 def _contract_value(value: object) -> object:
+    if get_origin(value) is Annotated:
+        return {"annotation_schema": TypeAdapter(value).json_schema()}
     if isinstance(value, type):
         if issubclass(value, BaseModel):
             return {"model_schema": value.model_json_schema()}
@@ -332,6 +334,7 @@ def load(owner: AgentExecution, snapshot: Mapping[str, object]) -> None:
     owner.agent_execution_run_context = run_context
     owner._agent_execution_started_emitted = bool(state.get("started_event_emitted"))
     owner.result = state.get("candidate")
+    owner._restored_result_pending = boundary == "candidate_ready"
     owner.route_info = state["route_info"]
     owner.task_refs = state["task_refs"]
     owner._review_contract = state["review_contract"]

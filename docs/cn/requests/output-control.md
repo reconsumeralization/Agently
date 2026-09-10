@@ -8,6 +8,27 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 > 语言：[English](../../en/requests/output-control.md) · **中文**
 
+## 长文字段声明（4.1.4.8 开发线）
+
+使用 `LongContent` 明确选择长文生产，最终值仍是普通 `str`：
+
+```python
+from agently import LongContent
+
+execution = agent.input("撰写报告").output({
+    "body": (LongContent, "正文写作要求"),
+    "summary": (str, "根据 body 的实际内容生成摘要"),
+}).auto_continue()
+```
+
+兼容 `("long_content", "正文写作要求")`；根输出可声明
+`.output((LongContent, "整篇长文的写作要求"))`。Pydantic 可使用
+`body: LongContent = Field(description="正文写作要求")`，原字段约束仍生效。
+`LongContent` 是带生产标记的字符串类型注解，不是 `format="json"` 这类载体格式。
+正文先完成再回填，后置摘要消费实际正文；普通 `str` 不会自动升级。
+`.auto_continue()` 独立配置单次请求未完成时的接续，不被长文声明替代。
+此能力属于开发线，不能用于假定已发布版本支持；完整发布验收仍独立进行。
+
 第一次消费结构化 response 结果时，校验流水线会运行并缓存结果。它的执行顺序固定，每一步都共用同一份 retry 预算。
 
 对 Agently `4.1.0.1+`，默认 authoring 路径是：在 `.output(...)` 里直接用第三槽 `ensure` 标记固定必填叶子，再由运行时把这些标记编译成 `ensure_keys`。只有当必填路径是运行时决定、条件分支决定，或用静态 schema 不好表达时，才手动传 `ensure_keys=`。默认情况下，第三槽 `True` 和手动 `ensure_keys` 只检查路径/key 是否出现；值可以是 `None`、空白字符串、`False`、`0`、空列表，或其他业务上合法的空值。若某个必填路径还必须包含可用值，显式写第三槽 `"not_null"`；它会拒绝 `None`、空白字符串、空列表或空 wildcard 匹配，以及列表中包含缺失的必填值，同时仍接受 `False` 和 `0`。
@@ -16,6 +37,13 @@ tuple ensure 策略与受支持的 Pydantic 字段约束会进入首次结构化
 不会只留在响应后的校验阶段。直接声明的 Pydantic 输出模型同时仍是 typed
 接受权威：解析出的 dict 如果未通过模型校验，会使用同一份 retry 预算修正，
 不会被当作成功业务数据返回。
+
+4.1.4.8 开发线同时保留 Pydantic `RootModel` 的 JSON 根值形状。例如
+`.output(RootModel[str], format="json")` 要求 JSON 字符串，而不是
+`{"root": "..."}`；`async_get_data()` 返回字符串，typed reader 返回原
+RootModel 实例。字符串内部的 `{}`、`[]` 不会被误当成根对象或数组。
+没有有效 typed result 的 Pydantic 输出会失败或按既有预算重试，不会以 `None`
+冒充解析成功。见[根输出示例](../../../examples/basic/pydantic_root_output.py)。
 
 ## 直接下游接口契约
 
@@ -118,8 +146,16 @@ opt-in 格式，不进入 auto；`flat_markdown` 仅作为显式兼容模式保�
 
 ### 可能超过单次模型输出窗口的结果
 
+4.1.4.8 开发线推荐 `.auto_continue()`；已发布的 `.ensure_long_output()` 保留为
+同实现兼容入口。使用较早版本时继续使用旧名称。
+它表示“输出未完成时自动接续”，不保证篇幅，不恢复整个任务，也不代替 `rework`。
+`str` 是结果类型，`long_content` 是主动长文生产策略，`auto_continue` 是请求交付
+策略；三者不互相替代。4.1.4.8 开发线的字段级主动生产使用上文的
+`LongContent` 注解，也兼容声明类型位置的 `"long_content"` 字符串；普通
+`str` 不会因为字段名或描述提到长文而自动切换生产策略。
+
 当一个业务结果可能超过 provider 的单次输出窗口时，在尚未启动的
-`AgentExecution` 上使用 `.ensure_long_output()`：
+`AgentExecution` 上使用 `.auto_continue()`：
 
 ```python
 netlist = (
@@ -144,23 +180,56 @@ netlist = (
         },
         format="json",
     )
-    .ensure_long_output()
+    .auto_continue()
     .get_data()
 )
 ```
 
-该选项默认关闭；`.ensure_long_output(False)` 可在同一个未启动 draft 上关闭。
+该选项默认关闭；`.auto_continue(False)` 可在同一个未启动 draft 上关闭。
+
+兼容性保留现有 `long_output` 结果元数据和事件，以及历史路由标识
+`selected_by="ensure_long_output"`；它们仍描述同一次请求续写，不是另一套能力。
+
+正常 `stop` 也必须交付单一完整 JSON 载体。多个根对象、重复 key、游离尾部或
+未闭合 JSON 会明确失败；不会只提取第一个对象、丢弃尾部，也不会把格式错误
+当作长度截断而强行续写。这一完整性检查同样用于内部长文正文请求，且会复核
+校验重试接受的替代响应。未开启该选项的普通 dict 宽容解析行为不受此更改。
+替代响应若返回 `length` 或不安全终态，也不能借用首次请求的 `stop` 作为成功
+依据；当前会明确失败，不在校验重试内部另起续写流程。
 它约束的是整次 execution，而不是 `.output(...)` 或某个结果读取器，因此
 `get_data()`、`get_text()`、`get_data_object()`、`get_result()` 和 generator
 consumer 看到的是同一份冻结策略。execution 启动后再调用，会触发现有的一次运行
 生命周期错误。
 
-第一次模型请求保持原样。若归一化终态是 `stop`，继续使用普通单请求结果与校验
-路径；若 provider 报告 `length` / `incomplete`，Agently 才启动一个
-TriggerFlow 可见的续写循环。已接受单元会写入该 execution 的私有
+第一次模型请求保持原样。正常 `stop` 走普通结果校验；显式长度截断启动续写。
+干净结束但缺少明确终态时，完整、唯一且无修复的 JSON 可直接校验；纯文本或
+可信的未闭合 JSON 前缀，则由同一个续写请求检查末尾并按需补充，不另加 judge。
+仅有 `status="incomplete"` 不等于已证明长度截断。续写由 TriggerFlow 管理。
+已接受单元会写入该 execution 的私有
 TaskWorkspace，每次写入都完整读回并核对 SHA-256；最终 candidate 从 manifest
 重放后，再执行原始 Pydantic/schema、ensure 与自定义 validator。每个结构化更新在
 推进 manifest 前，还会单独通过所属 assembly slot 的 JSON Schema 校验。
+
+续写只接完**当前请求**，不负责周边业务流程的后续阶段。原始指令作为交付合同参考；
+即使当前请求本身是“重写”，续写响应也只补充本次重写已经接收的正文之后的缺失部分。
+纯文本续写使用 JSON 数据保存精确接缝，允许在响应窗口和单块限制内一次接完，
+不设块长度下限或固定目标长度；更新未闭合或被拒绝后的恢复请求才提示缩小块。
+并保留请求局部模型设置。这不同于规划并逐章撰写文档，也不会对普通 `stop` 响应自动扩写。
+
+明确的失败、取消、过滤、未知终态原因或相互矛盾的完成事实会失败退出，不触发续写。
+Responses-compatible 适配器保留 `incomplete_details`，避免将非长度中断误判为输出窗口
+限制。结构化续写槽位同时保留列表级说明和单元素的值合同。
+
+私有续写包使用 `completion=complete/incomplete/undetermined`。完整且身份
+匹配的完成包可直接进入原始结果重放与校验，零更新也允许；即使该包的终态缺失
+或为 length，也不因此强制再请求。部分包不能确认完成。`undetermined` 表示
+上下文不足以安全判断，保留此前可信进度并明确失败，不盲目重试或伪造成功。
+这不证明未声明的语义穷尽性，也不扩大当前请求的职责。
+
+若初始 JSON 在字符串内部断开，框架保留解码后的前缀、未完成转义及嵌套/
+数组位置，通过字段增量组装回原结构；无需改成 chunk list。此字段包的请求
+关联由 Host 持有，不让模型重复复制 revision/digest。已闭合字段保持不可变。
+下文的控制头、unit_index 和原子槽位单元上限适用于纯文本及旧槽位续写路径。
 
 当前可无损组装的 carrier 是纯文本和显式/解析后的 `json`。启用该选项时，
 `flat_markdown`、`hybrid`、`xml_field`、`yaml_literal` 和不透明 custom carrier
@@ -185,7 +254,7 @@ TaskWorkspace，每次写入都完整读回并核对 SHA-256；最终 candidate 
 - 真实闭合的空 list 会作为空容器 manifest 事实保留；缺失的 list path 不会被合成
   为空，已有 item 或已有空容器声明之后的重复声明也会被拒绝；
 - 真实闭合的空字符串也会作为 text slot 的存在事实保留。在信任 continuation
-  `is_final` 之前，Agently 要求每个已声明 ensure path 都已有 manifest 事实；缺失
+  `completion=complete` 之前，Agently 要求每个已声明 ensure path 都已有 manifest 事实；缺失
   required path 会继续交付循环，不消耗调用方的最终 validation retry 额度；
 - 真实闭合的结构化字符串是一个原子 schema value；提交后不会再提供给 continuation，
   也不能追加或改写。若一个结构化值超过 4000 字符单元上限，应在原 output contract
@@ -212,8 +281,11 @@ TaskWorkspace，每次写入都完整读回并核对 SHA-256；最终 candidate 
   响应若不满足私有 envelope，会先持久化并记为有界
   `continuation_envelope_invalid` 无进展。调用方的 `max_retries` 只留给最终组装值
   的 validation repair；
-- provider 报告 `length` 后，零更新的 `is_final` 声明仍属于无进展，不能单独证明
-  被截断的业务结果已经完整；
+- 首次 `length` 后，即使尚无新增续写单元，完整唯一的零更新完成确认，
+  在身份正确、无拒绝更新、required facts 齐备时也可进入原始结果重放和校验。
+  不记作无进展、不添加占位正文；未闭合、尾随材料、重复键、错误身份或原校验
+  失败仍不能交付成功；完整包中的明确完成状态可以补足缺失或 length 终态，
+  但不能覆盖失败、过滤等不安全事实；
 - 续写请求不继承 Action/tool handler，因此只输出的续写不会重复副作用；
 - 私有 continuation envelope 不会进入公开文本流。
 
@@ -240,7 +312,7 @@ constraint 或 `.validate(...)` 声明 expected count/key/reference 规则。没
 `semantic_exhaustiveness` 保持 `"not_claimed"`。
 
 可运行示例见
-[`examples/basic/ensure_long_output.py`](../../../examples/basic/ensure_long_output.py)：
+[`examples/basic/auto_continue.py`](../../../examples/basic/auto_continue.py)：
 它生成 75 个 JSON 元件，声明 count/order coverage validator，并设置有界的真实模型
 请求预算。2026-07-28 的 Qwen 记录运行跨多个截断窗口保留了全部 75 个元件，并通过
 一次最终 validation 修正请求只补充缺少的 summary。
@@ -397,7 +469,7 @@ await save_case_update(final)
 |---|---|
 | 长文内容生成 | 规划有用的内容覆盖、展开章节、保持衔接与一致性。 |
 | 大型结构化数据生成 | 保持字段、类型、关系和集合完整性，选择合适 schema 并由宿主重建。 |
-| 截断交付 | 跨输出窗口续写未完成结果；原生 `ensure_long_output()` 支持纯文本和 JSON。 |
+| 截断交付 | 跨输出窗口续写未完成结果；原生 `auto_continue()` 支持纯文本和 JSON。 |
 
 长文可以采用下面的可选模式：
 
@@ -426,7 +498,7 @@ await save_case_update(final)
 选择方案前先区分输出上限、超时、schema 失败、指令不足和模型的篇幅倾向。
 [LongWriter](https://arxiv.org/abs/2408.07055) 在所研究模型中发现长输出 SFT 样本不足的影响，
 并探索了规划后分段写作；这不能证明某次 provider 输出偏短就是预训练导致。
-`ensure_long_output()` 针对标准化后的 `length`/`incomplete` 触发，不会因为正常
+`auto_continue()` 按长度及原始载体的完成证据决定是否接续，不会因为正常
 `stop` 但内容覆盖不足而自动扩写。它可支持分段 writer 的交付，但不能替代写作策略和质量检查。
 
 章节数、摘要长度、并发与修复限制由实际应用决定；应统计规划、写作、可选摘要/评审和重试

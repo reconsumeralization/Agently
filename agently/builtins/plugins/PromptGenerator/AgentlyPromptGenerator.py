@@ -22,6 +22,7 @@ from typing import (
     Any,
     Generator,
     List,
+    Literal,
     Mapping,
     Sequence,
     Annotated,
@@ -51,6 +52,7 @@ from .modules.output_contract import (
     PYDANTIC_CONTRACT_META_KEY,
     generate_output_requirement_lines,
     pydantic_model_to_output_schema,
+    normalize_output_declaration,
 )
 
 if TYPE_CHECKING:
@@ -162,11 +164,13 @@ class AgentlyPromptGenerator(PromptGenerator):
         output: Any,
         *,
         title_mapping: dict[str, str] | None = None,
+        inline_descriptions: Literal["all", "top_level", "none"] = "all",
     ) -> list[str]:
         return generate_output_requirement_lines(
             output,
             replace_slot_references=self._replace_slot_references,
             title_mapping=title_mapping,
+            inline_descriptions=inline_descriptions,
         )
 
     def _check_prompt_all_empty(self, prompt_object: PromptModel):
@@ -270,6 +274,8 @@ class AgentlyPromptGenerator(PromptGenerator):
             return "\n".join(lines)
 
         if isinstance(output, tuple) and len(output) >= 1:
+            if len(output) > 3 and isinstance(output[3], Mapping) and output[3].get('long_content') is True:
+                return '<str>'
             if isinstance(output[0], (dict, list, set)):
                 return self._generate_json_output_prompt(output[0], layer + 1, title_mapping)
             return f"<{str(output[0])}>"
@@ -304,6 +310,7 @@ class AgentlyPromptGenerator(PromptGenerator):
             self._generate_output_requirement_lines(
                 output,
                 title_mapping=title_mapping,
+                inline_descriptions="top_level",
             )
         )
         lines.append("")
@@ -389,6 +396,7 @@ class AgentlyPromptGenerator(PromptGenerator):
             self._generate_output_requirement_lines(
                 output,
                 title_mapping=title_mapping,
+                inline_descriptions="none",
             )
         )
         lines.extend(["", "<agently_output>"])
@@ -429,6 +437,7 @@ class AgentlyPromptGenerator(PromptGenerator):
             self._generate_output_requirement_lines(
                 output,
                 title_mapping=title_mapping,
+                inline_descriptions="none",
             )
         )
         lines.extend(["", "<<<BEGIN AGENTLY_YAML>>>"])
@@ -469,6 +478,7 @@ class AgentlyPromptGenerator(PromptGenerator):
             self._generate_output_requirement_lines(
                 output,
                 title_mapping=title_mapping,
+                inline_descriptions="top_level",
             )
         )
         lines.append("")
@@ -664,6 +674,11 @@ class AgentlyPromptGenerator(PromptGenerator):
                             f"[{ prompt_title_mapping.get('output_requirement', 'OUTPUT REQUIREMENT') }]:",
                             "Data Format: JSON",
                             *(
+                                ["Return one JSON string value with JSON quotation marks, not an object or array."]
+                                if self._is_string_output_field(prompt_object.output)
+                                else []
+                            ),
+                            *(
                             [
                                 "Output Guarantee: STRICT structure",
                                 "All defined fields are required and extra fields are not allowed.",
@@ -756,6 +771,8 @@ class AgentlyPromptGenerator(PromptGenerator):
             prompt_data["output_format"] = self.settings.get("prompt.default_output_format", "json")
         if self._is_pydantic_model_type(prompt_data.get("output")):
             prompt_data["output"] = pydantic_model_to_output_schema(prompt_data["output"])
+        if "output" in prompt_data:
+            prompt_data["output"] = normalize_output_declaration(prompt_data["output"])
         prompt_object = PromptModel(**prompt_data)
         return prompt_object
 
@@ -1347,6 +1364,12 @@ class AgentlyPromptGenerator(PromptGenerator):
         prompt_object = self.to_prompt_object()
         output_prompt = prompt_object.output
 
+        if (isinstance(output_prompt, tuple) and len(output_prompt) > 3
+            and isinstance(output_prompt[3], Mapping) and output_prompt[3].get('long_content') is True):
+            from pydantic import RootModel
+            annotation = Annotated[output_prompt[0], Field(description=str(output_prompt[1] or ''))]
+            return RootModel[annotation]
+
         if not isinstance(output_prompt, (Mapping, Sequence)) or isinstance(output_prompt, str):
             raise TypeError("Unable to generator output model because the output is not a structure data.")
 
@@ -1375,6 +1398,17 @@ class AgentlyPromptGenerator(PromptGenerator):
             )
 
     def _to_serializable_output_prompt(self, output_prompt_part: Any):
+        output_prompt_part = normalize_output_declaration(output_prompt_part)
+        if (isinstance(output_prompt_part, tuple) and len(output_prompt_part) > 3
+            and isinstance(output_prompt_part[3], Mapping)
+            and output_prompt_part[3].get('long_content') is True):
+            result: dict[str, Any] = {'$type': 'long_content'}
+            if output_prompt_part[1]:
+                result['$desc'] = output_prompt_part[1]
+            ensure = DataPathBuilder.normalize_ensure_marker(output_prompt_part[2])
+            if ensure is not None:
+                result['$ensure'] = ensure
+            return result
         if not isinstance(output_prompt_part, (Mapping, Sequence)) or isinstance(output_prompt_part, str):
             return output_prompt_part
 
@@ -1385,6 +1419,8 @@ class AgentlyPromptGenerator(PromptGenerator):
             return result
         else:
             if isinstance(output_prompt_part, tuple):
+                # A sequence view avoids narrowing each match arm to a fixed tuple.
+                output_prompt_part = list(output_prompt_part)
                 match len(output_prompt_part):
                     case 0:
                         return []
@@ -1411,7 +1447,7 @@ class AgentlyPromptGenerator(PromptGenerator):
                             result["$ensure"] = ensure_marker
                         return result
             else:
-                return list(output_prompt_part)
+                return [self._to_serializable_output_prompt(item) for item in output_prompt_part]
 
     def to_serializable_prompt_data(self, inherit: bool = False) -> "SerializableMapping":
         prompt_data = self.prompt.get(

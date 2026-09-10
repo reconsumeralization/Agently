@@ -11,17 +11,16 @@ from typing import Any
 import pytest
 
 from execution_characterization.support import (
-    BASELINE_COMMIT, BASELINE_TREE, CASES, HERE, assert_characterized, differences, normalize, run_probe,
+    BASELINE_COMMIT, BASELINE_TREE, CASES, HERE, assert_characterized, differences, fixture_paths, normalize, run_probe,
 )
 
 
-FIXTURES = HERE / "fixtures"
 SOURCE = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
 def frozen() -> dict[str, Any]:
-    baseline = json.loads((FIXTURES / "baseline.json").read_text(encoding="utf-8"))
+    baseline = json.loads(fixture_paths()[0].read_text(encoding="utf-8"))
     assert baseline["provenance"]["commit"] == BASELINE_COMMIT
     assert baseline["provenance"]["tree"] == BASELINE_TREE
     assert baseline["provenance"]["evidence_kind"] == "synthetic_transport_host_observations"
@@ -35,7 +34,7 @@ def frozen() -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def approved() -> dict[str, Any]:
-    ledger = json.loads((FIXTURES / "approved_deltas.json").read_text(encoding="utf-8"))
+    ledger = json.loads(fixture_paths()[1].read_text(encoding="utf-8"))
     assert ledger["baseline_commit"] == BASELINE_COMMIT
     assert set(ledger["changes"]) == set(CASES)
     assert all(change["reason"] in ledger["reasons"] for changes in ledger["changes"].values() for change in changes)
@@ -102,6 +101,28 @@ def test_approved_delta_is_exact_not_a_path_wildcard() -> None:
         assert_characterized({"field": 0}, {"field": True}, [
             {"path": ["field"], "before": 0, "after": 1, "reason": "Integer-only delta"},
         ])
+
+
+@pytest.mark.parametrize("case,path,replacement", [
+    ("long_content", ["outcome", "value"], "Lost chapter"),
+    ("long_content", ["dispatches"], 5),
+    ("long_content_rejected", ["outcome"], {"value": "bypassed validation"}),
+    ("ensure_continuation", ["outcome", "value"], "lost prefix"),
+    ("ensure_stale", ["outcome", "error", "type"], "ValueError"),
+])
+def test_migrated_contracts_still_reject_unapproved_results(
+    frozen: dict[str, Any], approved: dict[str, Any],
+    case: str, path: list[str], replacement: Any,
+) -> None:
+    observed = normalize(run_probe(SOURCE, "current", case))
+    baseline = frozen["observations"][case]
+    assert_characterized(baseline, observed, approved[case])
+    owner = observed
+    for key in path[:-1]:
+        owner = owner[key]
+    owner[path[-1]] = replacement
+    with pytest.raises(AssertionError, match="Unapproved characterization"):
+        assert_characterized(baseline, observed, approved[case])
 
 
 def test_normalization_preserves_unbound_business_ids_refs_and_file_digests() -> None:

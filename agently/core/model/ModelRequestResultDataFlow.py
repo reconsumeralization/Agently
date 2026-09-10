@@ -839,6 +839,8 @@ class ModelRequestResultDataFlow:
                 output_validation_feedback = self.get_output_validation_feedback()
                 if output_validation_feedback:
                     raise ValueError("Pydantic output validation failed: " + "; ".join(output_validation_feedback))
+                if has_pydantic_output and result._response_parser.full_result_data.get("result_object") is None:
+                    raise ValueError("Pydantic output validation failed: no validated result object is available.")
                 if strict_output:
                     parsed_result = result._response_parser.full_result_data.get("parsed_result")
                     result_object = result._response_parser.full_result_data.get("result_object")

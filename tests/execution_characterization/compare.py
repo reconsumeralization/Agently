@@ -20,7 +20,7 @@ from typing import Any
 
 from support import (
     BASELINE_COMMIT, BASELINE_TREE, CASES, HERE, assert_characterized, differences,
-    normalize, run_probe, verify_baseline_source,
+    fixture_paths, normalize, run_probe, verify_baseline_source,
 )
 
 
@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--freeze-baseline", action="store_true")
     args = parser.parse_args()
-    fixture = HERE / "fixtures" / "baseline.json"
+    fixture, delta_path = fixture_paths()
     if args.freeze_baseline and fixture.exists():
         parser.error("Baseline fixture exists; this command cannot overwrite it")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -66,7 +66,6 @@ def main() -> None:
             observed[name][case] = normalize(raw)
             print(f"{name}/{case}: captured", flush=True)
     stability = differences(observed["baseline"], observed["baseline_repeat"])
-    delta_path = HERE / "fixtures" / "approved_deltas.json"
     approved = json.loads(delta_path.read_text()) if delta_path.exists() else None
     unapproved = {}
     for case in CASES:

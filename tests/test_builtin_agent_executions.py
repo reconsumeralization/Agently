@@ -120,8 +120,6 @@ def create_execution_agent(
 def ready_payload() -> dict[str, Any]:
     return {
         "plan_ready": True,
-        "planning_goal": "Ship a reliable release.",
-        "final_deliverable": "An actionable release plan.",
         "readiness_summary": "Scope and acceptance are available.",
         "questions": [],
     }
@@ -130,8 +128,6 @@ def ready_payload() -> dict[str, Any]:
 def not_ready_payload() -> dict[str, Any]:
     return {
         "plan_ready": False,
-        "planning_goal": "Ship a reliable release.",
-        "final_deliverable": "An actionable release plan.",
         "readiness_summary": "The target environment is missing.",
         "questions": [
             {
@@ -349,7 +345,7 @@ async def test_plan_execution_rejects_transport_continuation_mix(tmp_path):
     agent = create_execution_agent(tmp_path, "continued-plan", [])
     execution = (
         agent.create_execution("plan").input("Plan the release.")
-        .ensure_long_output()
+        .auto_continue()
 
     )
 
@@ -746,15 +742,17 @@ async def test_long_content_execution_plans_writes_and_host_assembles(tmp_path):
         [
             {
                 "document_title": "Architecture Guide",
-                "sections": [
-                    {"section_id": "context", "title": "Context", "brief": "Set the context."},
-                    {"section_id": "design", "title": "Design", "brief": "Explain the design."},
-                    {"section_id": "checks", "title": "Checks", "brief": "List acceptance checks."},
+                "part_plan": [
+                    {"part_title": "Context", "part_brief": "Set the context."},
+                    {"part_title": "Design", "part_brief": "Explain the design."},
+                    {"part_title": "Checks", "part_brief": "List acceptance checks."},
                 ],
             },
-            {"body": "Context body unique text.", "continuity_note": "Use term Execution Carrier."},
-            {"body": "Design body.", "continuity_note": "Validation precedes release."},
-            {"body": "Checks body.", "continuity_note": ""},
+            {"body": "Context body unique text."},
+            {"summary": "Use term Execution Carrier."},
+            {"body": "Design body."},
+            {"summary": "Validation precedes release."},
+            {"body": "Checks body."},
         ],
     )
     execution = agent.create_execution("long_content").input("Write an architecture guide.")
@@ -767,9 +765,9 @@ async def test_long_content_execution_plans_writes_and_host_assembles(tmp_path):
         "## Design\n\nDesign body.\n\n"
         "## Checks\n\nChecks body."
     )
-    assert len(ScriptedExecutionRequester.requests) == 4
+    assert len(ScriptedExecutionRequester.requests) == 6
     second_writer_prompt = json.dumps(
-        ScriptedExecutionRequester.requests[2],
+        ScriptedExecutionRequester.requests[3],
         ensure_ascii=False,
         default=str,
     )
@@ -777,13 +775,13 @@ async def test_long_content_execution_plans_writes_and_host_assembles(tmp_path):
     assert "Context body unique text." not in second_writer_prompt
     assert execution.diagnostics["execution_run"] == {
         "name": "long_content",
-        "model_request_count": 4,
-        "stages": ["section_plan", "section_1", "section_2", "section_3"],
+        "model_request_count": 6,
+        "stages": ["section_plan", "section_1", "section_1_summary", "section_2", "section_2_summary", "section_3"],
         "section_count": 3,
         "assembled_chars": len(result),
         "assembly": "host_ordered",
     }
-    assert len(execution.logs["model_response_ids"]) == 4
+    assert len(execution.logs["model_response_ids"]) == 6
 
 
 @pytest.mark.asyncio
@@ -794,8 +792,8 @@ async def test_long_content_execution_composes_with_artifact_and_review(tmp_path
         [
             {
                 "document_title": "Report",
-                "sections": [
-                    {"section_id": "summary", "title": "Summary", "brief": "Summarize."}
+                "part_plan": [
+                    {"part_title": "Summary", "part_brief": "Summarize."}
                 ],
             },
             {"body": "Accepted report body.", "continuity_note": ""},
@@ -829,8 +827,8 @@ async def test_long_content_execution_composes_with_artifact_and_review(tmp_path
 @pytest.mark.asyncio
 async def test_final_validator_checks_assembled_document_once_without_replay(tmp_path):
     agent = create_execution_agent(tmp_path, "document-validator", [
-        {"document_title": "Report", "sections": [
-            {"section_id": "s1", "title": "Summary", "brief": "Summarize."},
+        {"document_title": "Report", "part_plan": [
+            {"part_title": "Summary", "part_brief": "Summarize."},
         ]},
         {"body": "Document body.", "continuity_note": ""},
     ])
@@ -903,9 +901,9 @@ async def test_long_content_execution_rejects_over_limit_plan_before_writing(tmp
         [
             {
                 "document_title": "Too many sections",
-                "sections": [
-                    {"section_id": "one", "title": "One", "brief": "First."},
-                    {"section_id": "two", "title": "Two", "brief": "Second."},
+                "part_plan": [
+                    {"part_title": "One", "part_brief": "First."},
+                    {"part_title": "Two", "part_brief": "Second."},
                 ],
             }
         ],
@@ -913,10 +911,14 @@ async def test_long_content_execution_rejects_over_limit_plan_before_writing(tmp
     )
     execution = agent.create_execution("long_content").input("Write a report.")
 
-    with pytest.raises(ValueError, match="exceeds max_sections=1"):
+    # Supply invalid replies for every bounded parser attempt; an exhausted
+    # fixture must not masquerade as proof that the plan contract was enforced.
+    ScriptedExecutionRequester.responses *= 4
+    with pytest.raises(ValueError, match="part_plan|validation|validat"):
         await execution.async_get_data()
 
-    assert len(ScriptedExecutionRequester.requests) == 1
+    # Invalid schema can use ordinary bounded parser repair, but no writer starts.
+    assert len(ScriptedExecutionRequester.requests) == 4
     assert execution.status in {"error", "blocked"}
 
 
@@ -936,15 +938,16 @@ async def test_long_content_execution_rejects_structured_output_before_model_cal
 
 
 @pytest.mark.asyncio
-async def test_long_content_execution_rejects_transport_continuation_mix(tmp_path):
-    agent = create_execution_agent(tmp_path, "continued-long-content", [])
+async def test_long_content_execution_uses_request_local_continuation_only(tmp_path):
+    agent = create_execution_agent(tmp_path, "continued-long-content", [
+        {"document_title": "Report", "part_plan": [{"part_title": "Only", "part_brief": "Body"}]},
+        {"body": "Short completed body."},
+    ])
     execution = (
         agent.create_execution("long_content").input("Write a report.")
-        .ensure_long_output()
+        .auto_continue()
 
     )
 
-    with pytest.raises(ValueError, match="cannot be combined with ensure_long_output"):
-        await execution.async_get_data()
-
-    assert ScriptedExecutionRequester.requests == []
+    assert (await execution.async_get_data()).endswith("Short completed body.")
+    assert len(ScriptedExecutionRequester.requests) == 2

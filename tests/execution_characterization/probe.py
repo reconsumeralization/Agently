@@ -219,6 +219,17 @@ CONTENT = [
     {"body": "Second body.", "continuity_note": ""},
 ]
 
+# Same business bytes; only the approved current producer's private contracts differ.
+CURRENT_CONTENT = [
+    {"document_title": "Guide", "part_plan": [
+        {"part_title": "Context", "part_brief": "State the context."},
+        {"part_title": "Checks", "part_brief": "List the checks."},
+    ]},
+    {"body": "First body — 中文。"},
+    {"summary": "First body — 中文。"},
+    {"body": "Second body."},
+]
+
 
 async def probe(case: str, root: Path) -> dict[str, Any]:
     if case in {"direct_text", "direct_json", "concurrent_readers", "mutation_and_fresh", "provider_failure"}:
@@ -330,7 +341,7 @@ async def probe(case: str, root: Path) -> dict[str, Any]:
         return record(execution, result, exchanges=exchanges, validation_calls=checks)
 
     if case in {"long_content", "long_content_rejected"}:
-        agent = create_agent(root, list(CONTENT))
+        agent = create_agent(root, list(CONTENT if ARGS.api == "baseline" else CURRENT_CONTENT))
         checks = []
 
         def validate(value: Any, context: Any) -> bool:
@@ -402,13 +413,17 @@ async def probe(case: str, root: Path) -> dict[str, Any]:
         def continuation(prompt: Any) -> dict[str, Any]:
             # Protocol echo only; all business bytes and decisions are authored
             # in this synthetic script, never inferred from a Prompt keyword.
-            state = prompt.get("input")["long_output_continuation"]
+            supplied = prompt.get("input")
+            if ARGS.api == "current":
+                supplied = json.loads(supplied)
+            state = supplied["long_output_continuation"]
             return {"base_revision": state["base_revision"],
                     "base_digest": "0" * 64 if case == "ensure_stale" else state["base_digest"],
                     "anchor": state["anchor"], "updates": [
                         {"path_key": "$text", "operation": "append_text",
                          "unit_index": state["assembly_slots"][0]["next_unit_index"], "value": "tail — 中文"},
-                    ], "state_summary": "Synthetic transport complete.", "is_final": True}
+                    ], "state_summary": "Synthetic transport complete.",
+                    **({"is_final": True} if ARGS.api == "baseline" else {"completion": "complete"})}
 
         responses = [] if case == "ensure_task_conflict" else [TransportReply("prefix-", "stop")]
         if case in {"ensure_continuation", "ensure_stale"}:
