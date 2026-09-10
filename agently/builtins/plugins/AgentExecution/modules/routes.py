@@ -18,7 +18,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from agently.utils import DataFormatter
 
-from .long_output import LongOutputDelivery, LongOutputError, normalized_terminal
+from .long_output import LongOutputDelivery, LongOutputError
 
 if TYPE_CHECKING:
     from .execution import AgentExecution

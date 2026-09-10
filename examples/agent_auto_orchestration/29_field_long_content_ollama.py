@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently, LongContent
-from examples.agent_auto_orchestration._ollama_qwen import configure_ollama_qwen
+from agently import Agently, LongContent  # noqa: E402 - runnable from a source checkout
+from examples.agent_auto_orchestration._ollama_qwen import configure_ollama_qwen  # noqa: E402
 
 
 class Handoff(BaseModel):

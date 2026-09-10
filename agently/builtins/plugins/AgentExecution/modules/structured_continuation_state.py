@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from agently.core.model import Prompt
+from agently.utils import StreamingJSONParser
 
 from . import long_output as native
 
@@ -20,9 +21,6 @@ class Slot:
     path: tuple[str | int, ...]
     contract: dict[str, Any]
     model: type[BaseModel] | None
-
-
-from agently.utils import StreamingJSONParser
 
 
 class Update(BaseModel):
