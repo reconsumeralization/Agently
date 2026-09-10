@@ -444,6 +444,100 @@ def test_program_source_is_not_copied_into_runtime_observation() -> None:
     assert marker not in json.dumps(observation, ensure_ascii=False)
 
 
+def test_programmatic_planning_observation_is_bounded_and_program_free() -> None:
+    agent = Agently.create_agent()
+    marker = "PLANNING_OBSERVATION_MUST_NOT_CONTAIN_PROGRAM"
+    observation = agent.action._to_runtime_visible_observation(
+        {
+            "kind": "plan_ready",
+            "payload": {
+                "decision": {
+                    "next_action": "execute",
+                    "use_action": True,
+                    "action_calls": [
+                        {
+                            "purpose": "review",
+                            "action_id": "run_action_program",
+                            "action_input": {
+                                "program": f"return {marker!r}",
+                                "description": "review",
+                                "catalog_revision": "sha256:review",
+                            },
+                            "source_protocol": "programmatic",
+                        }
+                    ],
+                    "planning_observation": {
+                        "planning_protocol": "programmatic",
+                        "sdk_renderer_version": "agently.programmatic_action.python.v3",
+                        "eligible_action_count": 3,
+                        "ineligible_action_count": 1,
+                        "sdk_bytes": 2048,
+                        "contract_bytes": 1024,
+                        "program_bytes": 64,
+                    },
+                }
+            },
+        }
+    )
+
+    rendered = json.dumps(observation, ensure_ascii=False)
+    assert marker not in rendered
+    assert observation["payload"]["decision"]["planning_observation"] == {
+        "planning_protocol": "programmatic",
+        "sdk_renderer_version": "agently.programmatic_action.python.v3",
+        "eligible_action_count": 3,
+        "ineligible_action_count": 1,
+        "sdk_bytes": 2048,
+        "contract_bytes": 1024,
+        "program_bytes": 64,
+    }
+
+
+def test_programmatic_settled_observation_is_runtime_visible_but_not_model_hot() -> None:
+    agent = Agently.create_agent()
+    record = {
+        "action_call_id": "outer-observation",
+        "ok": True,
+        "status": "success",
+        "success": True,
+        "action_id": "run_action_program",
+        "purpose": "review",
+        "data": {"value": {"ok": True}},
+        "result": {"value": {"ok": True}},
+        "meta": {
+            "programmatic_observation": {
+                "sdk_renderer_version": "agently.programmatic_action.python.v3",
+                "eligible_action_count": 2,
+                "sdk_bytes": 1500,
+                "contract_bytes": 800,
+                "program_bytes": 64,
+                "wrapper_bytes": 3000,
+                "binding_call_count": 3,
+                "successful_binding_calls": 3,
+                "failed_binding_calls": 0,
+                "peak_active_binding_calls": 2,
+                "unexpected": "must not escape",
+            }
+        },
+    }
+
+    with agent.action._artifact_manager.bind_artifact_scope(
+        {"kind": "action_run", "id": "programmatic-observation"}
+    ):
+        finalized = agent.action._finalize_action_result(
+            record,
+            artifact_scope={"kind": "action_run", "id": "programmatic-observation"},
+        )
+    runtime_record = agent.action._to_runtime_visible_observation(
+        {"kind": "action_completed", "payload": {"record": finalized}}
+    )["payload"]["record"]
+    model_record = agent.action._to_model_visible_record(finalized)
+
+    assert runtime_record["meta"]["programmatic_observation"]["peak_active_binding_calls"] == 2
+    assert "unexpected" not in runtime_record["meta"]["programmatic_observation"]
+    assert "programmatic_observation" not in model_record.get("meta", {})
+
+
 def test_program_source_is_not_copied_into_next_model_record() -> None:
     agent = Agently.create_agent()
     marker = "REVIEW_PROGRAM_SOURCE_MUST_STAY_COLD"

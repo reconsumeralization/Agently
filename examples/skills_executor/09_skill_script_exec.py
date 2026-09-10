@@ -36,9 +36,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
-from agently.types.data import SkillScriptAuthorization
-from examples.dynamic_task._shared import configure_model
+from agently import Agently  # noqa: E402
+from agently.types.data import SkillScriptAuthorization  # noqa: E402
+from examples.dynamic_task._shared import configure_model  # noqa: E402
 
 
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "script-release-probe"

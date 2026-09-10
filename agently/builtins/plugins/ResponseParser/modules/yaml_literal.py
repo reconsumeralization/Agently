@@ -20,7 +20,10 @@ import re
 from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
-from agently.core.model.StructuredOutputParser import extract_yaml_literal_target, parse_yaml_literal_output
+from agently.core.model.StructuredOutputParser import (
+    extract_yaml_literal_target as extract_yaml_literal_target,
+    parse_yaml_literal_output as parse_yaml_literal_output,
+)
 
 
 _YAML_TARGET_RE = re.compile(

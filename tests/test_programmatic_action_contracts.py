@@ -52,7 +52,7 @@ def test_action_planning_protocol_and_reserved_constants_are_typed():
     }
     assert PROGRAMMATIC_ACTION_TRANSPORT_ID == "run_action_program"
     assert PROGRAMMATIC_ACTION_ARTIFACT_READ_ID == "read_action_artifact"
-    assert PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION.endswith(".v2")
+    assert PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION.endswith(".v3")
 
 
 def test_action_package_does_not_export_programmatic_mechanism_helpers():
@@ -102,7 +102,60 @@ def test_programmatic_catalog_binds_explicit_action_concurrency_mode():
     assert exclusive["entries"][0]["concurrency_mode"] == "exclusive"
     assert parallel["entries"][0]["concurrency_mode"] == "parallel"
     assert exclusive["catalog_revision"] != parallel["catalog_revision"]
-    assert '\\"concurrency_mode\\":\\"parallel\\"' in parallel["sdk"]
+    assert '"concurrency_mode":"parallel"' in parallel["sdk"]
+
+
+def test_programmatic_sdk_keeps_one_reconstructable_exact_contract_projection():
+    catalog = build_programmatic_action_catalog(
+        [
+            _read_spec(action_id="alpha", concurrency_mode="parallel"),
+            _read_spec(action_id="z-tool"),
+        ]
+    )
+
+    contract_lines = [
+        line
+        for line in catalog["sdk"].splitlines()
+        if line.startswith("# Action contract (JSON): ")
+    ]
+    assert len(contract_lines) == 2
+    exact_contracts = {}
+    for line in contract_lines:
+        exact_contracts.update(json.loads(line.split(": ", 1)[1]))
+    assert exact_contracts == {
+        entry["action_id"]: {
+            "description": entry["description"],
+            "input_schema": entry["input_schema"],
+            "required_input_keys": entry["required_input_keys"],
+            "returns": entry["output_schema"],
+            "concurrency_mode": entry["concurrency_mode"],
+        }
+        for entry in catalog["entries"]
+    }
+    assert "ACTION_CONTRACTS_JSON" not in catalog["sdk"]
+    assert catalog["sdk_bytes"] == len(catalog["sdk"].encode("utf-8"))
+    assert catalog["contract_bytes"] == len(
+        json.dumps(
+            exact_contracts,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def test_programmatic_sdk_v3_reduces_representative_fixed_overhead():
+    base = _read_spec()
+    observed: list[int] = []
+    for count in (1, 2, 4, 8, 16, 32):
+        catalog = build_programmatic_action_catalog(
+            [{**base, "action_id": f"search_docs_{index:02d}"} for index in range(count)]
+        )
+        observed.append(catalog["sdk_bytes"])
+
+    assert observed == sorted(observed)
+    assert observed[0] < 1_400
+    assert observed[-1] < 29_000
 
 
 def test_catalog_mapping_can_use_schema_like_action_ids_without_becoming_one_spec():
@@ -123,7 +176,7 @@ def test_programmatic_catalog_revision_binds_contract_renderer_and_host_seed():
     )
     changed_renderer = build_programmatic_action_catalog(
         [_read_spec()],
-        renderer_version="agently.programmatic_action.python.v3",
+        renderer_version="agently.programmatic_action.python.v4",
         revision_seed="request:v1",
     )
     changed_seed = build_programmatic_action_catalog([_read_spec()], revision_seed="request:v2")
@@ -160,7 +213,14 @@ def test_python_sdk_uses_attributes_only_for_safe_identifiers_and_compiles():
 
     namespace: dict[str, object] = {}
     exec(compile(catalog["sdk"], "<programmatic-action-sdk>", "exec"), namespace)
-    exact_contracts = json.loads(str(namespace["ACTION_CONTRACTS_JSON"]))
+    contract_lines = [
+        line
+        for line in catalog["sdk"].splitlines()
+        if line.startswith("# Action contract (JSON): ")
+    ]
+    exact_contracts = {}
+    for line in contract_lines:
+        exact_contracts.update(json.loads(line.split(": ", 1)[1]))
     assert list(exact_contracts) == ["_private", "alpha", "class", "z-tool"]
 
 
@@ -196,8 +256,14 @@ def test_sdk_preserves_required_optional_inputs_and_explicit_returns():
         "type": "object",
     }
     assert entry["output_schema"] == {"items": {"type": "string"}, "type": "array"}
-    assert '"limit": NotRequired[int]' in catalog["sdk"]
-    assert '"query": str' in catalog["sdk"]
+    contract_line = next(
+        line
+        for line in catalog["sdk"].splitlines()
+        if line.startswith("# Action contract (JSON): ")
+    )
+    rendered_contract = json.loads(contract_line.split(": ", 1)[1])
+    assert rendered_contract["search_docs"]["input_schema"] == entry["input_schema"]
+    assert "action_input: dict[str, JSONValue]" in catalog["sdk"]
     assert "Output = list[str]" in catalog["sdk"]
 
 

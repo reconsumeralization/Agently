@@ -102,6 +102,30 @@ claim. Use PTC for bounded runtime control and exact local computation when
 that value justifies the SDK/Docker overhead; do not treat it as an automatic
 optimization for every multi-call task.
 
+### SDK projection and accounting
+
+The 4.1.4.8 renderer v3 keeps one canonical exact JSON contract for every
+eligible Action, retains the Python callable and return type, and removes the
+second expanded input `TypedDict` projection. The exact JSON remains
+authoritative for required fields, descriptions, enums, ranges, patterns,
+additional-property policy, and concurrency mode. This is a deterministic
+prompt-size optimization; it is not evidence that every model will produce a
+better program.
+
+On the representative repeated contract used for deterministic validation,
+the generated SDK decreased from 1,527 to 1,399 bytes for one Action and from
+31,287 to 26,292 bytes for 32 Actions. Later authorized model comparisons must
+still evaluate business completion and tokens independently.
+
+`action.plan_ready` exposes primitive-only facts under
+`decision.planning_observation`: renderer version, eligible/ineligible Action
+counts, SDK/contract bytes, and program bytes. The settled outer Action result
+adds `meta.programmatic_observation` with wrapper bytes, binding call outcomes,
+and observed peak active binding calls when the provider reports them. Missing
+provider facts remain absent rather than being inferred as zero. These fields are diagnostics only;
+they do not drive routing, authorization, retry, or acceptance, and they are
+not copied into the next model-facing Action record.
+
 ## Current eligibility boundary
 
 The current protocol generates the body of one Python 3.10+ async function. Its return value must

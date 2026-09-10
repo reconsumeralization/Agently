@@ -145,7 +145,7 @@ class TestReasonBlock:
         ctx = MockContext()
         bp = TriggerFlowBlueprint(name="test")
         block = ReasonBlock()
-        ids = block.build_operators(blueprint=bp, context=ctx, settings={})
+        block.build_operators(blueprint=bp, context=ctx, settings={})
 
         # Handler should be registered
         event_handlers = bp._handlers["event"]

@@ -97,6 +97,7 @@ class CodeExecutionBindingSummary(TypedDict, total=False):
     failed_calls: int
     request_bytes: int
     response_bytes: int
+    peak_active_calls: int
 
 
 class CodeExecutionResult(TypedDict, total=False):

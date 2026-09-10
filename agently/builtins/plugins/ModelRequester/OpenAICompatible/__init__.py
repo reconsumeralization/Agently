@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from httpx import AsyncClient
+
 from .modules.types import ContentMapping, ModelRequesterSettings, ModelSettingsMapping
-from .plugin import AsyncClient, OpenAICompatible
+from .plugin import OpenAICompatible
 
 __all__ = [
     "AsyncClient",

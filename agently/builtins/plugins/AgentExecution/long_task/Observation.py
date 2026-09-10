@@ -17,9 +17,37 @@ from __future__ import annotations
 
 from agently_stage import default_stage_call_bridge
 
+from typing import Literal
+
 from agently.types.data import ContextConsumption, ContextPackage
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentExecutionStreamData,
+    AgentExecutionTextDeltaProjector,
+    AgentTaskMixinBase,
+    Any,
+    AsyncGenerator,
+    asyncio,
+    build_task_board_acceptance_index,
+    build_task_board_evidence_view,
+    Callable,
+    cast,
+    DataFormatter,
+    Generator,
+    json,
+    Mapping,
+    project_agent_execution_text_delta,
+    RecordRef,
+    ReplanSignal,
+    Sequence,
+    task_board_explicit_state_facts,
+    TaskBoardRevision,
+    TaskContextView,
+    time,
+    _compact_agent_task_error_info,
+    _compact_agent_task_error_message,
+    _STREAM_REPLAY_LIMIT,
+)
 
 
 class AgentTaskObservationMixin(AgentTaskMixinBase):

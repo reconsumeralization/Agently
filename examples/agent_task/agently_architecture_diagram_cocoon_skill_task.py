@@ -42,7 +42,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -51,9 +51,9 @@ if str(ROOT) not in sys.path:
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
-from _business_example_common import (
+from _business_example_common import (  # noqa: E402
     TASK_MODEL_KEY,
     configure_agent_model_pool,
     default_workspace,

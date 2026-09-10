@@ -110,7 +110,7 @@ class KeyWaiterExtension(BaseAgent):
     async def async_start_waiter(self, *, must_in_prompt: bool = False):
         if not self.__when_handlers:
             raise NotImplementedError(
-                f"Use .when_key(<key>, <handler>) to provide at least one key handler before .start_waiter()."
+                "Use .when_key(<key>, <handler>) to provide at least one key handler before .start_waiter()."
             )
         handler_keys = list(self.__when_handlers.keys())
         self.__check_keys_in_output(
@@ -135,7 +135,7 @@ class KeyWaiterExtension(BaseAgent):
     def start_waiter(self, *, must_in_prompt: bool = False):
         if not self.__when_handlers:
             raise NotImplementedError(
-                f"Use .when_key(<key>, <handler>) to provide at least one key handler before .start_waiter()."
+                "Use .when_key(<key>, <handler>) to provide at least one key handler before .start_waiter()."
             )
         handler_keys = list(self.__when_handlers.keys())
         self.__check_keys_in_output(

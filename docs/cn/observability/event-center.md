@@ -241,6 +241,14 @@ Action Runtime 生命周期事件以 `action.*` 作为主命名空间。当当�
 内部规划流，只展示一次已接受的外层业务 response；detail 和 EventCenter hook 仍可检查
 规划请求与决策，validation warning 在 simple 中也保持可见。
 
+程序化规划的 `action.plan_ready` 可以包含有界的
+`payload.decision.planning_observation` 计量视图。settle 后的
+`run_action_program` record 可以在 `meta.programmatic_observation` 中提供
+SDK/contract/program/wrapper 大小、binding 调用结果与观测到的 active binding
+并发峰值。完整 SDK、catalog、program source、binding values 与 provider logs
+仍保留在 cold 边界。这些 additive 字段只用于诊断，不能驱动 route、retry、policy
+或 acceptance。
+
 具体 action 执行使用 `action.started`、`action.completed` 和 `action.failed`。
 因 policy 或 sandbox gate 在正常执行前停止的 action 使用
 `action.approval_required` 或 `action.blocked`，不会再被记录成普通失败。

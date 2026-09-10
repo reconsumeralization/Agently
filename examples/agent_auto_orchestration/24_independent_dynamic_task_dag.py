@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 
 async def extract_value(context):

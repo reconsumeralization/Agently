@@ -236,7 +236,12 @@ def test_in_development_programmatic_action_calling_contract() -> None:
     assert "Agent.release_programmatic_action_calls" in contract["catalog_lifecycle_contract"]
     assert "redaction digest/byte facts" in contract["observation_contract"]
     assert "fail-open for DevTools" in contract["observation_contract"]
+    assert "planning_observation" in contract["observation_contract"]
+    assert "programmatic_observation" in contract["observation_contract"]
+    assert "sdk_bytes" in contract["observation_contract"]
+    assert "peak_active_binding_calls" in contract["observation_contract"]
     assert "independent observed effects" in contract["performance_contract"]
+    assert "renderer v3" in contract["performance_contract"]
     assert "does not promise universal cost or latency" in contract["performance_contract"]
 
 

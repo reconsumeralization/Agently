@@ -3,8 +3,8 @@ import dotenv
 
 dotenv.load_dotenv(dotenv.find_dotenv())
 
-from fastapi import FastAPI
-from agently import Agently
+from fastapi import FastAPI  # noqa: E402
+from agently import Agently  # noqa: E402
 
 Agently.set_settings(
     "OpenAICompatible",

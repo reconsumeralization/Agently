@@ -14,7 +14,14 @@
 
 from __future__ import annotations
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    DataFormatter,
+    Mapping,
+    Sequence,
+    _compact_agent_task_error_message,
+)
 
 
 _TASKBOARD_CARD_RETRYABLE_RESULT_CODES = {

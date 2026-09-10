@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 from textwrap import dedent
 from typing import Any, Literal, TYPE_CHECKING, cast, overload, TypeVar
 

@@ -36,3 +36,21 @@ anyio = ">=4,<5"
 [tool.black]
 line-length = 120
 skip-string-normalization = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["examples/archived"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["E402", "F401"]
+"agently/base.py" = ["E402"]
+"agently/core/operation/Action/ActionProgram.py" = ["E721"]
+"agently/integrations/chromadb.py" = ["E402"]
+"agently/integrations/fastapi.py" = ["E402"]
+"agently/types/data/code_execution.py" = ["E721"]
+"agently/types/data/prompt.py" = ["E721"]
+"agently/utils/Storage.py" = ["E402"]

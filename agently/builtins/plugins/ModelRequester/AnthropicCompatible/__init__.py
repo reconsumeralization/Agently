@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from httpx import AsyncClient
+
 from .modules.types import AnthropicCompatibleSettings
-from .plugin import AnthropicCompatible, AsyncClient
+from .plugin import AnthropicCompatible
 
 __all__ = [
     "AnthropicCompatible",

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, TYPE_CHECKING
 
 from agently.utils import DataFormatter
 

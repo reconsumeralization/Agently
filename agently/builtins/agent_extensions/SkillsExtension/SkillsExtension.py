@@ -31,7 +31,7 @@ from agently.types.data import (
     SkillScriptAuthorization,
     required_code_execution_isolation,
 )
-from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
+from agently.utils.DataGuardian import _copy_public, _ensure_list
 
 from .SkillActionBinder import BoundSkillAction, SkillActionBinder
 

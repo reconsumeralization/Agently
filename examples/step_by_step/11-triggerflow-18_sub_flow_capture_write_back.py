@@ -1,6 +1,5 @@
 import asyncio
 from typing import Any, cast
-from typing import cast
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
 

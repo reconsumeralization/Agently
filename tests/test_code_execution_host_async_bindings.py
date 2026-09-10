@@ -322,6 +322,7 @@ async def test_bridge_overlaps_parallel_bindings_and_honors_exclusive_barriers(
             {"value": 5},
         ]
         assert max_active == 2
+        assert bridge.summary["peak_active_calls"] == 2
         assert events.index("start:3") > events.index("end:1")
         assert events.index("start:3") > events.index("end:2")
         assert events.index("start:4") > events.index("end:3")

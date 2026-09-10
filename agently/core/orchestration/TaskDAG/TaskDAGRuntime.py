@@ -38,7 +38,6 @@ from .TaskDAGHelpers import (
     _done_task_event,
     _extract_artifact_refs,
     _failed_task_event,
-    _fallback_action,
     _fallback_retry_config,
     _fallback_terminal_action,
     _graph_fingerprint,

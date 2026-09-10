@@ -149,7 +149,10 @@ def test_trigger_flow_anonymous_append_only_but_named_lambda_is_idempotent():
     assert len(_operators_by_kind(anonymous_flow, "chunk")) == 2
 
     named_flow = TriggerFlow(name="named-lambda-idempotent")
-    handler = lambda data: data.value
+
+    def handler(data):
+        return data.value
+
     named_flow.to(handler, name="identity")
     named_count = len(_operators(named_flow))
     named_flow.to(handler, name="identity")

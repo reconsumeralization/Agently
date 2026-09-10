@@ -19,7 +19,25 @@ import json
 
 from typing import ContextManager
 
-from .TaskShared import *
+from .TaskShared import (
+    AgentTaskMixinBase,
+    Any,
+    Awaitable,
+    build_task_board_evidence_view,
+    cast,
+    DataFormatter,
+    evidence_ledger_view,
+    Mapping,
+    Sequence,
+    TaskBoardCardResult,
+    TaskContextView,
+    WorkUnitIntent,
+    _compact_agent_task_error_message,
+    _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS,
+    _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
+    _TASKBOARD_PROMPT_RESULT_CHARS,
+    _TASKBOARD_READBACK_PREVIEW_CHARS,
+)
 
 
 class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):

@@ -33,7 +33,6 @@ from __future__ import annotations
 from agently_stage import default_stage_call_bridge
 
 import inspect
-import json
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -62,7 +61,6 @@ from agently.types.data import (
     ActionResult,
     ActionRunContext,
     ActionSpec,
-    ExecutionResourcePolicy,
     ExecutionResourceProviderCandidate,
     ExecutionResourceRequirement,
 )

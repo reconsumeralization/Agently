@@ -35,6 +35,9 @@ from agently.types.data import (
     AgentArtifactHandler,
     AgentArtifactResult,
     AgentExecutionEffort,
+    AgentExecutionLineage,
+    AgentExecutionLimits,
+    RunContext,
     AgentInteractionHandler,
     AgentReviewContext,
     AgentReviewHandler,
@@ -50,15 +53,19 @@ from agently.types.data import (
     AgentlyOriginalResponsePayload,
     AgentlySpecificResultMessage,
     AgentlySpecificResponseMessage,
+    ActionPlanningObservation,
     ModelStreamingHandler,
+    ProgrammaticActionCatalog,
+    ProgrammaticActionObservation,
     ResponseContentType,
     ResultContentType,
     SkillRuntimeStreamHandler,
+    SkillScriptAuthorization,
     StreamingData,
     TaskBoardGraph,
     TaskBoardRevision,
 )
-from agently.types.data import AgentExecutionName, AgentExecutionLineage, AgentExecutionLimits, RunContext
+from agently.types.data import AgentExecutionName
 from agently.types.options import ExecutionOptions
 from agently.types.plugins import (
     ActionExecutor,
@@ -172,6 +179,22 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution_result.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
 
 
+def test_programmatic_action_observation_types_are_explicitly_exported():
+    if TYPE_CHECKING:
+        planning: ActionPlanningObservation = {
+            "planning_protocol": "programmatic",
+            "sdk_bytes": 1,
+        }
+        settled: ProgrammaticActionObservation = {
+            "sdk_renderer_version": "agently.programmatic_action.python.v3",
+            "peak_active_binding_calls": 2,
+        }
+        catalog = cast(ProgrammaticActionCatalog, {})
+
+        assert_type(planning["sdk_bytes"], int)
+        assert_type(settled["peak_active_binding_calls"], int)
+        assert_type(catalog["contract_bytes"], int)
+
 def test_public_handler_type_aliases():
     if TYPE_CHECKING:
         from agently.builtins.plugins.AgentExecution import (
@@ -186,6 +209,9 @@ def test_public_handler_type_aliases():
             PlanExecution(Agently.create_agent()),
             LongContentExecution(Agently.create_agent()),
         ]
+
+        assert plugin_contract is concrete
+        assert len(producer_contracts) == 4
 
         def review_handler(_result: Any, _context: AgentReviewContext) -> bool:
             return True
@@ -208,7 +234,6 @@ def test_public_handler_type_aliases():
         agent_review_handler: AgentReviewHandler = review_handler
         agent_artifact_handler: AgentArtifactHandler = artifact_handler
         agent_interaction_handler: AgentInteractionHandler = interaction_handler
-        agent: BaseAgent = Agently.create_agent("typing-handler-contract")
         assert callable(model_handler)
         assert callable(skills_handler)
         assert callable(agent_review_handler)
@@ -269,8 +294,15 @@ def test_agent_execution_choice_aliases_keep_builtin_editor_candidates():
         "effort": {"minimal", "low", "fast", "medium", "normal", "high", "max"},
         "strategy": {"auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"},
     }
+    type_namespace = {
+        **globals(),
+        "AgentExecutionLineage": AgentExecutionLineage,
+        "AgentExecutionLimits": AgentExecutionLimits,
+        "RunContext": RunContext,
+        "ExecutionOptions": ExecutionOptions,
+    }
     name_overload = get_overloads(BaseAgent.create_execution)[0]
-    assert _literal_values(get_type_hints(name_overload, localns=globals())["name"]) == {
+    assert _literal_values(get_type_hints(name_overload, localns=type_namespace)["name"]) == {
         "auto", "request", "long_task", "plan", "long_content",
     }
     for owner in (BaseAgent, AgentExecution):
@@ -348,9 +380,11 @@ def test_changed_runtime_protocols_are_publicly_typed():
     if TYPE_CHECKING:
         action_executor = cast(ActionExecutor, object())
         resource_provider = cast(ExecutionResourceProvider, object())
+        script_authorization = SkillScriptAuthorization()
 
         assert_type(action_executor, ActionExecutor)
         assert_type(resource_provider, ExecutionResourceProvider)
+        assert_type(script_authorization, SkillScriptAuthorization)
 
 
 def test_agent_execution_stream_protocol_contract():

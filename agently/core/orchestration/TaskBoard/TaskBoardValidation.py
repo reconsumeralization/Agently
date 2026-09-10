@@ -23,7 +23,6 @@ from typing import Any
 from agently.types.data import (
     TaskBoardCard,
     TaskBoardCardResult,
-    TaskBoardGraph,
     TaskBoardPatch,
     TaskBoardRevision,
     TaskBoardSchedulePlan,

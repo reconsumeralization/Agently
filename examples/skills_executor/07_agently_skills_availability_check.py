@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 AGENTLY_SKILLS_ROOT = ROOT.parent / "Agently-Skills"
 RUNTIME_ROOT = ROOT / ".example_runtime" / "skills_executor" / "agently_skills_availability"
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 
 # Agently-Skills pack availability check — developer pre-flight case.
