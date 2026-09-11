@@ -165,6 +165,15 @@ builds, git inspection, and read-only diagnostics; use TaskWorkspace file action
 such as `read_file`, `grep_files`, `edit_file`, and `apply_patch` for file
 reading, searching, editing, and writing.
 
+Cmd-backed local commands await an asynchronous subprocess without blocking the
+calling event loop. Timeout or cancellation cleans up the owned process; POSIX
+also terminates its new process group, while other platforms guarantee only the
+direct child. Cancellation propagates instead of returning success. This is not
+full isolation of descendants that escape the group. `max_output_chars` limits
+previews, not peak memory; configured output artifacts still preserve complete
+captured content. Commands retain argv semantics, without new shell pipelines,
+redirection, or interactive sessions.
+
 See `examples/builtin_actions/` for the current action-native examples.
 Historical built-in tool examples live under `examples/archived/builtin_tools/`
 and point back to the current replacements.

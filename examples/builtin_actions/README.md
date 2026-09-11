@@ -19,12 +19,14 @@ and include an `Expected key output` comment showing the important output shape.
 | `01_search_package_registration_local.py` | No | None unless `RUN_REAL_SEARCH=1` | Mount `Search(...)` with `agent.use_actions(search)` and inspect registered actions. |
 | `02_browse_bs4_local_http.py` | No | `beautifulsoup4` | Browse a local HTTP page with the BS4 fallback path. |
 | `03_search_browse_agent_ollama.py` | Yes | Ollama, optional search/browse deps | Let a model use Search and Browse packages together. |
+| `04_cmd_async_lifecycle_local.py` | No | None | Verify Cmd event-loop progress, timeout status, and preserved partial output. Infrastructure-only, not model planning. |
 
 ## Run
 
 ```bash
 python examples/builtin_actions/01_search_package_registration_local.py
 python examples/builtin_actions/02_browse_bs4_local_http.py
+python examples/builtin_actions/04_cmd_async_lifecycle_local.py
 ```
 
 For the model-driven example, start Ollama and set optional search proxy values

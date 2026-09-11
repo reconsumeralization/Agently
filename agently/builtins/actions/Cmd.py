@@ -13,7 +13,11 @@
 # limitations under the License.
 
 
+import asyncio
+import locale
+import os
 import shlex
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -71,9 +75,7 @@ class Cmd:
         output_artifact_dir: str | Path | None = None,
     ):
         self.allowed_cmd_prefixes = set(
-            allowed_cmd_prefixes
-            if allowed_cmd_prefixes is not None
-            else DEFAULT_SAFE_CMD_PREFIXES
+            allowed_cmd_prefixes if allowed_cmd_prefixes is not None else DEFAULT_SAFE_CMD_PREFIXES
         )
         self._allowed_cmd_prefix_tokens = [
             self._normalize_cmd(prefix)
@@ -100,7 +102,7 @@ class Cmd:
         default_policy: dict | None = None,
     ) -> list[str]:
         prefix = action_prefix.strip()
-        action_id = f"{ prefix }cmd" if prefix else "cmd"
+        action_id = f"{prefix}cmd" if prefix else "cmd"
         action.register_action(
             action_id=action_id,
             desc=(
@@ -183,9 +185,7 @@ class Cmd:
                 0,
                 -1,
             ):
-                if tuple(root_parts[-prefix_size:]) != tuple(
-                    requested_parts[:prefix_size]
-                ):
+                if tuple(root_parts[-prefix_size:]) != tuple(requested_parts[:prefix_size]):
                     continue
                 return root.joinpath(*requested_parts[prefix_size:]).resolve()
             return (root / requested).resolve()
@@ -235,14 +235,7 @@ class Cmd:
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
         try:
-            result = subprocess.run(
-                args,
-                cwd=str(workdir_path),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                env=self.env,
-            )
+            result = await self._run_process(args, workdir_path)
         except subprocess.TimeoutExpired as error:
             stdout, stdout_truncated, stdout_artifact = self._bounded_output("stdout", error.stdout or "")
             stderr, stderr_truncated, stderr_artifact = self._bounded_output("stderr", error.stderr or "")
@@ -279,6 +272,73 @@ class Cmd:
             "output_artifacts": artifacts,
             "diagnostics": [],
         }
+
+    @staticmethod
+    def _kill_process(process: asyncio.subprocess.Process) -> None:
+        try:
+            if os.name == "posix":
+                # A parent may already have exited while its children still own
+                # the output pipes. Terminate our group even in that case.
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    async def _run_process(self, args: list[str], workdir: Path) -> subprocess.CompletedProcess[str]:
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(workdir),
+                env=self.env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
+            )
+        )
+        output: asyncio.Task[tuple[bytes, bytes]] | None = None
+
+        async def stop() -> None:
+            process = await spawn
+            self._kill_process(process)
+            if output is None:
+                await process.communicate()
+            else:
+                await output
+            await process.wait()
+
+        timed_out = False
+        try:
+            # Shield creation as well as collection: cancellation must not lose
+            # a process created just before its handle is returned to this call.
+            process = await asyncio.shield(spawn)
+            output = asyncio.create_task(process.communicate())
+            try:
+                stdout, stderr = await asyncio.wait_for(asyncio.shield(output), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                self._kill_process(process)
+                stdout, stderr = await asyncio.shield(output)
+        except BaseException:
+            cleanup = asyncio.create_task(stop())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    # Repeated cancellation must not abandon owned cleanup.
+                    continue
+            cleanup.result()
+            raise
+        if timed_out:
+            raise subprocess.TimeoutExpired(args, self.timeout, output=stdout, stderr=stderr)
+        assert process.returncode is not None
+        encoding = locale.getpreferredencoding(False)
+
+        def text(value: bytes) -> str:
+            # Preserve subprocess.run(text=True)'s decoding and universal newlines.
+            return value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+
+        return subprocess.CompletedProcess(args, process.returncode, text(stdout), text(stderr))
 
     def _bounded_output(self, stream_name: str, value: str | bytes) -> tuple[str, bool, dict | None]:
         text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
