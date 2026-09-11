@@ -190,13 +190,20 @@ AgentExecution API。
 ## 上下文限制与渐进式披露
 
 安装 Skill 不会把全部资源复制进每次 prompt。required `SKILL.md` guidance
-只交付一次；完整 root 已存在时，它的 child section descriptors 不会再次提供给
+在同一 ContextPackage 中只交付一次；完整 root 已存在时，它的 child section descriptors 不会再次提供给
 selector 或重复进入 package。`SkillContextSource` 向 TaskContext 拥有的内部 ContextIndex 提供固定
 revision 的 resource descriptor 与 exact read；resource index 与显式 refs 支持
 后续 bounded read。structural、lexical 或可选 hybrid index 可以缩小可复用
 candidate，但 TaskContext 仍是 aggregate，SkillLibrary 仍是 source truth。上下文
 过大时，reader 返回 omissions、diagnostics 和可继续读取的 refs，不会把合成
 summary 伪装成完整 source。
+
+默认资源选择请求会收到本次已读的 instruction 内容及其完整性标记，用来理解
+“什么阶段需要读哪个资源”等条件。它不会预读所有可选资源正文；选中后仍由
+Host 验证候选键并精确读回。没有已读指引时，继续按 intent、phase 和候选卡选择。
+这不增加选择节点，也不扩展 Skill 或 Action 权限；自定义 selector 的调用签名不变。
+如果选中同一资源的完整正文和子章节，包交付会按已验证的来源身份与父子关系去重，
+不依赖模型选择顺序。父正文未完整读回时保留子章节；已发生的读取仍计入预算。
 
 按 consumer 和 phase 返回一份或多份有界信息块。完整文件和原始 evidence
 留在 SkillLibrary、TaskWorkspace 或 RecordStore；hot model path 只携带当前任务

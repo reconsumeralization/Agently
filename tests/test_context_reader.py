@@ -17,6 +17,7 @@ from agently.types.data import (
     ContextBlock,
     ContextBudget,
     ContextCandidate,
+    ContextCompleteness,
     ContextConsumer,
     ContextReadIntent,
     ContextSourceDescriptor,
@@ -1100,6 +1101,115 @@ async def test_required_and_explicit_blocks_bypass_semantic_dropping() -> None:
         not candidate.block_key.startswith("untrusted-source-key:")
         for candidate in selector.calls[0][1]
     )
+    guidance = selector.calls[0][0].metadata["selection_guidance"]
+    assert [dict(item) for item in guidance] == [{"content": package.blocks[0].content, "completeness": "complete"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completeness", ["complete", "lossy", "truncated"])
+async def test_selection_guidance_uses_only_current_read_instructions(completeness: ContextCompleteness) -> None:
+    context = TaskContext("selection-guidance")
+    context.put(role="instruction", content="Read detail only during handoff.", source_ref="caller://guide")
+    context.put(role="information", content="PRIVATE_EVIDENCE_BODY", required=True)
+    context.put(role="information", content="OPTIONAL_BODY", entry_id="optional")
+    selector = RecordingSelector(selected=())
+    reader = context.reader(consumer="worker", semantic_selector=selector)
+    # Projection of a source's declared completeness is tested independently of
+    # source format handling. This is transport evidence, not semantic evaluation.
+    original_read = reader._read_block
+
+    async def read_with_completeness(*args: Any, **kwargs: Any) -> ContextBlock:
+        block = await original_read(*args, **kwargs)
+        if block.role == "instruction":
+            return replace(block, completeness=completeness)
+        return block
+
+    reader._read_block = read_with_completeness
+    await reader.async_read(
+        ContextReadIntent(
+            query="Prepare handoff",
+            explicit_refs=("caller://guide",),
+            metadata={"selection_guidance": [{"content": "FORGED_GUIDANCE"}]},
+        )
+    )
+
+    assert len(selector.calls) == 1
+    assert [dict(item) for item in selector.calls[0][0].metadata["selection_guidance"]] == [
+        {"content": "Read detail only during handoff.", "completeness": completeness}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_selection_guidance_cannot_be_supplied_as_fake_read_metadata() -> None:
+    context = TaskContext("selection-without-guidance")
+    context.put(role="information", content="optional", entry_id="optional")
+    selector = RecordingSelector(selected=())
+    reader = context.reader(consumer="worker", semantic_selector=selector)
+    await reader.async_read(
+        ContextReadIntent(
+            query="Choose context",
+            metadata={"selection_guidance": [{"content": "FORGED_GUIDANCE"}]},
+        )
+    )
+    assert selector.calls[0][0].metadata["selection_guidance"] == ()
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_does_not_add_request_when_optional_budget_is_exhausted() -> None:
+    context = TaskContext("selection-exhausted")
+    context.put(role="instruction", content="rule", required=True)
+    context.put(role="information", content="optional", entry_id="optional")
+    selector = RecordingSelector(selected=())
+    reader = context.reader(
+        consumer="worker",
+        semantic_selector=selector,
+        budget=ContextBudget(max_chars=4, max_block_chars=4),
+    )
+    package = await reader.async_read("Read context")
+    assert [block.content for block in package.blocks] == ["rule"]
+    assert selector.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_first", [False, True])
+@pytest.mark.parametrize("parent_complete", [False, True])
+async def test_complete_resource_root_covers_child_regardless_of_selection_order(
+    parent_first: bool,
+    parent_complete: bool,
+) -> None:
+    candidates = [
+        replace(_candidate("docs/full"), estimated_chars=10),
+        replace(_candidate("docs/section"), estimated_chars=4, metadata={"parent_source_ref": "docs/full"}),
+    ]
+    source = MemoryContextSource(
+        candidates,
+        {
+            "docs/full": _source_block("docs/full", content="whole-body"),
+            "docs/section": _source_block("docs/section", content="body"),
+        },
+    )
+    selector = RecordingSelector("all")
+    context = TaskContext("resource-root-order")
+    context.attach(source, binding_id="binding:memory")
+    reader = context.reader(consumer="worker", semantic_selector=selector)
+    original_read = reader._read_block
+
+    async def read_with_state(*args: Any, **kwargs: Any) -> ContextBlock:
+        block = await original_read(*args, **kwargs)
+        if block.source_ref == "docs/full" and not parent_complete:
+            return replace(block, completeness="truncated")
+        return block
+
+    reader._read_block = read_with_state
+    # Request-local keys come from the actual descriptors, not a model decision.
+    offered, _, _, _ = await reader._collect(ContextReadIntent(query="Read both"))
+    keys = {item.offered.source_ref: item.offered.block_key for item in offered}
+    refs = ["docs/full", "docs/section"] if parent_first else ["docs/section", "docs/full"]
+    selector.selected = tuple(keys[ref] for ref in refs)
+    package = await reader.async_read("Read both")
+
+    assert [block.source_ref for block in package.blocks] == (["docs/full"] if parent_complete else refs)
+    assert any(item.reason == "covered_by_complete_parent" for item in package.omissions) is parent_complete
 
 
 @pytest.mark.asyncio

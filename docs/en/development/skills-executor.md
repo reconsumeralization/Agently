@@ -213,13 +213,25 @@ TaskContext diagnostics, retries, or lifecycle control.
 Installing a Skill does not copy all of its resources into every prompt.
 `SkillContextSource` contributes revision-pinned resource descriptors and exact
 reads to the TaskContext-owned internal ContextIndex. Required `SKILL.md`
-guidance is delivered once; its child section descriptors are not offered or
+guidance is delivered once within a ContextPackage; its child section descriptors are not offered or
 delivered again when the complete root is already present. Resource indexes and
 explicit references allow later bounded reads. Structural, lexical, or optional hybrid indexing may
 narrow reusable candidates, but TaskContext remains the aggregate and
 SkillLibrary remains source truth. When available context is too large, the
 reader returns omissions and diagnostics plus refs for later reads. It never
 pretends that a synthetic summary is the full source.
+
+The default resource-selection request receives instruction content already read
+for this read, with its completeness markers, to interpret conditional resource
+requirements for the current phase. Optional resource bodies stay unread until
+the Host validates the selected keys and reads them exactly. Without read
+guidance, selection continues to use the intent, phase, and candidate cards.
+This adds no selection node or Skill/Action permissions and does not change the
+custom selector call signature.
+If both a complete resource root and its child section are selected, package
+delivery deduplicates them using their source identity and declared parent
+relation, regardless of selection order. An incomplete root does not replace
+its child; reads already performed still consume their budget.
 
 Use one or more bounded information blocks selected for the consumer and
 phase. Keep full files and raw evidence in SkillLibrary, TaskWorkspace, or

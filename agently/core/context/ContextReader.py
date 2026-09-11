@@ -912,6 +912,7 @@ class ContextReader:
         intent: ContextReadIntent,
         candidates: list[_CollectedCandidate],
         *,
+        read_blocks: Sequence[ContextBlock],
         available_chars: int,
         available_blocks: int,
     ) -> tuple[tuple[str, ...], list[ContextDiagnostic], str | None]:
@@ -957,6 +958,14 @@ class ContextReader:
             filters=intent.filters,
             metadata={
                 **dict(intent.metadata),
+                # This is a current-read projection, not caller-supplied prompt
+                # metadata or a second source read. Keep optional bodies cold.
+                "selection_guidance": [
+                    {"content": block.content, "completeness": block.completeness}
+                    for block in read_blocks
+                    if block.role == "instruction"
+                    and block.completeness in {"complete", "truncated", "lossy"}
+                ],
                 "selection_budget": {
                     "available_chars": available_chars,
                     "available_blocks": available_blocks,
@@ -1619,6 +1628,7 @@ class ContextReader:
         optional_keys, selection_diagnostics, selection_failure = await self._select_optional(
             resolved_intent,
             optional,
+            read_blocks=blocks,
             available_chars=remaining_chars,
             available_blocks=self.budget.max_blocks - len(blocks),
         )
@@ -1645,6 +1655,37 @@ class ContextReader:
             remaining_chars=remaining_chars,
         )
 
+        # Selection is relevance-ordered: a child may have been read before
+        # its complete resource root. Remove that now-covered delivery without
+        # reordering selection or refunding reads that already consumed budget.
+        parent_refs = {
+            item.offered.block_key: str(item.offered.metadata.get("parent_source_ref") or "").strip()
+            for item in collected
+        }
+        complete_roots = {
+            (block.source_id, block.source_revision, block.binding_id, block.role, block.source_ref)
+            for block in blocks
+            if block.completeness == "complete" and not parent_refs.get(block.block_key)
+        }
+        distinct_blocks: list[ContextBlock] = []
+        for block in blocks:
+            parent_ref = parent_refs.get(block.block_key, "")
+            if (
+                not block.required
+                and parent_ref
+                and (block.source_id, block.source_revision, block.binding_id, block.role, parent_ref) in complete_roots
+            ):
+                omissions.append(
+                    ContextOmission(
+                        block_key=block.block_key,
+                        source_ref=block.source_ref,
+                        reason="covered_by_complete_parent",
+                        details={"parent_source_ref": parent_ref},
+                    )
+                )
+            else:
+                distinct_blocks.append(block)
+
         package = ContextPackage(
             package_id=f"context_package:{uuid.uuid4().hex}",
             task_context_id=self._snapshot.context_id,
@@ -1653,7 +1694,7 @@ class ContextReader:
             phase=self.phase,
             source_revisions=self._snapshot.source_revisions,
             source_coverage=source_coverage,
-            blocks=tuple(blocks),
+            blocks=tuple(distinct_blocks),
             omissions=tuple(omissions),
             diagnostics=tuple(diagnostics),
         )

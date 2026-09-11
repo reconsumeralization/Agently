@@ -103,6 +103,8 @@ async def test_model_request_selector_uses_prompt_lanes_and_host_keys_only() -> 
     assert "source_revision" not in cards[0]
     assert "source_ref" not in cards[0]
     assert "binding_id" not in cards[0]
+    assert set(request.slots["info"]) == {"offered_context_blocks"}
+    assert "selection_guidance" not in request.slots["instruct"]
     assert "Return only offered block_key values" in request.slots["instruct"]
     assert "descending task relevance" in request.slots["instruct"]
     assert request.slots["output"] == {
@@ -164,3 +166,36 @@ async def test_model_request_selector_propagates_request_failure() -> None:
             consumer=ContextConsumer("worker"),
             phase="execution",
         )
+
+
+@pytest.mark.asyncio
+async def test_selector_projects_read_guidance_without_identity_or_other_metadata() -> None:
+    request = FakeModelRequest({"selected_keys": []})
+    await ModelRequestContextSelector(lambda: request).async_select(
+        intent=ContextReadIntent(
+            query="Prepare handoff",
+            metadata={
+                "selection_guidance": [
+                    {
+                        "content": "Read references/detail.md before handoff.",
+                        "completeness": "lossy",
+                        "source_id": "private-identity",
+                    }
+                ],
+                "unrelated": "PRIVATE_METADATA",
+            },
+        ),
+        candidates=_candidates(),
+        consumer=ContextConsumer("worker"),
+        phase="handoff",
+    )
+    assert request.slots["info"]["selection_guidance"] == [
+        {
+            "content": "Read references/detail.md before handoff.",
+            "completeness": "lossy",
+        }
+    ]
+    assert "PRIVATE_METADATA" not in str(request.slots)
+    assert "private-identity" not in str(request.slots)
+    assert "[info.selection_guidance]" in request.slots["instruct"]
+    assert "Read references/detail.md before handoff." not in request.slots["instruct"]

@@ -79,8 +79,20 @@ class ModelRequestContextSelector:
         if isinstance(selection_budget, Mapping):
             request_input["selection_budget"] = dict(selection_budget)
         request.input(request_input)
-        request.info({"offered_context_blocks": cards})
-        request.instruct(
+        request_info: dict[str, Any] = {"offered_context_blocks": cards}
+        guidance = intent.metadata.get("selection_guidance")
+        if isinstance(guidance, Sequence) and not isinstance(guidance, (str, bytes)):
+            projected_guidance = [
+                {"content": item["content"], "completeness": item["completeness"]}
+                for item in guidance
+                if isinstance(item, Mapping)
+                and "content" in item
+                and item.get("completeness") in {"complete", "truncated", "lossy"}
+            ]
+            if projected_guidance:
+                request_info["selection_guidance"] = projected_guidance
+        request.info(request_info)
+        instruction = (
             "Select only optional Context blocks that are semantically useful "
             "for this intent and consumer phase. Return them in descending task relevance, "
             "putting exact API, schema, integration-contract, or directly requested evidence "
@@ -89,6 +101,13 @@ class ModelRequestContextSelector:
             "selecting everything. Return only offered block_key values. Do not reproduce source "
             "ids, paths, revisions, bindings, content, permissions, or executable objects."
         )
+        if "selection_guidance" in request_info:
+            instruction += (
+                " Use [info.selection_guidance] to interpret resource-reading conditions for this "
+                "intent and phase, not to perform the downstream task. Respect each item's "
+                "completeness; missing text in an incomplete item is not evidence that no rule exists."
+            )
+        request.instruct(instruction)
         request.output(
             {
                 "selected_keys": (
