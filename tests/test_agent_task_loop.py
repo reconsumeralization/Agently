@@ -8798,7 +8798,8 @@ async def test_flat_known_action_unknown_args_uses_one_narrow_command_request(
                         "action_id": "read_policy",
                         "action_input": {"path": "policy.md"},
                     }
-                ]
+                ],
+                "requires_observation": False,
             }
 
     requests: list[FakeNarrowRequest] = []

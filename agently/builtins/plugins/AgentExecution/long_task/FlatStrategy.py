@@ -1885,7 +1885,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "When the user explicitly requires a named action/tool to be called, or the next step cannot be accepted "
             "without that exact action's execution record, set required_action_ids to those action ids instead of "
             "claiming the action was requested in prose. The host will then provide only those required Action contracts "
-            "to one narrow command request before direct ActionRuntime dispatch; do not attempt to reproduce strict "
+            "to one narrow command request, using bounded stepwise execution when arguments need new Action results; "
+            "do not attempt to reproduce strict "
             "Action kwargs from the compact planner capability list."
             " For TaskWorkspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
@@ -2004,8 +2005,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         iteration_index: int,
         plan: Mapping[str, Any],
         context_pack: "TaskContextView",
-    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Resolve required Flat Action kwargs once, then dispatch directly."""
+    ) -> tuple[dict[str, Any], dict[str, Any]] | Literal["requires_observation"] | None:
+        """Dispatch ready kwargs, or defer new-observation dependencies to the existing loop."""
 
         if str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "") != "actions":
             return None
@@ -2056,16 +2057,23 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             }
         )
         request.instruct(
-            "Produce the complete bounded Action command batch for this one Flat AgentTask step. "
-            "Use only offered action_id values and exact kwargs defined by each Action contract. "
-            "Use bounded_step_plan, context_pack, and repair_context only to fill required arguments. "
-            "Return commands in dependency order; the host executes this bounded Flat batch serially. "
-            "Do not execute Actions, synthesize a final response outside Action inputs, invent placeholders, or "
-            "request another planning round. Include every required_action_id at least once; repeated calls are "
-            "allowed only when distinct inputs are required by this bounded step."
+            "Resolve Action arguments for [input.bounded_step_plan] using [input.context_pack], "
+            "[input.repair_context], and the exact contracts in [info.available_actions]. "
+            "Assess [output.requires_observation] before constructing [output.action_commands]. "
+            "Serial dispatch preserves order but cannot supply a future Action result to this request. "
+            "Do not execute Actions, guess missing values, invent placeholders, or synthesize a final response "
+            "outside Action inputs."
         )
         request.output(
             {
+                "requires_observation": (
+                    bool,
+                    "True if any call in this step needs arguments determined by a not-yet-executed Action's "
+                    "result, including repeated calls to the same Action. Return no commands in that case; "
+                    "the host will use bounded stepwise execution. False when all arguments can be grounded "
+                    "now; ordering alone does not require a new observation.",
+                    True,
+                ),
                 "action_commands": (
                     [
                         {
@@ -2074,7 +2082,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                             "action_input": (dict, "Complete kwargs for the Action contract.", True),
                         }
                     ],
-                    "Complete Action command batch for this Flat step.",
+                    "Empty list when requires_observation is true. Otherwise, the complete batch in execution "
+                    "order, including each [info.required_action_ids] entry at least once. Repeat calls only "
+                    "for distinct inputs required by this step.",
                     True,
                 )
             },
@@ -2099,6 +2109,22 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             phase="work.execute",
         )
         raw_commands = raw.get("action_commands") if isinstance(raw, Mapping) else None
+        requires_observation = raw.get("requires_observation") if isinstance(raw, Mapping) else None
+        if (
+            not isinstance(requires_observation, bool)
+            or not isinstance(raw_commands, list)
+            or (requires_observation and raw_commands)
+        ):
+            return self._bounded_action_command_failure(
+                execution_id=execution_id,
+                code="agent_task.flat.action_commands.invalid_readiness",
+                message="Expected a boolean requires_observation and a command list, empty when observation is needed.",
+                execution_kind="flat_bounded_action_calls",
+                command_source="flat_action_command_request",
+                action_planning_model_requests=1,
+            )
+        if requires_observation:
+            return "requires_observation"
         if raw_commands in (None, [], ()):
             return self._bounded_action_command_failure(
                 execution_id=execution_id,
@@ -2157,7 +2183,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 plan,
                 context_pack,
             )
-            if narrow_action_commands is not None:
+            if isinstance(narrow_action_commands, tuple):
                 direct_result, direct_meta = narrow_action_commands
                 return {
                     "execution_result": DataFormatter.sanitize(direct_result),
@@ -2169,10 +2195,18 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 iteration_index,
                 plan,
                 context_pack,
+                require_step_actions=narrow_action_commands == "requires_observation",
                 carrier_output_policy=self._carrier_output_policy_from_block_context(_context),
                 scoped_retrieval_results=scoped_retrieval_results,
                 evidence_ledger=evidence_ledger,
             )
+            if narrow_action_commands == "requires_observation":
+                execution_meta["action_command_planning"] = {
+                    "command_source": "flat_action_command_request",
+                    "action_planning_model_requests": 1,
+                    "requires_observation": True,
+                    "command_count": 0,
+                }
             return {
                 "execution_result": DataFormatter.sanitize(execution_result),
                 "execution_meta": DataFormatter.sanitize(execution_meta),
@@ -2584,6 +2618,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         context_pack: "TaskContextView",
         *,
+        require_step_actions: bool = False,
         carrier_output_policy: Mapping[str, Any] | None = None,
         scoped_retrieval_results: Sequence[Mapping[str, Any]] | None = None,
         evidence_ledger: Mapping[str, Any] | None = None,
@@ -2599,6 +2634,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             },
         )
         step_execution = self._configure_step_execution(execution, plan)
+        if require_step_actions:
+            # A deferred command batch retains its required-call evidence contract,
+            # not merely the candidate visibility of an ordinary planned step.
+            execution.require_actions(self._normalize_string_list(plan.get("required_action_ids")))
+            # New-observation steps may need multiple calls plus final synthesis.
+            # Keep explicit task bounds, not the generic two-round convenience cap.
+            supplied, max_rounds = self._explicit_task_action_loop_max_rounds()
+            execution.request.settings.set("action.loop.max_rounds", max_rounds if supplied else None)
+            execution.request.settings.set("tool.loop.max_rounds", max_rounds if supplied else None)
         language_policy = self._language_policy()
         input_payload = {
             "task_id": self.id,

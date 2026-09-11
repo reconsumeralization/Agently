@@ -921,11 +921,23 @@ dependency `TaskBoardCardResult` 中的可信 artifact refs 做确定性关联�
 Flat AgentTask step 使用同一个命令降低 owner。Flat planner 只从紧凑 capability list
 选择 `required_action_ids`，不会在缺少严格 kwargs schema 时猜测参数。如果内部结构化 plan
 已经携带通过校验的 `action_commands`，宿主无需追加规划请求即可执行；否则只发出一次窄结构化
-请求，该请求仅接收必需 Actions 的权威 schema 与有界 step context，返回命令批次后由宿主校验
-并按依赖顺序串行交给 ActionRuntime，从而在不重开规划循环的情况下保留 write/read 等 step
-内依赖。未知或不可用的必需 Action 会在该请求之前 fail closed。只有 step
-没有固定必需 Action ids、且后续 Action 选择确实依赖 Action 结果时，Flat 才回退到开放式
-ActionLoop。
+请求，该请求仅接收必需 Actions 的权威 schema 与有界 step context，返回完整命令批次，或
+`requires_observation=true` 与空命令列表。所有参数已经有依据时，宿主校验后串行交给
+ActionRuntime；仅顺序依赖（例如写入再读取已知路径）不需要另开规划轮次。
+后续参数必须依赖前一 Action 的新结果时，即使全部 Action id 已知，Flat 也会使用已有
+有界子 ActionLoop，先观察结果再规划下一调用。交接前不会执行半个批次。
+就绪字段缺失或自相矛盾会明确失败；未知或不可用的必需 Action 在窄请求之前失败。
+显式 `action_commands` 仍是固定 kwargs，不是结果引用或变量替换语言。
+子执行的 scope、权限、deadline 和最终验收保持不变；交接时还会将批次 required ids
+绑定到子执行已有的 `require_actions` 证据门槛，不能仅设置可见范围。
+该门槛证明成功调用，不代替参数语义或重复调用次数的业务验收。交接时的一次窄请求记录在
+`execution_meta.action_command_planning` 中。
+这种自适应交接不套用普通子执行隐式的两轮上限，因为调用后可能还需要终态请求；
+显式任务 `action_loop_max_rounds`、任务 deadline 和请求预算继续生效。
+
+`examples/agent_task/action_result_dependency.py` 用真实模型执行工单读取/确认任务，
+revision 只在 Action 调用时生成。配置 `MODEL_BASE_URL`、`MODEL_API_KEY` 和
+`MODEL_NAME` 即可运行；可选 `MODEL_REQUEST_OPTIONS` 接收 JSON 对象形式的 provider 参数。
 
 AgentTask observation 也会在结构化 stream 上发布归一化 action 事实：
 `agent_task.action.started`、`agent_task.action.completed` 和

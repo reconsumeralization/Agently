@@ -1157,12 +1157,29 @@ to guess strict kwargs from that list. If an internal structured plan already
 carries validated `action_commands`, the host dispatches them with no additional
 planning request. Otherwise, one narrow structured request receives only the
 required Actions' authoritative schemas plus the bounded step context, returns
-the dependency-ordered command batch, and the host validates and dispatches it
-serially through ActionRuntime. This preserves write/read and other intra-step
-dependencies without reopening a planning loop. Unknown or unavailable required Actions fail closed before that
-request. Flat falls back to an open-ended ActionLoop only when the step does not
-fix the required Action ids and later Action choice genuinely depends on Action
-results.
+either a complete command batch or `requires_observation=true` with no commands.
+When all arguments are already grounded, the host validates and dispatches the
+batch serially through ActionRuntime. Ordering alone (such as writing then reading
+a known path) does not require another planning round. If later arguments need an
+earlier Action's new result, Flat uses the existing bounded child ActionLoop to
+observe that result before planning the next call, even when all Action ids are
+known. It never dispatches a partial batch before this handoff. Missing or
+contradictory readiness fields fail closed; unknown or unavailable required
+Actions fail before the narrow request. Explicit `action_commands` remain fixed
+kwargs, not a result-reference or substitution language. Child scope, policy,
+deadlines, and final verification remain unchanged. The handoff also binds all
+batch-required ids through the child's existing `require_actions` evidence gate;
+visibility alone is insufficient. This gate proves successful calls, not correct
+arguments or every required repetition. Handoff metadata records the
+one narrow request in `execution_meta.action_command_planning`.
+The adaptive handoff does not impose the ordinary child's implicit two-round
+cap: calls may need another round for final synthesis. Explicit task
+`action_loop_max_rounds`, task deadlines and request budgets still apply.
+
+`examples/agent_task/action_result_dependency.py` runs a real-model ticket
+lookup/acknowledgement task with a revision generated only at Action execution.
+Configure its `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; optional
+`MODEL_REQUEST_OPTIONS` supplies a JSON object of provider options.
 
 AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and
