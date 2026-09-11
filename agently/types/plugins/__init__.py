@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .base import AgentlyPlugin, AgentlyPluginType
+from .AudioModelRequester import AudioCapability, AudioModelRequester
 from .ContextSource import (
     ContextSource,
     ContextSourceChangeFeed,

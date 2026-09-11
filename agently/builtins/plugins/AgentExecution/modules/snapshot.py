@@ -140,6 +140,8 @@ def _fingerprint(owner: AgentExecution) -> str:
 
 
 def save(owner: AgentExecution) -> dict[str, object]:
+    if owner._bound_agent_capabilities:
+        raise NotImplementedError("Snapshots with extra Agent capability bindings require a custom rebinding contract.")
     if owner.status != "paused" or owner._pause_flow is None:
         raise RuntimeError("Execution save requires a settled safe pause.")
     if owner._run_completion is not None and not owner._run_completion.done():
@@ -193,6 +195,8 @@ def save(owner: AgentExecution) -> dict[str, object]:
 
 
 def load(owner: AgentExecution, snapshot: Mapping[str, object]) -> None:
+    if owner._bound_agent_capabilities:
+        raise NotImplementedError("Snapshots with extra Agent capability bindings require a custom rebinding contract.")
     if owner._started or owner._run_completion is not None or owner._closed:
         raise RuntimeError("Load requires a fresh, explicitly configured execution.")
     state = cast(dict[str, Any], json.loads(_json(dict(snapshot))))

@@ -159,6 +159,7 @@ class AgentExecution:
     supported_strategies: frozenset[str] | None = None
     DEFAULT_SETTINGS: dict[str, Any] = {}
     OPTIONS_SCHEMAS = {"execution": ExecutionOptions}
+    required_agent_capabilities: tuple[str, ...] = ()
 
     @staticmethod
     def _on_register() -> None:
@@ -179,6 +180,9 @@ class AgentExecution:
         request: Any = None,
     ):
         self.agent = getattr(agent, "_agent", agent)
+        self._bound_agent_capabilities: dict[str, object] = self.agent._bind_required_capabilities(
+            self.required_agent_capabilities,
+        )
         self.plugin_manager = self.agent.plugin_manager
         self.settings = self.agent.settings
         self.request = self._resolve_request(agent, request)
@@ -2023,6 +2027,12 @@ class AgentExecution:
             parent_run_context=parent_run_context,
         )
 
+    def require_agent_capability(self, name: str) -> object:
+        """Bind a dynamic dependency once, before the producer uses it."""
+        if name not in self._bound_agent_capabilities:
+            self._bound_agent_capabilities[name] = self.agent.require_capability(name)
+        return self._bound_agent_capabilities[name]
+
     async def async_run(
         self,
         *,
@@ -2089,7 +2099,7 @@ class AgentExecution:
         """Describe implemented boundaries without starting the producer."""
         return {
             "pause_boundaries": ["before_production", "candidate_ready"],
-            "snapshot_boundaries": ["before_production", "candidate_ready"],
+            "snapshot_boundaries": [] if self._bound_agent_capabilities else ["before_production", "candidate_ready"],
             "resume": "explicit_pending_pause",
             "rework": ("same_execution_revision" if (
                 self.__class__._async_produce is AgentExecution._async_produce

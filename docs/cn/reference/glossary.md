@@ -198,3 +198,9 @@ terminal artifact 先从暂存 bytes 验证，只在通过后原子提升，并�
 ## wait_for_result=
 
 `flow.start()`、`flow.async_start()`、`start_execution()`、`execution.start()` 等接口上 deprecated 的参数。值现在被**忽略**并发 warning；返回值形态由 `auto_close` 与「隐式语法糖 vs 显式 execution」决定。
+
+## 音频能力（4.1.4.8 开发版）
+
+`AudioModelRequest` 是独立的 TTS/STT 请求能力；`AudioModelRequester` 是可替换传输驱动。
+`AudioCapability` 是 Agent 可挂载的完整能力协议。它们不是文本 Prompt 或 Execution 模式。
+流式与依赖边界见[音频请求](../models/audio.md)。

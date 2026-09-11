@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 
 def _load_default_plugins(plugin_manager: "PluginManager"):
+    from agently.builtins.plugins.AudioModelRequester import OpenAICompatible as AudioHTTP, OMLX
+
+    plugin_manager.register("AudioModelRequester", AudioHTTP, activate=False)
+    plugin_manager.register("AudioModelRequester", OMLX, activate=False)
     from agently.builtins.plugins.ActionFlow import DAGActionFlow, TriggerFlowActionFlow
     from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
     from agently.builtins.plugins.ActionExecutor import (

@@ -14,6 +14,13 @@
 
 from .base import print_, async_print, AgentlyMain, Agent
 from ._version import __version__
+from .core.model.AudioModelRequest import AudioModelRequest
+from .types.data.audio import (
+    AudioCapabilityError, AudioConnection, AudioFormat, AudioInput, AudioOperation, AudioProtocolError,
+    PCMFormat, SpeechOptions, SpeechRequest, SpeechResult, TranscriptEvent, TranscriptResult,
+    TranscriptionOptions, TranscriptionRequest,
+)
+from .types.plugins.AudioModelRequester import AudioCapability, AudioModelRequester
 from .core import (
     AgentTask,
     TaskContext,
@@ -91,4 +98,21 @@ __all__ = [
     "ObservationEventHook",
     "print_",
     "async_print",
+    "AudioModelRequest",
+    "AudioModelRequester",
+    "AudioCapability",
+    "AudioCapabilityError",
+    "AudioConnection",
+    "AudioFormat",
+    "AudioInput",
+    "AudioOperation",
+    "AudioProtocolError",
+    "PCMFormat",
+    "SpeechOptions",
+    "SpeechRequest",
+    "SpeechResult",
+    "TranscriptEvent",
+    "TranscriptResult",
+    "TranscriptionOptions",
+    "TranscriptionRequest",
 ]

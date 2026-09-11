@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 AgentlyPluginType = Literal[
     "PromptGenerator",
     "ModelRequester",
+    "AudioModelRequester",
     "ResponseParser",
     "ToolManager",
     "Session",

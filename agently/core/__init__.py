@@ -15,6 +15,7 @@
 from agently.types.data import TaskBoardCard, TaskBoardGraph, TaskBoardPatch, TaskBoardRevision, TaskDAG, TaskDAGNode
 
 from .Agent import BaseAgent
+from .model.AudioModelRequest import AudioModelRequest
 from .application import (
     AgentExecutionContext,
     AgentExecutionLimitExceeded,
@@ -111,6 +112,7 @@ from .TaskWorkspace import (
 )
 
 __all__ = [
+    "AudioModelRequest",
     "Action",
     "ActionDispatcher",
     "ActionRegistry",

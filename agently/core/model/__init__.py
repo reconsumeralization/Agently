@@ -20,6 +20,7 @@ from .ModelRequest import ModelRequest, _UNSET, _resolve_quick_prompt_input
 from .AttachmentInput import ImageDetail, build_image_attachment, image_file_to_data_url
 
 __all__ = [
+    "AudioModelRequest",
     "Prompt",
     "AttemptRunner",
     "core_attempt_runner_entrypoint",
@@ -33,3 +34,4 @@ __all__ = [
     "_UNSET",
     "_resolve_quick_prompt_input",
 ]
+from .AudioModelRequest import AudioModelRequest

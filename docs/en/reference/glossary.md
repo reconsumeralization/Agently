@@ -223,3 +223,10 @@ A reserved state key written by the deprecated `set_result()` and `.end()` paths
 ## wait_for_result=
 
 Deprecated parameter on `flow.start()`, `flow.async_start()`, `start_execution()`, `execution.start()`, and friends. The value is now **ignored** with a warning; return shape is controlled by `auto_close` (and the choice between hidden sugar and explicit execution).
+
+## Audio capability (4.1.4.8 development)
+
+`AudioModelRequest` owns independent TTS/STT calls; `AudioModelRequester` is its
+replaceable transport plugin. `AudioCapability` is the complete replaceable Agent
+binding contract. These are not text Prompt or AgentExecution modes. See
+[Audio requests](../models/audio.md) for streaming and dependency boundaries.

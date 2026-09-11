@@ -71,6 +71,10 @@ if TYPE_CHECKING:
 class AgentExecution(Protocol):
     """Response-style contract for one bounded Agent execution object."""
 
+    required_agent_capabilities: tuple[str, ...]
+
+    def require_agent_capability(self, name: str) -> object: ...
+
     id: str
     revision: int
     agent: BaseAgent

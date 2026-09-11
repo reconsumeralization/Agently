@@ -170,6 +170,7 @@ class BaseAgent:
         self.name = name if name is not None else self.id[:7]
 
         self.plugin_manager = plugin_manager
+        self.__agent_capabilities: dict[str, object] = {}
         self.settings = Settings(
             name=f"Agent-{ self.name }-Settings",
             parent=parent_settings,
@@ -1085,6 +1086,7 @@ class BaseAgent:
             plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentExecution", selected))
         except (KeyError, TypeError) as error:
             raise ValueError(f"AgentExecution {selected!r} is not registered.") from error
+        self._bind_required_capabilities(getattr(plugin_class, "required_agent_capabilities", ()))
         return plugin_class(
             self,
             lineage=lineage,
@@ -1092,6 +1094,32 @@ class BaseAgent:
             options=options,
             parent_run_context=parent_run_context,
         )
+
+    def use_capability(self, name: str, capability: object | None) -> "BaseAgent":
+        """Bind an extra capability for future executions; None removes the binding.
+
+        This is dependency injection, not an Action permission or a health check.
+        Existing executions retain objects they have already bound.
+        """
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise ValueError("Capability name must be a non-empty, unpadded string.")
+        if capability is None:
+            self.__agent_capabilities.pop(name, None)
+        else:
+            self.__agent_capabilities[name] = capability
+        return self
+
+    def require_capability(self, name: str) -> object:
+        """Return a bound extra capability or fail before dependent work."""
+        try:
+            return self.__agent_capabilities[name]
+        except KeyError as error:
+            raise RuntimeError(f"Agent capability {name!r} is not bound.") from error
+
+    def _bind_required_capabilities(self, names: tuple[str, ...]) -> dict[str, object]:
+        if not isinstance(names, tuple) or any(not isinstance(name, str) or not name.strip() for name in names):
+            raise TypeError("required_agent_capabilities must be a tuple of non-empty capability names.")
+        return {name: self.require_capability(name) for name in names}
 
     def create_task(
         self,

@@ -22,3 +22,4 @@ from .ConfigurePromptExtension import ConfigurePromptExtension
 from .SessionExtension import SessionExtension
 from .ChatSessionExtension import ChatSessionExtension
 from .SkillsExtension import SkillsExtension
+from .AudioExtension import AudioExtension
