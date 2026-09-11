@@ -139,6 +139,26 @@ provenance policy，不是脚本执行授权；只有成功 Action 记录加 Tas
 才能证明副作用和实际回收的 bytes。发布后的 artifact path 是
 `.agently/files/.../code_execution/.../output/` 下的 TaskWorkspace-relative 私有路径。
 
+### 同一任务的后续阶段与新用户请求
+
+候选范围不等于已经绑定的 Skill。默认实现仅在准备 TaskContext 时进行初次适用性
+选择；后续 `async_read_task_context(...)` 按 intent、consumer 和 phase 在已绑定来源
+内选读资源，不会自动激活初次未选中的 Skill，也不会重扫全局 SkillLibrary。
+
+如果已知某些 Skill 是整个任务（包括后续阶段）的必需指导，在启动前明确声明：
+
+```python
+execution = (
+    agent.create_execution()
+    .input(task)
+    .require_skills([planning_skill_ref, delivery_skill_ref])
+)
+await execution.async_prepare_task_context()
+```
+
+这些 Skill 的根指导必需交付，可选资源仍按需读取。只声明确实必需的 Skill；这不保证
+模型已消费指导，也不自动授权脚本。同一运行中按需激活尚未绑定 Skill 不是当前默认能力。
+
 ### 后续用户消息重新需要 Skill
 
 每个用户请求使用一个新的 AgentExecution。Session 只延续对话和 memory，不延续上一轮

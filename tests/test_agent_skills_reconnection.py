@@ -9,6 +9,7 @@ import pytest
 from agently import Agently
 from agently.builtins.agent_extensions.SkillsExtension import SkillsExtension
 from agently.core import SkillLibrary
+from agently.types.data import ContextReadIntent
 
 
 def _write_skill(root: Path, *, name: str, description: str) -> Path:
@@ -140,6 +141,131 @@ async def test_skill_selection_uses_execution_scope_and_unchanged_preparation_is
     assert [binding.revision_ref for binding in execution.skill_bindings] == [
         first.revision_ref
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_keys", [[], ["skill-option:1"]])
+async def test_later_context_phases_do_not_reselect_unbound_skill_candidates(
+    tmp_path: Path,
+    selected_keys: list[str],
+) -> None:
+    """Protocol characterization, not evidence of model relevance or quality."""
+    library = SkillLibrary(tmp_path / "library")
+    packages = [
+        library.install(
+            _write_skill(tmp_path / name, name=name, description=f"{name} procedure."),
+            trust="trusted",
+        )
+        for name in ("Planning", "Delivery")
+    ]
+    agent = Agently.create_agent("skill-later-phase-boundary")
+    agent.use_task_workspace(tmp_path / "work")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
+    agent.skill_library = library
+    request = _ExecutionAwareSelectionRequest(selected_keys)
+    cast(Any, agent).create_temp_request = lambda: request
+    execution = (
+        agent.create_execution()
+        .input("Plan and deliver a report")
+        .use_skills([package.revision_ref for package in packages])
+    )
+    context = await execution.async_prepare_task_context()
+    original_bindings = tuple(execution.skill_bindings)
+    original_revision = context.snapshot().revision
+
+    for phase in ("delivery_draft", "delivery_review"):
+        package = await execution.async_read_task_context(
+            consumer_id=f"worker:{phase}",
+            phase=phase,
+            intent=ContextReadIntent(
+                query="Read the Delivery procedure for this later task phase",
+                metadata={"exclude_already_in_prompt": True},
+            ),
+        )
+        assert [block.content for block in package.blocks] == (
+            ["Apply the Planning procedure."] if selected_keys else []
+        )
+        assert package.phase == phase
+        assert package.task_context_id == context.context_id
+
+    assert await execution.async_prepare_task_context() is context
+    assert tuple(execution.skill_bindings) == original_bindings
+    assert context.snapshot().revision == original_revision
+    assert execution.diagnostics["skill_scope"]["model_decision_revision_refs"] == [
+        package.revision_ref for package in packages
+    ]
+    assert request.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_required_skills_remain_readable_in_later_task_phases(tmp_path: Path) -> None:
+    """Only availability/readback is asserted; no model consumption is claimed."""
+    library = SkillLibrary(tmp_path / "library")
+    packages = [
+        library.install(
+            _write_skill(tmp_path / name, name=name, description=f"{name} procedure."),
+            trust="trusted",
+        )
+        for name in ("Planning", "Delivery")
+    ]
+    agent = Agently.create_agent("skill-required-later-phase")
+    agent.use_task_workspace(tmp_path / "work")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
+    agent.skill_library = library
+
+    def unexpected_request() -> None:
+        raise AssertionError("Required root readback must not need model selection")
+
+    cast(Any, agent).create_temp_request = unexpected_request
+    execution = agent.create_execution().require_skills(
+        [package.revision_ref for package in packages]
+    )
+    await execution.async_prepare_task_context()
+    for phase in ("planning", "delivery"):
+        package = await execution.async_read_task_context(
+            consumer_id=f"worker:{phase}", phase=phase,
+        )
+        assert {block.content for block in package.blocks} == {
+            "Apply the Planning procedure.", "Apply the Delivery procedure.",
+        }
+    assert [binding.revision_ref for binding in execution.skill_bindings] == [
+        package.revision_ref for package in packages
+    ]
+    assert execution.logs.get("context_consumptions", []) == []
+
+
+@pytest.mark.asyncio
+async def test_fresh_user_execution_reselects_agent_default_skills(tmp_path: Path) -> None:
+    """A synthetic selector verifies execution isolation, not selection quality."""
+    library = SkillLibrary(tmp_path / "library")
+    packages = [
+        library.install(
+            _write_skill(tmp_path / name, name=name, description=f"{name} procedure."),
+            trust="trusted",
+        )
+        for name in ("Planning", "Delivery")
+    ]
+    agent = Agently.create_agent("skill-new-user-execution")
+    agent.use_task_workspace(tmp_path / "work")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
+    agent.skill_library = library
+    agent.use_skills([package.revision_ref for package in packages], always=True)
+    request = _ExecutionAwareSelectionRequest(["skill-option:1"])
+    cast(Any, agent).create_temp_request = lambda: request
+    first = agent.create_execution().input("Plan the report")
+    await first.async_prepare_task_context()
+
+    request.selected_keys = ["skill-option:2"]
+    later = agent.create_execution().input("Deliver the report")
+    await later.async_prepare_task_context()
+
+    assert first.id != later.id
+    assert [binding.revision_ref for binding in first.skill_bindings] == [packages[0].revision_ref]
+    assert [binding.revision_ref for binding in later.skill_bindings] == [packages[1].revision_ref]
+    assert request.call_count == 2
+    assert "Deliver the report" in request.slots["input"]["task"]
+    assert "Plan the report" not in request.slots["input"]["task"]
+    assert request.observed_execution_context is later.execution_context
 
 
 @pytest.mark.asyncio

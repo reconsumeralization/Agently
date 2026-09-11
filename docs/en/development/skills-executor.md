@@ -155,6 +155,31 @@ plus TaskWorkspace readback proves the side effect and collected bytes.
 Published artifact paths are TaskWorkspace-relative private paths under
 `.agently/files/.../code_execution/.../output/`.
 
+### Later phases of one task versus new user requests
+
+The candidate scope is not the set of bound Skills. The default implementation
+performs initial applicability selection when preparing TaskContext. Later
+`async_read_task_context(...)` calls select resources within already bound
+sources for their intent, consumer and phase. They do not automatically activate
+initially unselected Skills or rescan the global SkillLibrary.
+
+Declare Skills known to be required for the whole task, including later phases,
+before starting:
+
+```python
+execution = (
+    agent.create_execution()
+    .input(task)
+    .require_skills([planning_skill_ref, delivery_skill_ref])
+)
+await execution.async_prepare_task_context()
+```
+
+Their root guidance is required content; optional resources remain progressively
+read. Require only genuinely necessary Skills. Availability does not prove model
+consumption or authorize scripts. On-demand activation of an unbound Skill
+within the same run is not a current default capability.
+
 ### A later user message needs the Skill
 
 Use a fresh AgentExecution for every user request. Session carries conversation
