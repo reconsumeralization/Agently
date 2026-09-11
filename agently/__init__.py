@@ -18,9 +18,10 @@ from .core.model.AudioModelRequest import AudioModelRequest
 from .types.data.audio import (
     AudioCapabilityError, AudioConnection, AudioFormat, AudioInput, AudioOperation, AudioProtocolError,
     PCMFormat, SpeechOptions, SpeechRequest, SpeechResult, TranscriptEvent, TranscriptResult,
+    PCMStream, TextSource, TextSegmentOptions, TranscriptionStreamOptions, TranscriptBlock, TranscriptSegment,
     TranscriptionOptions, TranscriptionRequest,
 )
-from .types.plugins.AudioModelRequester import AudioCapability, AudioModelRequester
+from .types.plugins.AudioModelRequester import AudioCapability, AudioModelRequester, TextSegmenter
 from .core import (
     AgentTask,
     TaskContext,
@@ -108,6 +109,13 @@ __all__ = [
     "AudioOperation",
     "AudioProtocolError",
     "PCMFormat",
+    "PCMStream",
+    "TextSource",
+    "TextSegmentOptions",
+    "TextSegmenter",
+    "TranscriptionStreamOptions",
+    "TranscriptBlock",
+    "TranscriptSegment",
     "SpeechOptions",
     "SpeechRequest",
     "SpeechResult",

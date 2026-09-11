@@ -10,9 +10,20 @@ from typing import Protocol
 from agently.types.data.audio import (
     AudioConnection, AudioInput, AudioOperation, PCMFormat, SpeechOptions,
     SpeechRequest, SpeechResult, TranscriptEvent, TranscriptResult,
-    TranscriptionOptions, TranscriptionRequest,
+    TranscriptionOptions, TranscriptionRequest, PCMStream, TextSource, TextSegmentOptions,
+    TranscriptBlock, TranscriptSegment, TranscriptionStreamOptions,
 )
 from .base import AgentlyPlugin
+
+
+class TextSegmenter(Protocol):
+    """Fresh per-stream boundary strategy: prefix length or None to wait.
+
+    The framework owns accumulation, exact prefix delivery and hard bounds.
+    At EOF the remaining text is delivered even when no boundary is selected.
+    """
+
+    def cut(self, text: str, *, final: bool) -> int | None: ...
 
 
 class AudioModelRequester(AgentlyPlugin, Protocol):
@@ -56,16 +67,24 @@ class AudioCapability(Protocol):
     ) -> TranscriptResult: ...
 
     def stream_tts(
-        self, text: str, *, model: str | None = None, voice: str | None = None,
-        options: SpeechOptions | None = None,
-    ) -> AbstractAsyncContextManager[AsyncIterator[bytes]]: ...
+        self, text: TextSource, *, model: str | None = None, voice: str | None = None,
+        options: SpeechOptions | None = None, segments: TextSegmentOptions | None = None,
+        segmenter: TextSegmenter | None = None, audio_format: PCMFormat | None = None, chunk_bytes: int = 8192,
+    ) -> AbstractAsyncContextManager[PCMStream]: ...
+
+    def stream_tts_with_auto_break(
+        self, text: TextSource, *, model: str | None = None, voice: str | None = None,
+        options: SpeechOptions | None = None, segments: TextSegmentOptions | None = None,
+        segmenter: TextSegmenter | None = None,
+    ) -> AbstractAsyncContextManager[AsyncIterator[SpeechResult]]: ...
 
     def stream_stt(
-        self, audio: AudioInput | str | PathLike[str], *, model: str | None = None,
-        options: TranscriptionOptions | None = None,
-    ) -> AbstractAsyncContextManager[AsyncIterator[TranscriptEvent]]: ...
+        self, audio: AsyncIterable[bytes], *, audio_format: PCMFormat, model: str | None = None,
+        options: TranscriptionOptions | None = None, stream_options: TranscriptionStreamOptions | None = None,
+    ) -> AbstractAsyncContextManager[AsyncIterator[TranscriptBlock]]: ...
 
-    def stream_stt_input(
-        self, chunks: AsyncIterable[bytes], *, model: str | None = None,
-        audio_format: PCMFormat | None = None, options: TranscriptionOptions | None = None,
-    ) -> AbstractAsyncContextManager[AsyncIterator[TranscriptEvent]]: ...
+    def stream_stt_with_auto_break(
+        self, audio: AsyncIterable[bytes], *, audio_format: PCMFormat, model: str | None = None,
+        options: TranscriptionOptions | None = None, stream_options: TranscriptionStreamOptions | None = None,
+        segmenter: TextSegmenter | None = None,
+    ) -> AbstractAsyncContextManager[AsyncIterator[TranscriptSegment]]: ...

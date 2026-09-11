@@ -10,6 +10,9 @@
     "text_prompt_pipeline": false,
     "builtin_drivers": ["OpenAICompatible", "OMLX"],
     "builtin_realtime_stt_input": false,
+    "composed_continuous_input": "text to speech; PCM to transcript via bounded base requests",
+    "output_modes": ["continuous_pcm", "independent_speech_segments", "transcript_blocks", "punctuation_segments"],
+    "native_stream_access": "AudioModelRequest.driver; no native realtime input adapter in builtins",
     "extra_agent_dependencies": "required_agent_capabilities; bound references; snapshots unsupported",
     "observation_protocol_changed": false
   },

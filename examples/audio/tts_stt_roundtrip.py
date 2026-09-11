@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import time
 
-from agently import Agently, AudioInput, SpeechOptions, TranscriptionOptions
+from agently import Agently, AudioInput, SpeechOptions, TranscriptionOptions, SpeechRequest, TranscriptionRequest
 
 
 async def main() -> None:
@@ -52,15 +52,17 @@ async def main() -> None:
     }
     if args.stream:
         parts: list[bytes] = []
-        async with agent.audio.stream_tts(
-            text, voice=os.getenv("AUDIO_VOICE"), options=SpeechOptions(language="Chinese"),
-        ) as chunks:
+        # Provider-native output streaming, deliberately distinct from the
+        # framework's text/PCM continuous-consumption APIs.
+        async with audio.driver.stream_tts(SpeechRequest(
+            text, os.environ["AUDIO_TTS_MODEL"], voice=os.getenv("AUDIO_VOICE"), options=SpeechOptions(language="Chinese"),
+        )) as chunks:
             async for chunk in chunks:
                 parts.append(chunk)
         streamed_audio = b"".join(parts)
         (args.output / "streamed-speech.wav").write_bytes(streamed_audio)
         events = []
-        async with agent.audio.stream_stt(AudioInput(streamed_audio)) as stream:
+        async with audio.driver.stream_stt(TranscriptionRequest(AudioInput(streamed_audio), os.environ["AUDIO_STT_MODEL"])) as stream:
             async for event in stream:
                 events.append({"kind": event.kind, "text": event.text})
         report.update({"tts_stream_chunks": len(parts), "tts_stream_bytes": len(streamed_audio), "stt_events": events})

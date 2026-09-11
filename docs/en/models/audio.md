@@ -38,35 +38,106 @@ cannot be replaced through extra. Default timeout is 120 seconds of HTTP
 operation inactivity, not a whole workflow deadline. There is no automatic retry
 or fallback model.
 
-## Streaming is two separate questions
+## Continuous consumption and output auto break
 
-| Driver | Complete TTS / STT | TTS output stream | Uploaded-file STT output stream | Continuous STT input |
-|---|---|---|---|---|
-| OpenAICompatible | Yes, when the provider/model implements these endpoints | Not declared | Not declared | Not declared |
-| OMLX | Yes | WAV bytes | transcript.text.delta/done SSE | Not yet adapted |
-| Custom | Declared by the driver | Declared by the driver | Declared by the driver | May implement stream_stt_input |
+The basic tts/stt calls are unchanged. All four methods are available on the
+standalone audio object and on an explicitly bound Agent. **Auto break selects
+the output presentation, not whether input is already segmented.**
+
+| Method | Input | Yielded output |
+|---|---|---|
+| stream_tts | str, nonblocking Iterable[str], or AsyncIterable[str] | Continuous headerless PCM bytes |
+| stream_tts_with_auto_break | Same text source and internal segmentation | Independent complete SpeechResult audio segments |
+| stream_stt | AsyncIterable[bytes] with explicit PCMFormat | Finalized TranscriptBlock per audio window |
+| stream_stt_with_auto_break | Same PCM source | TranscriptSegment split after recognition at text sentence punctuation |
 
 ```python
-async with agent.audio.stream_tts("Welcome.", options=SpeechOptions(response_format="wav")) as chunks:
-    async for chunk in chunks:
-        await audio_sink.write(chunk)  # Application-owned sink; a chunk is not a WAV file.
+from agently import PCMFormat, TextSegmentOptions, TranscriptionStreamOptions
 
-async with agent.audio.stream_stt("recording.wav") as events:
-    async for event in events:
-        if event.kind == "delta":
-            print(event.text, end="", flush=True)
-        else:
-            final_text = event.text  # Complete transcript, not another append.
+segments = TextSegmentOptions(expect_chars=300, tolerance_ratio=0.1, grace_chars=100)
+async with agent.stream_tts(text_chunks, segments=segments) as stream:
+    fmt = stream.audio_format  # Ready on entry for nonempty input; None for empty input
+    async for pcm in stream:
+        await pcm_sink.write(pcm)  # Application sink configured with fmt; not a WAV file
+
+async with agent.stream_tts_with_auto_break(fresh_text_chunks, segments=segments) as stream:
+    async for speech in stream:
+        await segment_sink.write(speech.data, speech.media_type)
+
+async with agent.stream_stt_with_auto_break(
+    pcm_chunks, audio_format=PCMFormat(sample_rate=16000),
+    stream_options=TranscriptionStreamOptions(window_seconds=5, max_pending_chars=1000),
+) as stream:
+    async for segment in stream:
+        print(segment.text, segment.reason, segment.first_block, segment.last_block)
 ```
 
-Use `async with` even when breaking early. It closes the transport on exit,
-failure or cancellation. Partial data is not a successful final result. STT
-requires a done event; an abrupt EOF raises `AudioProtocolError`. For raw speech
-bytes a clean HTTP end only proves transport completion, not linguistic quality.
-Streaming output is async-only; do not collect an entire stream and call that
-real-time input. `stream_stt_input(chunks, audio_format=PCMFormat(...))` is the
-separate custom-driver seam; built-ins currently fail explicitly before consuming
-input. oMLX service/model real-time support alone does not mean this adapter exists.
+Text segmentation prefers newlines/paragraphs, then sentence endings, then commas
+inside the expected-length tolerance interval; the rightmost boundary wins
+within a priority. With no candidate, read the grace interval, then use an earlier
+boundary if available; hard-cut only when none exists. EOF flushes a short tail;
+temporary lack of tokens is not EOF. Lengths are Unicode code points, not tokens.
+The 300-character default is tunable, not a model-optimal claim. Input packet
+boundaries do not change processing segments. Supply a fresh typed
+`TextSegmenter` to replace boundary selection; `max_input_chars=65536` bounds a
+single source item. Adapt blocking capture to an async source explicitly.
+
+Continuous TTS currently accepts uncompressed s16le PCM WAV, or raw PCM with an
+explicit `audio_format`. It parses actual WAV chunks, not a fixed 44-byte header.
+The first segment locks the format; mismatches fail without implicit resampling.
+An explicit `audio_format=PCMFormat(...)` requires that exact output format.
+`chunk_bytes=8192` is rounded down to complete frames. Auto break supports
+independent encoded results such as WAV/MP3 according to the base driver; it
+rejects raw PCM without self-describing metadata. PCM is not a WAV file, and
+concatenated WAV files are not one continuous audio file. Each base TTS finishes
+a segment before delivery: initial latency, cross-segment prosody and continuous
+playback throughput are not guaranteed.
+
+STT accumulates sample frames into configurable windows (default 5 seconds).
+EOF submits remaining complete frames and rejects incomplete frames without padding.
+`max_input_bytes=1048576` bounds source items and windows; `max_transcript_chars=65536`
+bounds each transcription. Blocks include text/index/model/language and
+sample-derived start/end seconds. Base `TranscriptResult.duration` remains a
+provider-origin field: oMLX currently reports processing time, not recording duration.
+
+STT auto break consumes finalized block text, not audio pauses, packet boundaries
+or provisional SSE deltas. Reasons are `sentence_end`, `limit`, and `input_end`.
+When no punctuation arrives, the pending-length limit/EOF delivers a labelled
+remainder without inventing punctuation or making another model request.
+Source block ranges are not word-aligned sentence timestamps. The default
+punctuation rules are not a universal semantic segmenter. An ASCII alphanumeric
+block join adds a display space; it does not reconstruct split words, and
+original blocks remain unchanged. Windowed recognition may lose/repeat words
+or insert punctuation: the framework does not semantically deduplicate transcripts.
+
+Use `async with`. Streams are pull-driven, one model request at a time, with no
+unbounded prefetch queue. Errors/cancellation/early close do not synthesize pending
+tails or retry already delivered speech. Already yielded prefixes are not full
+success. The stream owns its resources, not a shared microphone. A realtime
+capture adapter must report overflow or use an explicit application policy:
+backpressure cannot pause a person speaking. Bounded framing does not bound all
+allocations inside a third-party driver's complete response implementation.
+No implicit recording, playback, full duplex, durable resume or replay is promised.
+
+Do not automatically speak Agent thinking, tool events or text that validation
+or retries can replace. Await final text for final-result guarantees; callers
+must explicitly accept irreversible effects when choosing low-latency playback.
+
+## Provider-native streams
+
+`audio.supported_operations` describes composed operations;
+`audio.driver.supported_operations` describes provider-native support. Neither
+proves health. OpenAICompatible base tts/stt is sufficient for composed streams;
+native duplex support is not required. OMLX additionally supports WAV output
+streaming and uploaded-file transcript.text.delta/done SSE. Advanced native
+access is explicit through `audio.driver.stream_tts(SpeechRequest(...))` and
+`audio.driver.stream_stt(TranscriptionRequest(...))`.
+
+Native bytes are transport chunks, not independent audio files. Native STT
+done replaces accumulated deltas; EOF without done fails.
+`driver.stream_stt_input(...)` remains a custom-driver native-input seam;
+built-ins do not implement it. Windowed continuous consumption does not imply
+a native realtime-ASR session has been implemented.
 
 ## Replacement and Execution dependencies
 
@@ -96,4 +167,5 @@ Audio calls do not currently emit text-model token events or enter Execution tex
 model-request budgets. Use application-owned deadlines/admission for audio work;
 do not infer cost accounting, cancellation rollback or durable audio resume.
 
-See the real [round-trip example](../../../examples/audio/tts_stt_roundtrip.py).
+See [four continuous output modes](../../../examples/audio/continuous_audio.py) and
+the [base/native round-trip example](../../../examples/audio/tts_stt_roundtrip.py).

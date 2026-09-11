@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 
 AudioFormat = Literal["wav", "mp3", "opus", "aac", "flac", "pcm"]
-AudioOperation = Literal["tts", "stt", "stream_tts", "stream_stt", "stream_stt_input"]
+AudioOperation = Literal[
+    "tts", "stt", "stream_tts", "stream_stt", "stream_stt_input",
+    "stream_tts_with_auto_break", "stream_stt_with_auto_break",
+]
+TextSource = str | Iterable[str] | AsyncIterable[str]
 
 
 class AudioCapabilityError(RuntimeError):
@@ -93,3 +97,54 @@ class PCMFormat:
     sample_rate: int = 16000
     channels: int = 1
     encoding: Literal["s16le"] = "s16le"
+
+
+@dataclass(frozen=True)
+class TextSegmentOptions:
+    """Code-point lengths, not tokens. Input yield boundaries do not define segments."""
+
+    expect_chars: int = 300
+    tolerance_ratio: float = 0.1
+    grace_chars: int = 100
+    max_input_chars: int = 65536
+
+
+@dataclass(frozen=True)
+class TranscriptionStreamOptions:
+    window_seconds: float = 5.0
+    max_input_bytes: int = 1048576
+    max_transcript_chars: int = 65536
+    max_pending_chars: int = 1000
+
+
+@dataclass(frozen=True)
+class TranscriptBlock:
+    """One finalized window. Times come from input frames, not provider duration."""
+
+    text: str
+    index: int
+    start_seconds: float
+    end_seconds: float
+    model: str
+    language: str | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    """Punctuation-delimited text or an explicitly marked limit/EOF remainder."""
+
+    text: str
+    reason: Literal["sentence_end", "limit", "input_end"]
+    first_block: int
+    last_block: int
+
+
+class PCMStream(Protocol):
+    """Fixed-format headerless PCM. Empty input has no inferred format."""
+
+    @property
+    def audio_format(self) -> PCMFormat | None: ...
+
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def __anext__(self) -> bytes: ...

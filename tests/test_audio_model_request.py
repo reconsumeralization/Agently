@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from agently import (
     Agently, AudioCapabilityError, AudioConnection, AudioInput, AudioModelRequest, AudioOperation, AudioProtocolError,
-    SpeechOptions, TranscriptEvent, TranscriptionOptions,
+    SpeechOptions, SpeechRequest, TranscriptEvent, TranscriptionOptions, TranscriptionRequest, PCMFormat,
 )
 from agently.builtins.plugins.AudioModelRequester import OMLX, OpenAICompatible
 from agently.builtins.plugins.AgentExecution import AgentExecution
@@ -178,7 +178,7 @@ async def test_speech_stream_is_ordered_and_closed(monkeypatch, early):
     stream = RecordingStream([b"header", b"part1", b"part2"])
     audio, clients = audio_client(monkeypatch, lambda _: httpx.Response(200, stream=stream, headers={"content-type": "audio/wav"}))
     parts = []
-    async with audio.stream_tts("hello") as chunks:
+    async with audio.driver.stream_tts(SpeechRequest("hello", "speech-model")) as chunks:
         async for part in chunks:
             parts.append(part)
             if early:
@@ -203,7 +203,7 @@ async def test_transcription_stream_requires_done(monkeypatch, tail, raises):
     seen = []
 
     async def consume():
-        async with audio.stream_stt(AudioInput(b"audio")) as events:
+        async with audio.driver.stream_stt(TranscriptionRequest(AudioInput(b"audio"), "transcribe-model")) as events:
             async for event in events:
                 seen.append(event)
 
@@ -231,7 +231,7 @@ async def test_cancel_closes_transport(monkeypatch):
     audio, clients = audio_client(monkeypatch, lambda _: httpx.Response(200, stream=stream, headers={"content-type": "audio/wav"}))
 
     async def consume():
-        async with audio.stream_tts("hello") as chunks:
+        async with audio.driver.stream_tts(SpeechRequest("hello", "speech-model")) as chunks:
             async for _ in chunks:
                 pass
 
@@ -252,15 +252,15 @@ async def test_realtime_is_not_emulated_by_buffering(monkeypatch):
         yield b"pcm"
 
     with pytest.raises(AudioCapabilityError):
-        audio.stream_stt_input(frames())
+        async with audio.driver.stream_stt_input(frames(), model="stt", audio_format=PCMFormat(), options=TranscriptionOptions()):
+            pass
     assert not clients
 
 
 def test_default_driver_does_not_claim_all_compatible_streaming():
     audio = Agently.create_audio_request(base_url="http://audio.test/v1")
-    assert audio.supported_operations == frozenset({"tts", "stt"})
-    with pytest.raises(AudioCapabilityError):
-        audio.stream_tts("hello", model="speech")
+    assert audio.driver.supported_operations == frozenset({"tts", "stt"})
+    assert audio.supported_operations == frozenset({"tts", "stt", "stream_tts", "stream_stt", "stream_tts_with_auto_break", "stream_stt_with_auto_break"})
     assert "private-key" not in repr(AudioConnection("http://audio.test/v1", "private-key"))
 
 
@@ -365,6 +365,6 @@ async def test_input_stream_can_be_owned_by_replacement_driver():
         yield b"frame2"
 
     audio = AudioModelRequest(InputDriver(AudioConnection("http://audio.test/v1")), stt_model="realtime")
-    async with audio.stream_stt_input(frames()) as events:
+    async with audio.driver.stream_stt_input(frames(), model="realtime", audio_format=PCMFormat(), options=TranscriptionOptions()) as events:
         assert [event.kind async for event in events] == ["delta", "delta", "done"]
     assert received == [b"frame1", b"frame2"] and closed == [True]
