@@ -59,14 +59,21 @@ collaboration, not fields to add to the application's model prompt.
 | 2026-09-07 14:40 | D03 | 6 | Propose payload-based deduplication. | 💬 Awaiting confirmation |
 
 Highlight only this round's differences in the current-item table; retain older
-wording in the change history. Show the round's log delta with access to the
-full record. When nothing changed, say so. Reopen completed items explicitly
+wording in the change history. While the same work item continues, every
+status/history presentation includes its complete item list and complete change
+history, including unchanged, completed, pending, removed and abandoned items.
+Highlight this round within that full view; delta-only tables or links to prior
+records do not replace it. Continuing, resuming or focusing on a subtopic does
+not reset the work item. Start a separate list only for genuinely different
+work and state that scope change. Recover missing history or label the gap;
+never invent it. When nothing changed, retain the full view and say so.
+Reopen completed items explicitly
 when new evidence invalidates them.
 
 Reuse an existing plan, review note or experiment record. Short work can keep
 the tables in the conversation; longer work may use an existing project file
-for handoff and recovery. Group large lists by phase, keeping unresolved and
-changed work visible. Do not require another tracker, rigid data schema or
+for handoff and recovery. Group large lists by phase and keep rows concise
+without omitting items or history entries. Do not require another tracker, rigid data schema or
 approval gate. Routine tool updates do not each create a discussion version.
 
 ## 1. Confirm the Request Inventory
