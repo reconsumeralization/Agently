@@ -1,20 +1,15 @@
-"""Pinned per-execution Skill scope and inert script-candidate usage.
+"""Pinned per-execution Skill scope.
 
 Run:
-    python examples/release_pinned_usage/07_skill_execution_scope_and_script_candidates.py
+    python examples/release_pinned_usage/07_skill_execution_scope.py
 
 Expected key output:
     original_scope_frozen=True
     fresh_execution_sees_new_default=True
     empty_declarations_do_not_scan_library=True
-    script_candidate_status=binding_required
-    script_candidate_has_sha256=True
-    script_candidate_exposes_callable=False
-    script_candidate_exposes_installed_path=False
 
-This deterministic example proves composition and authorization boundaries. It
-does not execute the Skill script or claim that installing a Skill grants an
-Action capability.
+This deterministic example checks Skill composition boundaries, not model
+selection or script execution. Installing a Skill does not grant an Action.
 """
 
 from __future__ import annotations
@@ -76,15 +71,6 @@ async def main() -> None:
         ).input("Answer without declared Skills.")
         await empty_execution.async_prepare_task_context()
 
-        context_pack = await Agently.skills_executor.async_build_context_pack(
-            task="Inspect the packaged verification script without executing it.",
-            skills=[script.revision_ref],
-            include_references=False,
-            actionize_scripts=True,
-        )
-        candidates = context_pack["skills"][0]["action_candidates"]
-        candidate = candidates[0]
-
         print(
             "original_scope_frozen="
             f"{original_refs == [checklist.revision_ref] == original_refs_after_agent_change}"
@@ -96,13 +82,6 @@ async def main() -> None:
         print(
             "empty_declarations_do_not_scan_library="
             f"{empty_execution.skill_bindings == []}"
-        )
-        print(f"script_candidate_status={candidate['status']}")
-        print(f"script_candidate_has_sha256={bool(candidate['sha256'])}")
-        print(f"script_candidate_exposes_callable={'callable' in candidate}")
-        print(
-            "script_candidate_exposes_installed_path="
-            f"{'installed_path' in candidate}"
         )
 
 

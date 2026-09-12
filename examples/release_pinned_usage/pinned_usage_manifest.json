@@ -97,18 +97,16 @@
       "release_gate_reason": "4.1.4.8 restores accepted retry attempt visibility for reopened ModelRequest and AgentExecution instant streams."
     },
     {
-      "path": "examples/release_pinned_usage/07_skill_execution_scope_and_script_candidates.py",
+      "path": "examples/release_pinned_usage/07_skill_execution_scope.py",
       "protected_usage": [
         "agent.require_skills(..., always=True) supplies Agent defaults",
         "AgentExecution freezes only its declared exact-revision Skill scope",
         "a fresh AgentExecution sees later Agent-default Skill declarations",
-        "empty execution declarations do not scan the global SkillLibrary",
-        "actionize_scripts=True returns inert binding_required candidates",
-        "script candidates expose digest identity without callable or installed path"
+        "empty execution declarations do not scan the global SkillLibrary"
       ],
-      "model_dependency": "none; local SkillLibrary and compatibility context-pack probe",
+      "model_dependency": "none; local SkillLibrary and execution-scope probe",
       "requires_human_confirmation_for_edits": true,
-      "release_gate_reason": "4.1.4.8 makes Skill composition execution-scoped and exposes scripts only as inert candidates pending explicit host authorization."
+      "release_gate_reason": "4.1.4.8 makes Skill composition execution-scoped without exposing undeclared library entries."
     }
   ],
   "model_backed_release_examples": [
@@ -176,10 +174,10 @@
       ]
     },
     {
-      "work": "per-execution Skill scope and inert script candidates",
+      "work": "per-execution Skill scope",
       "examples": [
         "examples/release_pinned_usage/03_skill_library_agent_binding.py",
-        "examples/release_pinned_usage/07_skill_execution_scope_and_script_candidates.py"
+        "examples/release_pinned_usage/07_skill_execution_scope.py"
       ]
     },
     {

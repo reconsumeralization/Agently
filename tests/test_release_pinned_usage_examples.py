@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -157,13 +159,13 @@ def test_release_pinned_retry_stream_reconciliation_is_locked() -> None:
     assert "agent_execution_attempt_indexes" in source
 
 
-def test_release_pinned_skill_scope_and_script_candidates_are_locked() -> None:
+def test_release_pinned_skill_scope_is_locked() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     skill_scope_gate = next(
         script
         for script in manifest["selected_scripts"]
         if script["path"].endswith(
-            "07_skill_execution_scope_and_script_candidates.py"
+            "07_skill_execution_scope.py"
         )
     )
     source = (ROOT / skill_scope_gate["path"]).read_text(encoding="utf-8")
@@ -174,5 +176,22 @@ def test_release_pinned_skill_scope_and_script_candidates_are_locked() -> None:
     assert "original_scope_frozen" in source
     assert "fresh_execution_sees_new_default" in source
     assert "empty_declarations_do_not_scan_library" in source
-    assert "script_candidate_status" in source
-    assert "binding_required" in source
+    assert "action_candidates" not in source
+
+
+def test_release_pinned_skill_scope_runs() -> None:
+    """Exercise the public example; source-string checks cannot prove behavior."""
+    result = subprocess.run(
+        [sys.executable, str(PINNED_ROOT / "07_skill_execution_scope.py")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines() == [
+        "original_scope_frozen=True",
+        "fresh_execution_sees_new_default=True",
+        "empty_declarations_do_not_scan_library=True",
+    ]

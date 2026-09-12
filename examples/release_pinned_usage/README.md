@@ -25,7 +25,10 @@ profiles while EventCenter keeps the complete event stream. It also locks
 `input().info().use_action()` to one execution and verifies that a terminal
 Action-or-Response round becomes the existing AgentExecution result without a
 redundant third model request. The 4.1.4.8 additions pin accepted retry streams,
-per-execution Skill scope, and inert `binding_required` script candidates. It
+and per-execution Skill scope. The withdrawn development-only script-candidate
+projection is not a release gate. Script resources and explicit execution
+authorization remain covered by `tests/test_skills_compatibility_facade.py` and
+`examples/skills_executor/09_skill_script_exec.py`. This set
 does not preserve the removed SkillsExecutor planning or prompt-injection
 engine. Model-owned business behavior is checked by the model-backed examples
 named in the manifest, including local Ollama/Qwen coverage for AgentExecution
