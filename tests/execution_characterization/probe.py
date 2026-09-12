@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import io
 import json
+import mimetypes
 import socket
 import sys
 import tempfile
@@ -31,6 +32,11 @@ def arguments() -> argparse.Namespace:
 ARGS = arguments()
 SOURCE = ARGS.source_root.resolve()
 sys.path.insert(0, str(SOURCE))
+
+# Pin the environmental MIME dependency, not the observed artifact field.
+# OS databases can add .md on Linux while the same Python on macOS lacks it.
+# Use the interpreter's built-in table for both immutable-old and current runs.
+mimetypes.guess_type = mimetypes.MimeTypes().guess_type
 
 import agently  # noqa: E402
 from agently import Agently  # noqa: E402
