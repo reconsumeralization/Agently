@@ -12,7 +12,7 @@ keywords: Agently, 项目结构, 拓扑, TriggerFlow, Dynamic Task, FastAPI, Fas
 边界所需的最小文件结构。
 
 完整可运行示例见 Agently-Skills 的
-[`skills/agently/assets/project-template`](https://github.com/AgentEra/Agently-Skills/tree/main/skills/agently/assets/project-template)
+[`skills/agently/assets/full-stack-reference`](https://github.com/AgentEra/Agently-Skills/tree/main/skills/agently/assets/full-stack-reference)
 资产。它为演示目的同时包含多种可选边界；小型应用应按需取用，不要把它当成必须
 整套复制的脚手架。
 

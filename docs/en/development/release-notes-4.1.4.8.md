@@ -43,7 +43,7 @@ request-local unless the caller explicitly opts into Agent defaults.
 
 The release requires Python 3.10 or newer and `agently-stage >=0.3.8,<0.4.0`.
 It recommends `agently-devtools >=0.1.11,<0.2.0` and Agently-Skills generation
-V2 aligned to framework 4.1.4.8.
+V3 aligned to framework 4.1.4.8.
 
 ## Recommended Usage
 
@@ -111,7 +111,7 @@ recognition, without requiring separate stubs or suppressed missing-type warning
 | Model selection | Explicit unknown model aliases fail before provider dispatch; `resolve_model_profile` exposes a non-secret preflight view. | Validate configured model keys before starting application work. | Fail-closed for misspelled aliases when `model_pool` is configured. | Model configuration tests and `examples/model_configures/typed_settings_and_model_profiles.py`. |
 | Action Runtime | `programmatic` planning can execute one bounded read-only Action micro-DAG; Actions declare `parallel` or `exclusive` concurrency. | Keep `structured_plan` as the default; opt into `programmatic` only with eligible Actions and an isolated code provider. | Explicit opt-in, policy-gated, no universal cost/latency promise. | Action runtime suites and `examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py`. |
 | Action delivery and debug | Terminal Action responses reuse the existing execution result; concurrent console streams display in first-delta FIFO order without serializing execution. | Use `debug=True` for readable output and EventCenter/DevTools for complete facts. | Display-only change; event and execution ordering remain authoritative. | Pinned examples 04 and 05 plus console/action tests. |
-| Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; scripts remain inert descriptors in `selected_resources`, not Actions or authorization grants. | Use `always=True` for Agent defaults and execution methods for one-run additions; mount execution capabilities explicitly. | Fail-closed scope; no implicit script actionization. The development-only nonempty script-candidate example is withdrawn; the compatibility facade retains the released `action_candidates: []` field. | Pinned examples 03 and 07, Skills tests, Agently-Skills V2 guidance. |
+| Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; scripts remain inert descriptors in `selected_resources`, not Actions or authorization grants. | Use `always=True` for Agent defaults and execution methods for one-run additions; mount execution capabilities explicitly. | Fail-closed scope; no implicit script actionization. The development-only nonempty script-candidate example is withdrawn; the compatibility facade retains the released `action_candidates: []` field. | Pinned examples 03 and 07, Skills tests, Agently-Skills V3 guidance. |
 | Agent delivery policies | `interact`, `review(rules=..., on_fail=...)`, and verified TaskWorkspace `artifact` delivery are stable public methods. | Attach handlers to the execution that owns the result and artifact. | Additive; blocking review can prevent terminal success. | Examples 25 and 26 and AgentExecution handler/artifact tests. |
 | Execution plugins | `create_execution(name)` returns the registered execution instance; built-ins are `auto`, `request`, `long_task`, `plan`, and `long_content`. | Choose the producer explicitly when needed; `.goal(..., turn_on_long_task=False)` declares semantic goals only. | Replaces unreleased Pattern; released Orchestrator/AgentTask entrypoints remain compatibility adapters. | Examples 26–28 and plugin identity, goal-preparation, final-policy and typing tests. |
 | MCP | Playwright MCP examples cover local lifecycle and model-driven browser use. | Use ExecutionResource-owned MCP sessions and close them deterministically. | External runtime/browser dependency. | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` and `2_4_mcp_playwright_agent_qwen.py`. |
@@ -221,7 +221,7 @@ This checkpoint does not establish release readiness.
 - Required runtime: `agently-stage >=0.3.8,<0.4.0` (published 0.3.8 verified).
 - Optional observation companion: `agently-devtools >=0.1.11,<0.2.0` using
   `agently-devtools.observation-runtime.v1`.
-- Agently-Skills: V2 catalog, aligned framework version `4.1.4.8`.
+- Agently-Skills: V3 catalog, aligned framework version `4.1.4.8`.
 
 Local Ollama/Qwen runs are supplementary release evidence under the repository
 policy. Before final release recommendation, the release PR must also record the

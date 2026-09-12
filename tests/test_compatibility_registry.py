@@ -41,6 +41,20 @@ def test_current_candidate_includes_accepted_development_contracts() -> None:
             assert current[key] == value, f"Candidate contract is stale: {key}"
 
 
+def test_4_1_4_8_skills_catalog_is_v3_without_rewriting_archives() -> None:
+    for manifest in (get_current_release_manifest(), _development_manifest()):
+        skills = manifest["companions"]["skills"]
+        assert skills["catalog_generation"] == "v3"
+        assert skills["authoring_protocol"] == "agently-skills.authoring.v3"
+        assert skills["recommended_bundle"] == "app"
+        archives = {item["generation"]: item for item in skills["archived_catalog_generations"]}
+        assert archives["v2"]["branch"] == "update/archive-v2-catalog"
+        assert archives["v2"]["last_supported_framework_version"] == "4.1.4.7"
+        assert archives["v1"]["last_supported_framework_version"] == "4.1.1"
+    previous = json.loads((ROOT / "compatibility/releases/4.1.4.7.json").read_text(encoding="utf-8"))
+    assert previous["companions"]["skills"]["catalog_generation"] == "v2"
+
+
 def test_4_1_4_8_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 

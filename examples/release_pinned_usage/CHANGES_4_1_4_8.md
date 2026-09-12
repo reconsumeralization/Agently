@@ -31,6 +31,17 @@ model examples demonstrate scenarios, not guarantees for every model.
 
 ## 新旧调用 / Before and after
 
+配套指导统一使用 Agently-Skills **V3**（七个 Skill，`app` bundle 为六个）。
+TaskDAG 指导归入 `agently/references/task-dag.md`；完整应用参考迁至
+`skills/agently/assets/full-stack-reference`，按需复制，而非所有示例的前置依赖。
+Skills catalog generation 与 `agently-skills.authoring.v3` 协议是不同标识；
+本版二者均已对齐。[安装与路由 / Installation and routing](../../docs/en/development/coding-agents.md)。
+
+Companion guidance uses the seven-skill V3 catalog, with six skills in `app`.
+TaskDAG is an advanced router reference, not a separate Skill. The renamed
+full-stack reference is optional; these examples do not acquire a Skills
+runtime dependency. Frozen V1/V2 archives are not recommended installations.
+
 下面复用项目已配置的 `agent`。独立创建示例，避免在同一个已启动 execution 上重复配置。
 These snippets reuse a configured Agent and create independent drafts.
 

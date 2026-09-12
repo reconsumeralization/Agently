@@ -703,9 +703,9 @@ Archived examples live under `examples/archived/` and are compatibility referenc
 Agently-Skills gives coding agents current Agently implementation guidance.
 
 - Repository: https://github.com/AgentEra/Agently-Skills
-- Current catalog generation: `v2`
+- Current catalog generation: `v3`
 - Recommended bundle: `app`
-- Agently 4.1.4.8 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
+- Agently 4.1.4.8 compatibility: Skills authoring protocol `agently-skills.authoring.v3`
 
 Use it when asking Codex, Claude Code, Cursor, or another coding agent to implement Agently patterns.
 

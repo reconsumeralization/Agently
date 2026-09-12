@@ -689,9 +689,9 @@ Prompt 文件可以承载 Prompt 槽位和输出契约：
 Agently-Skills 为 coding agent 提供当前 Agently 实现指导。
 
 - Repository: https://github.com/AgentEra/Agently-Skills
-- 当前 catalog generation: `v2`
+- 当前 catalog generation: `v3`
 - 推荐 bundle: `app`
-- Agently 4.1.4.8 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
+- Agently 4.1.4.8 compatibility: Skills authoring protocol `agently-skills.authoring.v3`
 
 当你让 Codex、Claude Code、Cursor 或其他 coding agent 实现 Agently 模式时，应使用它。
 

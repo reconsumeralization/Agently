@@ -147,7 +147,7 @@
         "remote_source_policy": "Registered SkillSourceProvider plugins materialize authorized local or Git sources to immutable local snapshots; SkillLibrary installs exact snapshots and records redacted provenance; remote compatibility installs default to untrusted and selected subpaths reject symlink escape"
       },
       "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
-      "catalog_generation": "v2",
+      "catalog_generation": "v3",
       "recommended_bundle": "app",
       "recommended_ref": "main",
       "runtime_dependency_guidance": {
@@ -157,6 +157,12 @@
         }
       },
       "archived_catalog_generations": [
+        {
+          "generation": "v2",
+          "branch": "update/archive-v2-catalog",
+          "last_supported_framework_version": "4.1.4.7",
+          "status": "frozen"
+        },
         {
           "generation": "v1",
           "branch": "update/archive-legacy-v1-catalog",

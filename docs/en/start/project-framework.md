@@ -11,7 +11,7 @@ real owners and consumers first, then create the smallest file layout that
 carries those boundaries.
 
 For a complete runnable example, see the Agently-Skills
-[`skills/agently/assets/project-template`](https://github.com/AgentEra/Agently-Skills/tree/main/skills/agently/assets/project-template)
+[`skills/agently/assets/full-stack-reference`](https://github.com/AgentEra/Agently-Skills/tree/main/skills/agently/assets/full-stack-reference)
 asset. It intentionally demonstrates several optional boundaries at once. Copy
 it selectively; it is not a mandatory scaffold for a small application.
 
