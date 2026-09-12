@@ -9048,25 +9048,51 @@ async def test_goal_pursuit_effort_iteration_limit_is_soft_strategy_metadata(tmp
 
 
 @pytest.mark.asyncio
-async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
+async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path, monkeypatch):
+    from importlib import import_module
+
+    # Arrange the tested deadline at the plan boundary, not during unrelated
+    # context setup. The actual asyncio timeout and Task owner remain real.
+    monotonic_origin, wall_origin = time.monotonic(), time.time()
+    logical_elapsed = 0.0
+    budget = 30.0
+    clock = SimpleNamespace(
+        monotonic=lambda: monotonic_origin + logical_elapsed,
+        time=lambda: wall_origin + logical_elapsed,
+    )
+    for module_name in (
+        "agently.core.application.AgentExecution.Context",
+        "agently.builtins.plugins.AgentExecution.modules.limits",
+        "agently.builtins.plugins.AgentExecution.long_task.RuntimeControl",
+    ):
+        monkeypatch.setattr(import_module(module_name), "time", clock)
     agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_task_workspace(tmp_path / "task_workspace")
     execution = (
-        agent.create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
+        agent.create_execution(limits={"max_seconds": budget, "max_no_progress_seconds": 5})
         .goal("Build the site.", success_criteria=["The runnable page exists."])
         .strategy("flat")
     )
 
-    async def slow_request_plan(_iteration_index, _context_pack):
-        await asyncio.sleep(0.6)
-        return {
-            "step_instruction": "build the site",
-            "expected_evidence": "site exists",
-            "rationale": "this should be interrupted by the AgentTask deadline",
-        }
+    started, settled = asyncio.Event(), asyncio.Event()
+    remaining_at_plan = []
+
+    async def pending_plan():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            settled.set()
+
+    def slow_request_plan(_iteration_index, _context_pack):
+        nonlocal logical_elapsed
+        logical_elapsed = budget - 0.2
+        task = cast(AgentTask, execution.task_record)
+        remaining_at_plan.append(task._task_deadline_remaining())
+        return pending_plan()
 
     cast(Any, execution)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
 
-    result = await execution.async_get_full_data()
+    result = await asyncio.wait_for(execution.async_get_full_data(), timeout=5)
     meta = await execution.async_get_meta()
 
     assert result["status"] == "timed_out"
@@ -9074,6 +9100,9 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
     assert meta["route"]["selected_route"] == "agent_task"
     assert meta["close_snapshot"]["task"]["status"] == "timed_out"
     assert "plan stage" in result["reason"]
+    assert remaining_at_plan == [pytest.approx(0.2)]
+    assert started.is_set()
+    assert settled.is_set()
 
 
 @pytest.mark.asyncio
