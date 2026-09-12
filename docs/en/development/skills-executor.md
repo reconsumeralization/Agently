@@ -112,6 +112,10 @@ contracts as ordinary execution. The compatibility-only
 descriptors and emits `skills.compat.actionize_scripts_ignored`; it does not
 discover, generate, mount, or authorize Actions.
 
+Each projected Skill retains `action_candidates: []` for compatibility with
+released dictionary consumers. It stays empty regardless of that flag; script
+descriptors remain in `selected_resources`, not an Action registration list.
+
 For normal AgentExecution work, prepare the Skill scope and explicitly enable
 one restricted script-exec Action for the required language. The Action accepts
 only a relative `script_path` and bounded `args`; the host resolves that path

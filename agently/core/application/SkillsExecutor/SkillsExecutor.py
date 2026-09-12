@@ -524,6 +524,7 @@ class SkillsExecutor:
                 "revision_ref": skill.revision_ref,
                 "guidance": None,
                 "selected_resources": [],
+                "action_candidates": [],
             }
             for skill in installed
         }

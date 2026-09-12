@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agently.builtins.plugins.SkillSourceProvider import GitSkillSourceProvider
-from agently.core.application.SkillLibrary import SkillLibrary
+from agently.core.application.SkillLibrary import SkillLibrary, SkillPackageError
 from agently.core.application.SkillsExecutor import SkillsExecutor
 
 
@@ -213,6 +213,7 @@ async def test_context_pack_is_projection_of_generic_context_package(tmp_path: P
     assert compatibility["context_package_id"].startswith("context_package:")
     assert compatibility["task_context_id"].startswith("skills_compat:")
     assert compatibility["skills"][0]["skill_id"] == installed["skill_id"]
+    assert compatibility["skills"][0]["action_candidates"] == []
     assert compatibility["skills"][0]["guidance"]["excerpt"] == (
         "Apply the compatibility procedure."
     )
@@ -246,7 +247,7 @@ async def test_context_pack_returns_inert_script_resources_without_discovering_a
     assert scripts[0]["path"] == "scripts/check.py"
     assert "installed_path" not in scripts[0]
     assert "callable" not in scripts[0]
-    assert "action_candidates" not in compatibility["skills"][0]
+    assert compatibility["skills"][0]["action_candidates"] == []
     assert any(
         item["code"] == "skills.compat.actionize_scripts_ignored"
         for item in compatibility["diagnostics"]
@@ -268,6 +269,117 @@ async def test_task_dag_resolver_calls_same_context_reader_projection(tmp_path: 
 
     assert result["context_package_id"].startswith("context_package:")
     assert result["skills"][0]["selected_resources"][0]["path"] == "references/guide.md"
+    assert result["skills"][0]["action_candidates"] == []
+
+
+@pytest.mark.parametrize("actionize_scripts", [False, True])
+@pytest.mark.parametrize("entrypoint", ["sync", "async", "task_dag"])
+@pytest.mark.asyncio
+async def test_released_empty_candidates_survive_each_public_projection(
+    tmp_path: Path,
+    actionize_scripts: bool,
+    entrypoint: str,
+) -> None:
+    """Real local facade projection; no model or script execution is involved."""
+    facade = SkillsExecutor(library=SkillLibrary(tmp_path / "library"))
+    installed = facade.install_skills(_write_skill(tmp_path / "skill"))
+    kwargs = {
+        "skill_ids": [installed["skill_id"]],
+        "actionize_scripts": actionize_scripts,
+        "include_references": False,
+    }
+    if entrypoint == "sync":
+        result = facade.build_context_pack(**kwargs)
+    elif entrypoint == "async":
+        result = await facade.async_build_context_pack(
+            skill_ids=[installed["skill_id"]],
+            actionize_scripts=actionize_scripts,
+            include_references=False,
+        )
+    else:
+        result = await facade.task_dag_resolver()["skill"](kwargs)
+
+    assert result["schema_version"] == "agently.skills.context_pack.compat.v2"
+    assert len(result["skills"]) == 1
+    assert result["skills"][0]["action_candidates"] == []
+    scripts = [
+        resource
+        for resource in result["skills"][0]["selected_resources"]
+        if resource["kind"] == "script"
+    ]
+    assert len(scripts) == int(actionize_scripts)
+    assert all("callable" not in resource and "installed_path" not in resource for resource in scripts)
+    assert any(
+        item["code"] == "skills.compat.actionize_scripts_ignored"
+        for item in result["diagnostics"]
+    ) is actionize_scripts
+
+
+@pytest.mark.parametrize("actionize_scripts", [False, True])
+@pytest.mark.asyncio
+async def test_empty_candidates_are_not_shared_between_skills_or_requests(
+    tmp_path: Path,
+    actionize_scripts: bool,
+) -> None:
+    facade = SkillsExecutor(library=SkillLibrary(tmp_path / "library"))
+    first = facade.install_skills(_write_skill(tmp_path / "first"))
+    second_root = _write_skill(tmp_path / "second")
+    (second_root / "SKILL.md").write_text(
+        "---\nname: Second Skill\ndescription: Another procedure.\n---\n\nRead its guide.",
+        encoding="utf-8",
+    )
+    second = facade.install_skills(second_root)
+    skill_ids = [first["skill_id"], second["skill_id"]]
+
+    result = await facade.async_build_context_pack(
+        skill_ids=skill_ids, actionize_scripts=actionize_scripts
+    )
+    first_item, second_item = result["skills"]
+    assert first_item["action_candidates"] == second_item["action_candidates"] == []
+    assert first_item["action_candidates"] is not second_item["action_candidates"]
+    first_item["action_candidates"].append({"caller_owned": True})
+    assert second_item["action_candidates"] == []
+
+    fresh = await facade.async_build_context_pack(
+        skill_ids=skill_ids, actionize_scripts=actionize_scripts
+    )
+    assert [item["action_candidates"] for item in fresh["skills"]] == [[], []]
+
+
+@pytest.mark.parametrize("has_installed_skill", [False, True])
+@pytest.mark.parametrize("skill_ids", [None, []])
+@pytest.mark.asyncio
+async def test_compatibility_projection_still_requires_explicit_skill_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_installed_skill: bool,
+    skill_ids: list[str] | None,
+) -> None:
+    library = SkillLibrary(tmp_path / "library")
+    facade = SkillsExecutor(library=library)
+    if has_installed_skill:
+        facade.install_skills(_write_skill(tmp_path / "skill"))
+
+    def reject_library_scan() -> None:
+        pytest.fail("An empty selection must not scan the installed SkillLibrary.")
+
+    monkeypatch.setattr(library, "list", reject_library_scan)
+    with pytest.raises(ValueError, match="explicit Skill or Skill pack selector"):
+        await facade.async_build_context_pack(skill_ids=skill_ids, actionize_scripts=True)
+
+
+@pytest.mark.parametrize("actionize_scripts", [False, True])
+@pytest.mark.asyncio
+async def test_empty_compatibility_field_does_not_admit_an_unknown_skill(
+    tmp_path: Path,
+    actionize_scripts: bool,
+) -> None:
+    facade = SkillsExecutor(library=SkillLibrary(tmp_path / "library"))
+    facade.install_skills(_write_skill(tmp_path / "skill"))
+    with pytest.raises(SkillPackageError, match="Skill is not installed: missing-skill"):
+        await facade.async_build_context_pack(
+            skill_ids=["missing-skill"], actionize_scripts=actionize_scripts
+        )
 
 
 def test_facade_source_has_no_old_internal_owner_or_execution_strategy_imports() -> None:

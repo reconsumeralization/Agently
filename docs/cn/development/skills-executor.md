@@ -100,6 +100,10 @@ contract。仅为兼容保留的 `actionize_scripts=True` 仍把选中的 script
 resource descriptor 返回，并发出 `skills.compat.actionize_scripts_ignored`；它不会发现、
 生成、挂载或授权 Action。
 
+每个 Skill 投影保留 `action_candidates: []`，兼容已发布版本的字典读取方式。
+无论该开关是否开启，此数组始终为空；脚本描述仍位于 `selected_resources`，
+不是待注册的 Action 列表。
+
 普通 AgentExecution 应先准备 Skill scope，再显式为所需语言启用一个受限的 script-exec
 Action。模型只传相对 `script_path` 与有界 `args`；宿主根据本次 execution 已冻结的
 精确 revision bindings 解析路径，并把实际 revision、path、digest 写入 Action evidence。
