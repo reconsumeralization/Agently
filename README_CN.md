@@ -33,8 +33,8 @@ Agently 面向的是正在从“模型偶尔能做对”走向“应用必须稳
 核心设计问题是：怎样保留模型能力，同时让应用代码拥有稳定契约、可观测执行和可重启的工作流边界？
 
 Agently 4.1.4.8 让单次 Agent 执行的组合方式更容易在 IDE 中发现和校验：Action 与
-Skill fluent chain 会持续推断为 `AgentExecution`，Pattern、effort、strategy、Action
-planning protocol 和 concurrency 的内置选项可直接补全；稳定的交互、review、verify
+Skill fluent chain 会持续推断为 `AgentExecution`，Execution、effort、strategy、Action
+planning protocol 和 concurrency 的内置选项可直接补全；稳定的交互、review、最终 validate
 与 artifact 交付 API 也有了完整 examples。本版还加入 accepted retry stream 重放、
 model alias fail-closed、execution-scoped Skills、programmatic Action calling 和更清晰的
 并发 debug 输出。阅读

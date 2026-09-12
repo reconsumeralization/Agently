@@ -33,9 +33,9 @@ Agently is for teams moving from "the model can do it once" to "the application 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
 Agently 4.1.4.8 makes one-run Agent composition easier to discover and verify:
-Actions and Skills preserve `AgentExecution` fluent typing, built-in Pattern,
+Actions and Skills preserve `AgentExecution` fluent typing, built-in Execution,
 effort, strategy, Action protocol, and concurrency choices appear in IDEs, and
-stable interaction, review, verification, and artifact delivery APIs now have
+stable interaction, review, final validation, and artifact delivery APIs now have
 complete examples. It also adds accepted retry-stream replay, fail-closed model
 aliases, execution-scoped Skills, programmatic Action calling, and clearer
 concurrent debug output. Read the

@@ -3,6 +3,9 @@
 These examples are the current recommended examples for AgentExecution,
 Dynamic Task DAG, ActionRuntime, and direct AgentExecution Skill binding.
 
+For changes from released 4.1.4.7, see the bilingual
+[4.1.4.8 example change guide](../release_pinned_usage/CHANGES_4_1_4_8.md).
+
 Older Skills auto-orchestration examples from before the 4.1.3.8 Blocks
 lifecycle refactor were moved to:
 
@@ -35,6 +38,8 @@ python examples/agent_auto_orchestration/25_agent_execution_delivery_review_olla
 python examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py
 python examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py
 python examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py
+python examples/agent_auto_orchestration/29_execution_controls_ollama.py
+python examples/agent_auto_orchestration/29_field_long_content_ollama.py
 ```
 
 `_TEMPLATE_standard_skill_orchestration.py` shows the released
@@ -71,13 +76,21 @@ python examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py
 
 - **28 - Missing Goal Preparation.** An explicitly selected long-task producer
   asks the model to derive missing goal/criteria from the original request.
-  No Actions are authorized. The first recorded run prepared the contract but
-  timed out during subsequent production; this is not end-to-end acceptance.
+  No Actions are authorized. The early run timed out after preparation; the
+  later release-candidate run completed preparation and accepted production.
+- **29 - Execution Controls.** Safe outer pause, snapshot/rebind/resume,
+  same-object revision rework, retained readers and explicit cleanup.
+- **29 - Field Long Content.** Explicit LongContent fields use the chapter
+  producer and fill their final strings back into a structured result;
+  conditional continuation remains an independent option.
 
-The latest 26/27 runs confirmed framework delivery and readback, but semantic
-inspection found an invented attendance threshold in 26 and an expanded Friday
-restriction in 27. These remain Prompt-audit findings, even though model review
-passed for 27.
+Early 26/27 runs exposed semantic-quality problems; they are historical
+observations, not the latest acceptance status. In the final candidate check,
+26 preserved its original prompt: local output replaced the explicit metric,
+while three unchanged-prompt DeepSeek runs preserved the metric and passed the
+120-minute plan and artifact checks. Example 27 delivered the artifact and
+truthfully returned a failed advisory review under the default warn policy;
+this is not a strict quality guarantee. Model and input quality remain relevant.
 
 Model calls are real. Business data is mocked unless the example explicitly
 states that it uses a real external system such as MCP or GitHub CLI.

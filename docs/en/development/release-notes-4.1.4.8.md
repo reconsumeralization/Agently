@@ -8,6 +8,33 @@ keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, plugin, Action, Skill, 
 
 This is an unpublished candidate. The implemented usage below does not mean all release acceptance gates have passed.
 
+## Upgrade Scope and Change Guide
+
+This guide compares the candidate with released **4.1.4.7**. Planned revisions
+cover Execution unification, delivery and long-content/continuation, Action/Skill
+scope, audio, Shell, typing and confirmed engineering fixes. The broader 4.1.4.9
+composition redesign is not included. Ordinary Prompt/result readers, Session,
+TriggerFlow/TaskDAG, embedding/vector APIs and plugin management require no
+wholesale migration. Compatibility fixes, import cleanup and narrower typing
+in those modules do not constitute a redesign of their primary behavior.
+
+See the [example change table](../../../examples/release_pinned_usage/CHANGES_4_1_4_8.md)
+for before/after behavior, compatibility and runnable entrypoints. For example,
+these drafts reuse a configured Agent and the same conditional delivery policy:
+
+```python
+# Released spelling remains supported.
+old = agent.input("Write the requested report.").ensure_long_output()
+# Recommended spelling, not a new Execution mode; normal completion adds no call.
+new = agent.input("Write the requested report.").auto_continue()
+```
+
+Shell needs particular attention: `enable_shell()` without legacy arguments now
+selects general Shell with isolated `offline` and per-call approval `all`.
+To retain restricted argv behavior, explicitly supply `commands` or `sandbox`;
+do not assume the no-argument call retains the old environment defaults.
+See the [Shell migration guide](../actions/shell.md).
+
 Agently 4.1.4.8 is an execution-composition and developer-experience release.
 It makes one-run Agent code easier to read in an IDE while preserving the same
 runtime owner: a fluent chain keeps returning one `AgentExecution`, and its
@@ -92,6 +119,7 @@ recognition, without requiring separate stubs or suppressed missing-type warning
 | Execution controls | Safe-boundary pause/resume and save/load, plus same-object revision rework with retained earlier readers. | Use execution `pause/resume/save/load/rework` and async equivalents; inspect `control_capabilities` first. | Active provider/child snapshots and complete nested-budget recovery are not promised. | Unified control documentation, lifecycle/rework/snapshot tests, installed typing. |
 | Audio | Independent `AudioModelRequest` provides TTS/STT with explicit Agent binding; four composed streams distinguish continuous PCM, independent speech segments, transcript blocks and textual sentence endings. | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`; consume streams with `async with`. | No text Prompt reuse or implicit recording/playback; built-in native realtime STT input is not implemented. | [Audio usage](../models/audio.md), `examples/audio/tts_stt_roundtrip.py`, `examples/audio/continuous_audio.py`, audio tests. |
 | [Shell](../actions/shell.md) | `enable_shell` exposes three environments, four approval presets and general script execution; Cmd delegates to the shared process core. | Explicit legacy `commands`/`sandbox` retains argv semantics; general scripts use `command`/`workdir`. | Defaults to offline/all; missing Docker or Windows Sandbox fails without host fallback. Native Windows isolation needs user testing. | Shell/Cmd regression, Docker combinations and CrossOver runs; final release-combination checks remain separate. |
+| Deferred | Broader Skills/Execution composition, remaining long_task/TaskBoard Prompt work and deeper review integration are planned for 4.1.4.9; announced deprecated-entry cleanup targets 4.2. | Use the implemented surfaces above. | No active child/provider recovery claim, released-entry removal or Python 3.10 support removal in this release. | Current public guides state supported boundaries; future designs are not presented as implemented capabilities. |
 
 Windows: development testing for this release uses CrossOver. Existing basic probes cover
 Windows Python 3.14.7 and PowerShell 7.6.6, not all scenarios on native Windows.

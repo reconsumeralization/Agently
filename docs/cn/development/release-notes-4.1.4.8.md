@@ -8,6 +8,29 @@ keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, plugin, Action, Skill, 
 
 当前为未发布候选。以下说明已实现的用法，不代表所有发布验收门槛已通过。
 
+## 升级范围与变更导航
+
+本说明以已发布的 **4.1.4.7** 为基线。计划内修订集中在 Execution 统一、交付与
+长文/续写、Action/Skills 作用域、音频、Shell、typing 及已确认的工程修复；不把
+4.1.4.9 的整体组合重构提前混入本版。普通 Prompt/结果 reader、Session、
+TriggerFlow/TaskDAG、embedding/向量和插件管理没有整体迁移要求。
+相关模块的兼容修复、导入整理与类型收紧，不应解读成主功能重设计。
+
+逐项的新旧行为、兼容方式和可运行入口见
+[Examples 变更表](../../../examples/release_pinned_usage/CHANGES_4_1_4_8.md)。
+例如，下面两种写法在本版使用同一条件续写机制（`agent` 已配置）：
+
+```python
+# 原有写法保留，不强制迁移。
+old = agent.input("撰写要求中的报告。").ensure_long_output()
+# 新推荐名称；不是新的 Execution 模式，普通完成不触发续写。
+new = agent.input("撰写要求中的报告。").auto_continue()
+```
+
+特别注意 Shell：无旧参数的 `enable_shell()` 现在选择通用 Shell，默认隔离
+`offline` 和每次审批 `all`；需要旧 argv 约束的调用必须显式提供 `commands` 或
+`sandbox`，不能把无参数调用当作旧默认环境。详见 [Shell 迁移说明](../actions/shell.md)。
+
 Agently 4.1.4.8 聚焦执行组合与开发体验。单次 Agent 代码在 IDE 中更容易阅读：
 fluent chain 会持续返回同一个 `AgentExecution`，其 Actions、Skills、interaction
 handler、review 与 artifact 均保持本轮局部。支持 `always` 参数的
@@ -89,6 +112,7 @@ IDE 会为 `create_execution`、`effort`、`strategy`、`planning_protocol` 和 
 | 执行控制 | 安全边界暂停/恢复、保存/加载与同对象 revision 返工；旧 reader 保留原结果。 | 使用 execution 的 `pause/resume/save/load/rework` 及异步对应方法，先检查 `control_capabilities`。 | 不承诺恢复活跃 provider、活动子执行或完整嵌套预算。 | 统一执行控制、生命周期/返工/快照及安装后 typing 测试。 |
 | 音频 | 独立 `AudioModelRequest` 提供 TTS/STT，Agent 显式挂载；四种组合流区分连续 PCM、独立音频段、转录块和文字句末。 | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`；流使用 `async with`。 | 不复用文本 Prompt；不隐式录音/播放；内置驱动尚无原生实时 STT 输入。 | [音频用法](../models/audio.md)、`examples/audio/tts_stt_roundtrip.py`、`examples/audio/continuous_audio.py`、音频测试。 |
 | [Shell](../actions/shell.md) | `enable_shell` 提供三档环境、四档审批及通用脚本 Action；Cmd 反向委托共享进程核心。 | 显式旧 `commands`/`sandbox` 保留 argv 语义；新脚本入口使用 `command`/`workdir`。 | 默认 offline/all；Docker 与 Windows Sandbox 缺能力均拒绝，不回退 host；原生 Windows 隔离待用户实测。 | Shell/Cmd 回归、Docker 组合和 CrossOver 实跑；最终发布组合检查另行完成。 |
+| 后移范围 | 更广 Skills/Execution 组合、剩余 long_task/TaskBoard Prompt 与 review 深度融合属于 4.1.4.9 规划；已公告废弃清理面向 4.2。 | 本版使用上述已实现入口。 | 不承诺活动子执行/provider 恢复；本版不删除已发布兼容入口、不停止 Python 3.10 支持。 | 当前公开指南明确各能力支持边界；不以未来方案冒充本版功能。 |
 
 Windows：本轮开发测试使用 CrossOver；已有 Windows Python 3.14.7 与 PowerShell 7.6.6
 的基础探针证据，不是原生 Windows 全场景测试。请 Windows 使用者在自己的环境测试和反馈；

@@ -36,6 +36,9 @@ delivery/review and the `plan` / `long_content` execution plugins.
 
 ## 4.1.4.8 Coverage
 
+See [4.1.4.8 example changes and compatibility](CHANGES_4_1_4_8.md) for
+before/after behavior, migration notes and runnable examples for each revision.
+
 `pinned_usage_manifest.json` contains the authoritative
 `development_line_4_1_4_8_coverage` mapping. The mapping is based on
 `v4.1.4.7..dev` and links each runtime/public-use work batch to at least one

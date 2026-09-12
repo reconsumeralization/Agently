@@ -191,6 +191,34 @@
     {
       "work": "beta long-content Execution, host-ordered assembly, artifact delivery, and review",
       "examples": ["examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py"]
+    },
+    {
+      "work": "conditional request continuation and explicit structured LongContent fields",
+      "examples": ["examples/basic/auto_continue.py", "examples/agent_auto_orchestration/29_field_long_content_ollama.py"]
+    },
+    {
+      "work": "safe Execution controls, snapshots, revision rework and conditional goal preparation",
+      "examples": ["examples/agent_auto_orchestration/29_execution_controls_ollama.py", "examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py"]
+    },
+    {
+      "work": "independent audio requests, explicit Agent audio binding and composed streams",
+      "examples": ["examples/audio/tts_stt_roundtrip.py", "examples/audio/continuous_audio.py"]
+    },
+    {
+      "work": "general Shell environments and approval with retained Cmd lifecycle compatibility",
+      "examples": ["examples/action_runtime/3_8_general_shell_model.py", "examples/builtin_actions/04_cmd_async_lifecycle_local.py"]
+    },
+    {
+      "work": "Flat dependent Action arguments consume actual prior observations",
+      "examples": ["examples/agent_task/action_result_dependency.py"]
+    },
+    {
+      "work": "Skill root guidance delivery, conditional resource reads and explicit script authorization",
+      "examples": ["examples/skills_executor/11_conditional_resource_read.py", "examples/skills_executor/09_skill_script_exec.py"]
+    },
+    {
+      "work": "original structured output contracts and RecordStore versus TaskWorkspace ownership",
+      "examples": ["examples/basic/pydantic_root_output.py", "examples/agent_auto_orchestration/22_unified_agent_execution_result.py"]
     }
   ]
 }
