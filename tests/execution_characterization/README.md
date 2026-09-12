@@ -108,6 +108,21 @@ the accepted prefix, and the same stale-identity failure. They do not authorize
 unrelated output, request-count, instruction, schema or side-effect changes.
 Comparator negative controls intentionally change those facts and must fail.
 
+S32 A2 (`8ca17e99`) additionally records four exact `flat_task` paths: the
+planner and direct worker `instruct` values and their corresponding rendered
+Prompt hashes. These instructions distinguish ordinary continuation observations
+from failed verification via `verification_source`, while retaining real repair
+findings and deterministic guards. Combined paths preserve the earlier B4
+argument-readiness, Prompt-owned goal and producer migrations. The frozen
+before-values are unchanged; this is not a blanket exemption for these fields.
+The same immutable old source was replayed twice on Python 3.10.21 and 3.14.7
+and matched each frozen fixture; the integrated source also repeated exactly.
+All other observed fields, the four requests and final business/file bytes
+remain unchanged by A2 in this synthetic case. Both environment-specific ledgers
+are maintained together, and the full characterization suite, including its
+negative controls, remains required. These observations do not establish model
+quality or cover every A2 continuation path.
+
 Do not refresh the baseline from current output to silence a failure. The
 recording tools never accept deltas. `--freeze-baseline` can create a *missing*
 fixture only after the immutable old implementation agrees with its repeat;

@@ -21878,7 +21878,21 @@ def test_blocked_step_with_only_nonblocking_read_failures_can_accept_completed_a
     assert verification["non_blocking_execution_status"]["status"] == "blocked"
 
 
-def test_step_local_required_read_action_is_scoped_without_task_required_guard(tmp_path):
+def _scope_test_action(agent, action_id: str, scope_state: str) -> None:
+    """Host registration and offering are separate from a planner's selected ids."""
+    def never_run():
+        raise AssertionError("Step configuration must not execute the fixture Action.")
+
+    if scope_state != "missing":
+        agent.action.register_action(action_id=action_id, desc="Scope fixture.", kwargs={}, func=never_run)
+    if scope_state == "offered":
+        agent.use_actions(action_id)
+    visible = agent.action.get_action_list(tags=[f"agent-{agent.name}"])
+    assert (action_id in {item["action_id"] for item in visible}) is (scope_state == "offered")
+
+
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_step_local_required_read_action_is_scoped_without_task_required_guard(tmp_path, scope_state):
     agent = _create_agent("agent-task-step-local-required-action").use_task_workspace(tmp_path / "task-workspace")
     task = AgentTask(
         agent,
@@ -21914,6 +21928,15 @@ def test_step_local_required_read_action_is_scoped_without_task_required_guard(t
         "required_action_ids": ["browse"],
     }
 
+    _scope_test_action(agent, "browse", scope_state)
+    if scope_state != "offered":
+        with pytest.raises(PermissionError, match="outside the visible execution scope: browse"):
+            task._configure_step_execution(execution, plan)
+        assert execution.used_actions == []
+        assert execution.required_actions == []
+        assert execution.route_policies == []
+        return
+
     step_execution = task._configure_step_execution(execution, plan)
 
     assert execution.used_actions == [["browse"]]
@@ -21923,7 +21946,8 @@ def test_step_local_required_read_action_is_scoped_without_task_required_guard(t
     assert step_execution["action_scope_source"] == "step_required_action_ids"
 
 
-def test_task_contract_required_read_action_still_uses_required_guard(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_task_contract_required_read_action_still_uses_required_guard(tmp_path, scope_state):
     agent = _create_agent("agent-task-contract-required-action").use_task_workspace(tmp_path / "task-workspace")
     task = AgentTask(
         agent,
@@ -21959,6 +21983,15 @@ def test_task_contract_required_read_action_still_uses_required_guard(tmp_path):
         "step_scope": {"allowed_capability_ids": ["browse"]},
         "required_action_ids": ["browse"],
     }
+
+    _scope_test_action(agent, "browse", scope_state)
+    if scope_state != "offered":
+        with pytest.raises(PermissionError, match="outside the visible execution scope: browse"):
+            task._configure_step_execution(execution, plan)
+        assert execution.used_actions == []
+        assert execution.required_actions == []
+        assert execution.route_policies == []
+        return
 
     step_execution = task._configure_step_execution(execution, plan)
 
@@ -22795,7 +22828,8 @@ async def test_capability_evidence_gate_reads_execution_effective_options(tmp_pa
     assert "write_file" in " ".join(verification.get("missing_capability_evidence", []))
 
 
-def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tmp_path, scope_state):
     agent = _capability_gate_agent("agent-task-action-evidence-shape")
     task = AgentTask(
         agent,
@@ -22840,7 +22874,15 @@ def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tm
         "rationale": "the task asks for a file",
     }
 
+    _scope_test_action(agent, "write_file", scope_state)
     step_execution = task._configure_step_execution(DummyExecution(), plan)
+
+    if scope_state != "offered":
+        assert step_execution["effective_shape"] == "direct"
+        assert plan["effective_execution_shape"] == "direct"
+        assert "execution_shape_adjustment" not in plan
+        assert used_actions == []
+        return
 
     assert step_execution["effective_shape"] == "actions"
     assert plan["effective_execution_shape"] == "actions"
@@ -22849,7 +22891,8 @@ def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tm
     assert route_policies and route_policies[0]["allowed_routes"] == ["model_request"]
 
 
-def test_pending_action_evidence_requirement_escalates_skills_step_to_actions(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_pending_action_evidence_requirement_escalates_skills_step_to_actions(tmp_path, scope_state):
     agent = _capability_gate_agent("agent-task-skill-step-action-evidence-shape")
     task = AgentTask(
         agent,
@@ -22894,7 +22937,15 @@ def test_pending_action_evidence_requirement_escalates_skills_step_to_actions(tm
         "rationale": "the task asks for a file",
     }
 
+    _scope_test_action(agent, "write_file", scope_state)
     step_execution = task._configure_step_execution(DummyExecution(), plan)
+
+    if scope_state != "offered":
+        assert step_execution["effective_shape"] == "direct"
+        assert plan["effective_execution_shape"] == "direct"
+        assert "execution_shape_adjustment" not in plan
+        assert used_actions == []
+        return
 
     assert step_execution["effective_shape"] == "actions"
     assert plan["execution_shape_adjustment"]["from"] == "direct"
@@ -23157,7 +23208,8 @@ async def test_step_planner_prompt_exposes_actions_without_skill_capability_rout
     assert "guidance_access" in plan_text
 
 
-def test_step_scope_restricts_step_actions_from_structured_field(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_step_scope_restricts_step_actions_from_structured_field(tmp_path, scope_state):
     """Step scope comes from the structured step_scope field (not prose): an
     allowed_capability_ids list narrows the bounded step's action candidates via
     the execution-local action-id seam."""
@@ -23193,13 +23245,21 @@ def test_step_scope_restricts_step_actions_from_structured_field(tmp_path):
             "step_scope": {"allowed_capability_ids": ["fetch_sources"]},
         }
     )
+    _scope_test_action(agent, "fetch_sources", scope_state)
+    if scope_state != "offered":
+        with pytest.raises(PermissionError, match="outside the visible execution scope: fetch_sources"):
+            cast(Any, task)._configure_step_execution(execution, plan)
+        assert execution.local_action_ids == []
+        assert execution.applied_route_policy is None
+        return
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
     assert execution.local_action_ids == ["fetch_sources"]
     assert step_execution["step_scope"]["allowed_capability_ids"] == ["fetch_sources"]
 
 
-def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path, scope_state):
     from agently.core.application import AgentTask
 
     agent = _capability_gate_agent("agent-task-step-scope-use-actions")
@@ -23235,13 +23295,21 @@ def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path):
             "step_scope": {"allowed_capability_ids": ["fetch_sources"]},
         }
     )
+    _scope_test_action(agent, "fetch_sources", scope_state)
+    if scope_state != "offered":
+        with pytest.raises(PermissionError, match="outside the visible execution scope: fetch_sources"):
+            cast(Any, task)._configure_step_execution(execution, plan)
+        assert execution.used_actions == []
+        assert execution.applied_route_policy is None
+        return
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
     assert execution.used_actions == [["fetch_sources"]]
     assert step_execution["action_scope_source"] == "step_scope"
 
 
-def test_step_required_action_ids_scope_actions_without_contract_guard(tmp_path):
+@pytest.mark.parametrize("scope_state", ["offered", "registered", "missing"])
+def test_step_required_action_ids_scope_actions_without_contract_guard(tmp_path, scope_state):
     from agently.core.application import AgentTask
 
     agent = _capability_gate_agent("agent-task-step-required-actions")
@@ -23281,6 +23349,14 @@ def test_step_required_action_ids_scope_actions_without_contract_guard(tmp_path)
             "required_action_ids": ["probe_action"],
         }
     )
+    _scope_test_action(agent, "probe_action", scope_state)
+    if scope_state != "offered":
+        with pytest.raises(PermissionError, match="outside the visible execution scope: probe_action"):
+            cast(Any, task)._configure_step_execution(execution, plan)
+        assert execution.used_actions == []
+        assert execution.required_actions == []
+        assert execution.applied_route_policy is None
+        return
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
     assert execution.used_actions == [["probe_action"]]

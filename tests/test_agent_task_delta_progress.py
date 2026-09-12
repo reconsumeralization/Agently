@@ -613,7 +613,8 @@ async def test_planned_action_batch_emits_only_bounded_host_owned_facts() -> Non
 
 
 @pytest.mark.asyncio
-async def test_validated_flat_commands_emit_planned_and_started_before_dispatch() -> None:
+@pytest.mark.parametrize("host_offered", [True, False])
+async def test_validated_flat_commands_emit_planned_and_started_before_dispatch(host_offered: bool) -> None:
     task = _stream_owner()
 
     class Registry:
@@ -628,7 +629,13 @@ async def test_validated_flat_commands_emit_planned_and_started_before_dispatch(
     class Action:
         action_registry = Registry()
 
+        @staticmethod
+        def get_action_list(*, tags: list[str]) -> list[dict[str, Any]]:
+            assert tags == ["agent-delta-progress-agent"]
+            return [Registry.get_spec(action_id) for action_id in ("search", "read")] if host_offered else []
+
         async def _async_execute_action_calls(self, **_: Any) -> list[dict[str, Any]]:
+            assert host_offered, "Registered but unoffered Actions must not dispatch."
             assert [item.path for item in task._stream_items] == [
                 "agent_task.action.batch.planned",
                 "agent_task.action.started",
@@ -659,6 +666,12 @@ async def test_validated_flat_commands_emit_planned_and_started_before_dispatch(
         project_flat_action_batch=True,
     )
 
+    if not host_offered:
+        assert execution_meta["status"] == "failed"
+        assert execution_meta["diagnostics"][0]["code"] == "test.flat.action_not_allowed"
+        assert task._stream_items == []
+        return
+
     assert execution_meta["status"] == "failed"
     assert [item.path for item in task._stream_items] == [
         "agent_task.action.batch.planned",
@@ -677,7 +690,8 @@ async def test_validated_flat_commands_emit_planned_and_started_before_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_validated_flat_batch_does_not_claim_parallelism_without_concurrency_fact() -> None:
+@pytest.mark.parametrize("host_offered", [True, False])
+async def test_validated_flat_batch_does_not_claim_parallelism_without_concurrency_fact(host_offered: bool) -> None:
     task = _stream_owner()
 
     class Registry:
@@ -693,7 +707,13 @@ async def test_validated_flat_batch_does_not_claim_parallelism_without_concurren
         action_registry = Registry()
 
         @staticmethod
+        def get_action_list(*, tags: list[str]) -> list[dict[str, Any]]:
+            assert tags == ["agent-delta-progress-agent"]
+            return [Registry.get_spec(action_id) for action_id in ("search", "read")] if host_offered else []
+
+        @staticmethod
         async def _async_execute_action_calls(**kwargs: Any) -> list[dict[str, Any]]:
+            assert host_offered, "Registered but unoffered Actions must not dispatch."
             return [
                 {"id": command["action_id"], "status": "success", "success": True}
                 for command in kwargs["action_calls"]
@@ -701,7 +721,7 @@ async def test_validated_flat_batch_does_not_claim_parallelism_without_concurren
 
     cast(Any, task).agent = SimpleNamespace(action=Action(), settings={}, name="delta-progress-agent")
 
-    await task._execute_bounded_action_commands(
+    _, execution_meta = await task._execute_bounded_action_commands(
         raw_commands=[
             {"action_id": "search", "action_input": {}, "purpose": "Find sources"},
             {"action_id": "read", "action_input": {}, "purpose": "Read source"},
@@ -718,6 +738,12 @@ async def test_validated_flat_batch_does_not_claim_parallelism_without_concurren
         iteration_index=1,
         project_flat_action_batch=True,
     )
+
+    if not host_offered:
+        assert execution_meta["status"] == "failed"
+        assert execution_meta["diagnostics"][0]["code"] == "test.flat.action_not_allowed"
+        assert task._stream_items == []
+        return
 
     assert task._stream_items[0].path == "agent_task.action.batch.planned"
     assert task._stream_items[0].value["parallel"] is None
