@@ -106,8 +106,8 @@ process and decodes it accordingly, fixing Chinese stdout/stderr becoming questi
 marks in CrossOver tests. Legacy Cmd/argv decoding is unchanged. The transport uses
 the PowerShell parser to preserve top-level parameters, using directives and named
 blocks, including explicit exits, final-command failures and syntax-error status.
-This fix does not complete the three environment profiles or the new Agent entry,
-nor establish all-scenario validation on native Windows.
+See the table and Shell guide for the implemented environment profiles and Agent
+entry. This encoding fix does not establish all-scenario validation on native Windows.
 
 Long-form declarations and continuation settings are independent. Reuse the configured Agent above:
 

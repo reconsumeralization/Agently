@@ -99,7 +99,7 @@ Windows：本轮开发测试使用 CrossOver；已有 Windows Python 3.14.7 与 
 PowerShell 执行核心现在为单次子进程显式配置 UTF-8 输出并对应解码，修复 CrossOver
 测试中中文 stdout/stderr 变问号的问题；旧 Cmd/argv 默认解码不变。传输使用 PowerShell
 解析器保留顶层参数、using 与命名语句块，并保留显式退出、最后命令失败及语法错误状态。
-该修复不表示三档环境或 Agent 新入口已经完成，也不承诺原生 Windows 全场景验证。
+三档环境与 Agent 新入口的实现范围见上表及 Shell 指南；编码修复不代表原生 Windows 全场景验证。
 
 长文声明与续写配置彼此独立，例如复用上面的已配置 Agent：
 
