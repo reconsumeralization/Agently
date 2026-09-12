@@ -5582,7 +5582,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "failed_actions": [],
             "blocked_actions": [],
             "approval_required_actions": [],
-            "required_actions": [],
+            "required_actions": sorted(self._task_contract_required_action_ids()),
             "capability_evidence_requirements": [],
             "missing_required_actions": [],
             "consumed_skill_ids": [],
@@ -6302,7 +6302,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         # Accumulate satisfied capabilities before evaluating the whole-task
         # evidence contract. Terminal preflight uses this same structural owner.
         self._accumulate_capability_evidence(execution_evidence_summary)
-        required_actions = self._normalize_string_list(execution_evidence_summary.get("required_actions"))
+        required_actions = self._merge_string_lists(
+            execution_evidence_summary.get("required_actions"),
+            sorted(self._task_contract_required_action_ids()),
+        )
         required_skills = self._normalize_string_list(execution_evidence_summary.get("required_skills"))
         missing_required = [
             *[action_id for action_id in required_actions if action_id not in self._satisfied_required_actions],
@@ -6558,7 +6561,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         approval_required_actions = self._normalize_string_list(
             execution_evidence_summary.get("approval_required_actions")
         )
-        required_actions = set(self._normalize_string_list(execution_evidence_summary.get("required_actions")))
+        required_actions = {
+            *self._normalize_string_list(execution_evidence_summary.get("required_actions")),
+            *self._task_contract_required_action_ids(),
+        }
         for requirement in self._capability_evidence_requirements(execution_evidence_summary):
             if not requirement.get("required", True):
                 continue

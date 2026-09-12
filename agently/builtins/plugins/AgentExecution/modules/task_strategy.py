@@ -276,6 +276,9 @@ async def _run_agent_task_route_impl(
         if source is not None:
             agent_task_options["agent_task"]["execution_strategy_source"] = str(source)
     required_actions = execution.required_action_ids()
+    # This route already resolved root defaults or the bounded step's local
+    # obligations. Task construction must not collect Agent defaults again.
+    agent_task_options["_required_actions_bound"] = True
     required_skills = resolved_required_skills or execution.required_skill_ids()
     if required_actions or required_skills:
         constraints = dict(agent_task_options.get("capability_constraints") or {})

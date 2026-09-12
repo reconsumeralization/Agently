@@ -697,6 +697,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
 
     def _child_execution_options(self) -> dict[str, Any]:
         options = dict(self.options)
+        # Also covers artifact-draft consumers of these same child options.
+        # Ordinary independent executions retain Agent defaults.
+        options["_inherit_required_actions"] = False
         options.pop("request_timeout_seconds", None)
         # Every nested model consumer performs its own intent-bound TaskContext
         # read. Preserve the AgentTask's declared disclosure budget and
@@ -707,6 +710,25 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             filtered_agent_task_options = dict(agent_task_options)
             filtered_agent_task_options.pop("request_timeout_seconds", None)
             options["agent_task"] = filtered_agent_task_options
+        # A task requirement is not a per-step obligation. Copy only the
+        # affected containers: scopes, permissions, Skills and parent options
+        # remain intact, and step-local require_actions is bound separately.
+        sources = [options]
+        nested_options = options.get("agent_task")
+        if isinstance(nested_options, dict):
+            sources.append(nested_options)
+        for source in sources:
+            constraints = source.get("capability_constraints")
+            if not isinstance(constraints, dict):
+                continue
+            constraints = dict(constraints)
+            constraints.pop("required_actions", None)
+            actions = constraints.get("actions")
+            if isinstance(actions, dict):
+                actions = dict(actions)
+                actions.pop("required", None)
+                constraints["actions"] = actions
+            source["capability_constraints"] = constraints
         return options
 
     def _task_max_seconds(self) -> float | None:

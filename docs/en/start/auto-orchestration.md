@@ -1176,6 +1176,13 @@ The adaptive handoff does not impose the ordinary child's implicit two-round
 cap: calls may need another round for final synthesis. Explicit task
 `action_loop_max_rounds`, task deadlines and request budgets still apply.
 
+Task-wide `require_actions` is checked against the task's cumulative Action
+evidence, not repeated as an obligation on every child request. A child that
+only writes the final answer or an artifact need not repeat completed Actions.
+Explicit step-required Actions still use the child's gate; missing or failed
+task-required Actions still prevent acceptance. Agent default requirements are
+captured when the task is created and retained with its saved options.
+
 `examples/agent_task/action_result_dependency.py` runs a real-model ticket
 lookup/acknowledgement task with a revision generated only at Action execution.
 Configure its `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; optional

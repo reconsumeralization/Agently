@@ -935,6 +935,11 @@ ActionRuntime；仅顺序依赖（例如写入再读取已知路径）不需要�
 这种自适应交接不套用普通子执行隐式的两轮上限，因为调用后可能还需要终态请求；
 显式任务 `action_loop_max_rounds`、任务 deadline 和请求预算继续生效。
 
+任务级 `require_actions` 在全任务累计 Action 证据中检查，不会重复变成每次子请求的
+必调用要求。仅撰写最终答复或产物的子执行无需重做已完成的 Action；显式 step-required
+仍由子执行检查，任务所需 Action 缺失或失败仍会阻止验收。Agent 默认要求在任务创建时
+确定，并随任务 options 保存，恢复时不因后来新增默认要求而改变原任务义务。
+
 `examples/agent_task/action_result_dependency.py` 用真实模型执行工单读取/确认任务，
 revision 只在 Action 调用时生成。配置 `MODEL_BASE_URL`、`MODEL_API_KEY` 和
 `MODEL_NAME` 即可运行；可选 `MODEL_REQUEST_OPTIONS` 接收 JSON 对象形式的 provider 参数。

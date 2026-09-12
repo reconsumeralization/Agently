@@ -83,8 +83,14 @@ if __name__ == "__main__":
 # and the same revision. result["status"] == "timed_out", result["accepted"] == False.
 # The 600-second run reached final verification after correct Actions and a final
 # response draft, but did not finish verification. Action success is not task acceptance.
-# Latest acceptance observation (no wall-clock task limit; not a passing example):
+# Previous observation (no wall-clock task limit; before the scope fix):
 # Both Actions succeeded with the same observed revision. After 12 model requests
 # and four iterations, status was "max_iterations", accepted was False. A correct
 # generated answer was blocked by task-wide required Actions inherited by the
-# answer-only child execution. The release acceptance gap remains open.
+# answer-only child execution.
+# Expected key output from a real run after the task/step scope fix:
+# result["status"] == "completed"; result["accepted"] == True
+# observed_calls contains one lookup and one acknowledgement, with the same
+# returned revision; observed_calls[1]["result"]["acknowledged"] == True.
+# The final response accurately reports that acknowledgement. This run used six
+# model requests; request count and wording are observations, not fixed outputs.

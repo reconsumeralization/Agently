@@ -181,6 +181,26 @@ class AgentTask(
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
         self.execution_strategy = self.normalize_execution_strategy(execution)
         resolved_options = dict(options or {})
+        # Snapshot Agent-wide requirements at the task boundary, including for
+        # standalone AgentTask callers. Child producers must not inherit them
+        # as repeated local obligations.
+        collect_required = getattr(agent, "_collect_required_action_ids", None)
+        agent_required = (
+            self._normalize_string_list(collect_required())
+            if callable(collect_required) and not resolved_options.get("_required_actions_bound")
+            else []
+        )
+        if agent_required:
+            constraints = dict(resolved_options.get("capability_constraints") or {})
+            raw_actions = constraints.get("actions")
+            actions = dict(raw_actions) if isinstance(raw_actions, Mapping) else {}
+            configured = actions.get("required", []) if isinstance(raw_actions, Mapping) else constraints.get("required_actions", [])
+            actions["required"] = self._merge_string_lists(configured, agent_required)
+            constraints["actions"] = actions
+            resolved_options["capability_constraints"] = constraints
+        # Persist with task options so load/resume preserves this contract
+        # instead of adding later Agent defaults to the saved task.
+        resolved_options["_required_actions_bound"] = True
         self.effective_execution_strategy: AgentTaskEffectiveExecutionStrategy | None = (
             cast(AgentTaskEffectiveExecutionStrategy, self.execution_strategy)
             if self.execution_strategy in {"flat", "taskboard"}

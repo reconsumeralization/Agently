@@ -1724,7 +1724,7 @@ class AgentExecution:
     def required_action_ids(self) -> list[str]:
         collect = getattr(self.agent, "_collect_required_action_ids", None)
         required = [*self.local_required_action_ids]
-        if callable(collect):
+        if self.options.get("_inherit_required_actions", True) and callable(collect):
             collected = collect()
             if isinstance(collected, (list, tuple, set)):
                 required.extend(collected)
