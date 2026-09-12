@@ -222,7 +222,6 @@ async def main(argv: list[str] | None = None):
 
     agent = Agently.create_agent("agent-task-legacy-upgrade").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    task_workspace = agent.task_workspace
     record_store = agent.record_store
 
     agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)

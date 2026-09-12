@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import copy
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from agently import Agently
-from agently.types.data import TaskWorkspaceFileRef
 
 
 def _terminal_payload(final_result: Any, *, strategy: str = "flat") -> dict[str, Any]:
@@ -51,7 +49,7 @@ async def test_direct_result_get_data_and_get_full_data_share_business_view() ->
 
 @pytest.mark.asyncio
 async def test_direct_terminal_retention_keeps_small_result_inline(tmp_path) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+    from agently.builtins.plugins.AgentExecution.modules.terminal_retention import (
         prepare_agent_execution_terminal_retention,
     )
 
@@ -72,7 +70,7 @@ async def test_direct_terminal_retention_keeps_small_result_inline(tmp_path) -> 
 
 @pytest.mark.asyncio
 async def test_direct_large_result_is_not_copied_into_workspace(tmp_path) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+    from agently.builtins.plugins.AgentExecution.modules.terminal_retention import (
         prepare_agent_execution_terminal_retention,
     )
 
@@ -95,7 +93,7 @@ async def test_direct_large_result_is_not_copied_into_workspace(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_direct_terminal_cleanup_keeps_only_verified_file_ref(tmp_path) -> None:
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+    from agently.builtins.plugins.AgentExecution.modules.terminal_retention import (
         apply_agent_execution_terminal_retention,
         prepare_agent_execution_terminal_retention,
     )

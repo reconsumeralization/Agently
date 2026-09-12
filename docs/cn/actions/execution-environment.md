@@ -74,9 +74,10 @@ Browser、SQLite action 可以声明自己的 requirement，Action dispatcher �
 | Kind | 使用方 | 托管资源 |
 |---|---|---|
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
+| `shell` | 新 `agent.enable_shell(environment=..., approval=...)` | [通用 Bash/PowerShell](shell.md)、隔离环境与进程树 |
 | `bash` | `sandbox="trusted_local"` shell actions | 配置后的本地命令 runner |
 | `docker` | 隔离 shell actions、direct Docker Actions，以及一个 `code_execution` provider 候选 | Docker CLI runner 与镜像 provisioning |
-| `code_execution` | `agent.enable_python(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 与已授权 Skill script Actions | provider-neutral、Workspace-bound 执行；内置包括 Docker、可选的 gVisor/runsc、可选的 macOS Seatbelt、可选的 Linux Landlock 与显式无防护 `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 与 `agent.enable_skill_script_exec(...)` 为当前 execution 启用的受限 Action | provider-neutral、Workspace-bound 执行；内置包括 Docker、可选的 gVisor/runsc、可选的 macOS Seatbelt、可选的 Linux Landlock 与显式无防护 `trusted_local` fallback |
 | `browser` | 选择托管 browser resource 的 Browse actions | 托管 browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -104,6 +105,27 @@ ActionCall
 `action_call["execution_resource_handles"]` 传入，live resource 会通过
 `action_call["execution_resource_resources"]` 传入。
 
+### 程序化 Action bindings
+
+`programmatic` Action planning 协议是现有 `code_execution` kind 的一个更严格
+consumer。生成的 Python 程序要求 provider 同时满足 `isolation="required"` 并报告
+host-binding capability。binding bridge 只传递 JSON call；credentials、live Action
+object、callback 和 policy authority 都不会进入程序进程。
+
+每个 binding request 都会重新构造，并通过普通 ActionRuntime/ActionDispatcher
+路径派发。provider 名称、支持 Python 或支持隔离，都不能单独证明它支持 binding。
+没有 provider 同时满足所有 capability 时会 fail closed，且绝不会回退到
+`trusted_local`。
+
+在 POSIX host 上，内置 Docker provider 及其 gVisor variant 实现 binding bridge，
+同时保持 container network disabled。是否合格仍由观测到的
+`host_async_bindings` 与所有请求的 hard-isolation axes 决定，而不是 provider id。
+
+provider、bridge 和 interpreter 都是 live resources。TriggerFlow snapshot 不能
+序列化运行中的程序，也不能在一个 awaited binding 处恢复。请在 settled boundary
+保存，并在恢复后重新生成程序。详见
+[程序化 Action 调用](programmatic-action-calling.md)。
+
 ### 有序 code-execution providers
 
 provider 优先级可用字符串或候选描述符配置。描述符 config 只对该候选合并：
@@ -127,6 +149,20 @@ provider-neutral `providers=` 与 `isolation=` 参数选择。机制专属配置
 `trusted_local` 直接使用宿主 toolchain，没有隔离，只接受 snapshot grant。它需要显式
 host 授权，且不能满足 `isolation="required"`。因此 `unsafe_fallback=True` 必须同时
 显式选择 `isolation="preferred"` 或 `"none"`，不能被隐式选中。
+
+如果 Docker 不可用且代码可信，可以显式选择 subprocess 兼容路径：
+
+```python
+agent.enable_code_runtime(
+    language="nodejs",
+    providers=["trusted_local"],
+    unsafe_fallback=True,
+    isolation="none",
+)
+```
+
+不要用它执行不可信或模型生成的代码。安全默认会 fail closed，不会静默把这类代码
+转移到宿主 subprocess。
 
 公开的 `isolation=` 参数是选择策略，不是 provider 能力标签。`code_execution`
 provider 必须报告具体布尔隔离轴：进程 containment、宿主文件系统限制、提权阻断和
@@ -266,13 +302,22 @@ manager 发出 `execution_resource.*` 事件：
 - `execution_resource.declared`
 - `execution_resource.approval_required`
 - `execution_resource.ensuring`
+- `execution_resource.probed`
+- `execution_resource.progress`
 - `execution_resource.ready`
 - `execution_resource.unhealthy`
 - `execution_resource.releasing`
 - `execution_resource.released`
 - `execution_resource.failed`
 
-payload 只包含稳定 id 与状态元信息，不能包含原始凭证、环境变量、命令 secret 或 live resource 对象。
+payload 包含稳定 id、清洗后的 provider/镜像自检事实、有界准备进度、状态、稳定错误码与
+可执行建议，不能包含原始凭证、环境变量、命令 secret 或 live resource 对象。
+`debug=True` 会把这些事件显示为精简的环境执行叙事；`debug="detail"` 还会显示有界的
+probe 与准备 payload。显式授权 `image_pull_policy="if_missing"` 后，Action 真正执行前会
+持续显示 Docker 镜像下载进度。simple 模式使用“检查环境”“下载镜像”“镜像就绪”等
+面向人的标签，不显示 `provider=`、`phase=` 等内部字段；重复的 Docker layer 更新使用
+紧凑单行，开始、完成、失败和最终就绪仍使用完整阶段块。detail 模式先显示同样的可读
+说明，再在 `Diagnostics` 下附加清洗后的完整字段。
 
 ## Examples
 

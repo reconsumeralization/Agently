@@ -246,7 +246,14 @@ class SkillContextSource:
                         required=False,
                         completeness="complete",
                         index_text=f"{section_title}\n{section_body}",
-                        metadata={"section_title": section_title},
+                        metadata={
+                            "section_title": section_title,
+                            "parent_resource_path": "SKILL.md",
+                            "parent_source_ref": self._source_ref(
+                                package,
+                                "SKILL.md",
+                            ),
+                        },
                     )
                 )
             index_items = [
@@ -329,6 +336,10 @@ class SkillContextSource:
                             metadata={
                                 "resource_kind": resource.kind,
                                 "parent_resource_path": resource.path,
+                                "parent_source_ref": self._source_ref(
+                                    package,
+                                    resource.path,
+                                ),
                                 "section_title": section_title,
                                 "byte_offset": int(raw_section.get("byte_offset") or 0),
                                 "byte_size": int(raw_section.get("byte_size") or 0),
@@ -563,6 +574,11 @@ class SkillContextSource:
                     package,
                     path,
                     resource_kind=resource.kind,
+                    descriptor_kind="skill_script",
+                    sha256=resource.sha256,
+                    size=resource.size,
+                    executable=resource.executable,
+                    action_status="binding_required",
                 ),
             )
         if resource.kind == "asset":

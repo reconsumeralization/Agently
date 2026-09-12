@@ -152,7 +152,7 @@ def test_builtin_agent_orchestrator_matches_protocol():
 def test_builtin_agent_execution_matches_protocol_without_core_builtin_dependency():
     from agently import Agently
     from agently.core.application.AgentExecution import AgentExecutionStream
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.stream import (
+    from agently.builtins.plugins.AgentExecution.modules.stream import (
         AgentExecutionStream as CompatAgentExecutionStream,
     )
 

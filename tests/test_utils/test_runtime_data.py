@@ -221,12 +221,13 @@ class TestRuntimeData:
         ns2 = data.namespace("ns2")
 
         assert ns1["b.deep"] == "value"
+        assert ns2["x"] == [1, 2, 3]
 
         child_data = StateData({"ns1": {"new": "child", "b": True}}, parent=data)
         child_ns1 = child_data.namespace("ns1")
         assert child_ns1["a"] == 1
         assert child_ns1["new"] == "child"
-        assert child_ns1["b"] == True
+        assert child_ns1["b"] is True
         assert "b" in child_data["ns1"]
 
         del child_ns1["b"]

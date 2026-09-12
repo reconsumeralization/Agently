@@ -49,14 +49,13 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently, TriggerFlow
-from examples.dynamic_task._shared import configure_model
+from agently import Agently, TriggerFlow  # noqa: E402
+from examples.dynamic_task._shared import configure_model  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

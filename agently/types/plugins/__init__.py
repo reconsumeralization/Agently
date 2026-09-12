@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .base import AgentlyPlugin, AgentlyPluginType
+from .AudioModelRequester import AudioCapability, AudioModelRequester
 from .ContextSource import (
     ContextSource,
     ContextSourceChangeFeed,
@@ -20,6 +21,7 @@ from .ContextSource import (
 )
 from .ActionFlow import ActionFlow, ActionFlowObservationHandler
 from .ActionExecutor import ActionExecutor as ActionExecutor
+from .ShellResource import ShellResource as ShellResource
 from .ExecutionResourceProvider import (
     CodeExecutionResource as CodeExecutionResource,
     ExecutionResourceProvider as ExecutionResourceProvider,
@@ -41,7 +43,7 @@ from .TaskDAGPlanner import TaskDAGPlanner
 from .SessionMemory import SessionMemory
 from .Blocks import Blocks
 from .AgentOrchestrator import AgentOrchestrator
-from .AgentExecution import AgentExecution, AgentStepExecutor
+from .AgentExecution import AgentExecution as AgentExecution, AgentStepExecutor as AgentStepExecutor
 from .RecordStore import (
     CheckpointStore,
     DBStoreProvider,

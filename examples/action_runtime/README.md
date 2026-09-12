@@ -44,10 +44,22 @@ Example groups:
   - `3_3_third_party_sandlock_action_deepseek.py`
   - `3_4_third_party_docker_sandbox_action_deepseek.py`
   - `3_5_action_execution_recall_local.py`
+  - `3_6_action_input_safety_local.py`
+  - `3_7_action_evidence_refs_local.py`
+  - `3_8_general_shell_model.py` runs a real model with one general Shell Action
+    and a read-only Skill resource mount, then reports the script's fresh token.
+    Set `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; the checked local
+    defaults are oMLX/Qwen3.8-27B-4bit. The default environment is offline Docker;
+    `SHELL_ENVIRONMENT=host` is an explicit unisolated opt-in.
 - Plugin customization examples
   - `4_1_custom_action_executor_plugin_local.py`
   - `4_2_custom_action_runtime_plugin_local.py`
   - `4_3_custom_action_flow_plugin_local.py`
+- Programmatic Action comparison
+  - `4_4_programmatic_vs_structured_deepseek.py` compares the ordinary
+    `structured_plan` Action loop with concurrent `programmatic` PTC on the same real
+    DeepSeek task and local read-only business Actions. It also requires a
+    running Docker daemon and the local `python:3.12-slim` image.
 - Cookbook patterns
   - See `examples/cookbook/` for model-backed Action loop, router, concurrent todo, reflection, and safe shell policy patterns adapted from practical app-development training material.
 
@@ -79,5 +91,10 @@ Notes:
 - `3_3_third_party_sandlock_action_deepseek.py` demonstrates a Linux SandLock third-party sandbox executor registered through the new `ActionExecutor` plugin type.
 - `3_4_third_party_docker_sandbox_action_deepseek.py` demonstrates a local Docker third-party sandbox executor registered through the new `ActionExecutor` plugin type.
 - `4_1` to `4_3` focus on extension points for `ActionExecutor`, `ActionRuntime`, and `ActionFlow`, and also run through an agent with DeepSeek for the final reply.
+- `4_4` is the real-model PTC effect example. It prints both structured final
+  results plus observed model-request, business-Action-call, and elapsed counts;
+  compare each result with the source-grounded projection in the file. A
+  sampled structured result may be incomplete even when its Action calls
+  succeed; fewer model rounds do not imply lower total tokens or latency.
 - The SandLock example requires Linux 6.7+ and `pip install sandlock`.
 - The Docker sandbox example requires a local Docker daemon that is running and not paused. It auto-pulls `alpine:3.20` when the image is not available locally.

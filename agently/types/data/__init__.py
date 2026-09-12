@@ -33,6 +33,13 @@ class AVOID_COPY:
 
 EMPTY = AVOID_COPY()
 
+from .output import LongContent
+from .shell import (
+    ShellLanguage as ShellLanguage, ShellEnvironment as ShellEnvironment,
+    ShellApproval as ShellApproval, ShellEffect as ShellEffect,
+    ShellRisk as ShellRisk, ShellRiskHandler as ShellRiskHandler, ShellResult as ShellResult,
+)
+
 from .context import (
     ContextBlock,
     ContextBudget,
@@ -93,6 +100,7 @@ from .request import (
     APIKeySelectionContext,
     AgentlyRequestData,
     AgentlyRequestDataDict,
+    ModelProfileResolution,
 )
 
 from .response import (
@@ -172,6 +180,9 @@ from .task_board import (
 )
 
 from .action import (
+    PROGRAMMATIC_ACTION_ARTIFACT_READ_ID,
+    PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION,
+    PROGRAMMATIC_ACTION_TRANSPORT_ID,
     ActionApproval,
     ActionArtifact,
     ActionCall,
@@ -179,12 +190,19 @@ from .action import (
     ActionDiagnostic,
     ActionPolicy,
     ActionPlanningRequest,
+    ActionPlanningObservation as ActionPlanningObservation,
     ActionExecutionRequest,
     ActionResult,
     ActionRunContext,
+    ActionPlanningProtocol,
+    ActionConcurrencyMode,
     ActionSideEffectLevel,
     ActionSpec,
     ActionStatus,
+    ProgrammaticActionCatalog as ProgrammaticActionCatalog,
+    ProgrammaticActionCatalogEntry,
+    ProgrammaticActionDecision,
+    ProgrammaticActionObservation as ProgrammaticActionObservation,
 )
 
 from .capability import (
@@ -206,6 +224,14 @@ from .execution_resource import (
 )
 
 from .code_execution import (
+    CodeExecutionBinding,
+    CodeExecutionBindingConcurrencyMode,
+    CodeExecutionBindingCallRecord,
+    CodeExecutionBindingError,
+    CodeExecutionBindingLimits,
+    CodeExecutionBindingStatus,
+    CodeExecutionBindingSummary,
+    CodeExecutionSchemaValidationError,
     CodeExecutionBundle,
     CodeExecutionFile,
     CodeExecutionFileRole,
@@ -216,8 +242,12 @@ from .code_execution import (
     CodeExecutionStep,
     CodeExecutionStepRole,
     CodeExecutionToolchainRequirement,
+    code_execution_json_bytes,
+    normalize_code_execution_json_value,
     required_code_execution_isolation,
     resolve_code_execution_workspace_uri,
+    validate_code_execution_json_schema_definition,
+    validate_code_execution_json_schema,
 )
 
 from .execution_plan import (
@@ -262,6 +292,7 @@ from .blocks import (
 )
 
 from .execution_exchange import (
+    AgentInteractionHandler,
     ExchangeRoutingHandler,
     ExecutionExchangeDispatchState,
     ExecutionExchangeKind,
@@ -288,7 +319,7 @@ from .skill import (
     SkillRuntimeStreamItem,
     SkillSourceRequest,
     SkillSourceSnapshot,
-    SkillScriptAuthorization,
+    SkillScriptAuthorization as SkillScriptAuthorization,
     redact_skill_source,
 )
 
@@ -313,9 +344,13 @@ from .record_store import (
 )
 
 from .agent_execution import (
+    AgentExecutionControlResult as AgentExecutionControlResult,
+    AgentExecutionControlCapabilities as AgentExecutionControlCapabilities,
+    AgentExecutionName,
     ActionArtifactReleaseDiagnostic,
     ActionArtifactReleaseDiagnostics,
     AgentExecutionDiagnostics,
+    AgentExecutionEffort as AgentExecutionEffort,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
@@ -324,6 +359,7 @@ from .agent_execution import (
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
     AgentExecutionRecordRefs,
+    AgentExecutionStrategy as AgentExecutionStrategy,
     CapabilityKind,
     CapabilityRoute,
     EvidenceRequirement,
@@ -331,6 +367,24 @@ from .agent_execution import (
     GuidanceAccess,
     PlannerCapabilityCandidate,
     PlannerCapabilitySummary,
+)
+
+from .agent_review import (
+    AgentReviewQuality as AgentReviewQuality,
+    AgentReviewFailureAction as AgentReviewFailureAction,
+    AgentReviewIssue as AgentReviewIssue,
+    AgentReviewCheck as AgentReviewCheck,
+    AgentReviewContext as AgentReviewContext,
+    AgentReviewHandler as AgentReviewHandler,
+    AgentReviewHandlerResult as AgentReviewHandlerResult,
+    AgentReviewResult as AgentReviewResult,
+)
+
+from .agent_artifact import (
+    AgentArtifactContext as AgentArtifactContext,
+    AgentArtifactHandler as AgentArtifactHandler,
+    AgentArtifactHandlerResult as AgentArtifactHandlerResult,
+    AgentArtifactResult as AgentArtifactResult,
 )
 
 from .attempt import (

@@ -14,6 +14,33 @@ The middle layer of Agently's three-layer action stack: `TriggerFlow` (top, orch
 
 `ActionRuntime`, `ActionFlow`, and `ActionExecutor` are now the public plugin types. The older `ToolManager` plugin type is kept for legacy use only and emits deprecation warnings. See [Action Runtime](../actions/action-runtime.md).
 
+## Agent Interaction Handler
+
+The standard request-local callback bound with
+`AgentExecution.interact(handler)`. It receives a normalized
+`ExecutionExchangeView` only when an existing behavior or Action opens a
+connected human-in-the-loop exchange, and returns that exchange's response
+payload. It neither decides when interaction is required nor creates another
+wait/resume lifecycle. ExecutionExchange remains the provider/envelope owner,
+TriggerFlow remains the pause/resume owner, and durable integrations continue
+to use registered ExecutionExchange providers and routing settings.
+
+## AgentExecution Plugin
+
+The registered execution class selected by `agent.create_execution(name)`.
+The returned object itself owns the draft, production, terminal policies and
+result readers; Agent owns reusable defaults and capabilities. Built-ins are
+`auto`, `request`, `long_task`, `plan`, and `long_content`. Components such as
+ModelRequest, task planning and TriggerFlow can be nested inside that owner.
+
+`.goal(...)` declares goals and, by default, enables long-task convenience.
+Use `turn_on_long_task=False` for semantic goals without that switch. Explicit
+producer or strategy selection remains authoritative. The unreleased Pattern
+selector has been replaced; released AgentTask and AgentOrchestrator names
+remain compatibility entrypoints, not parallel default owners.
+
+See [Execution plugins](../start/auto-orchestration.md#execution-plugins).
+
 ## auto_close / auto_close_timeout
 
 Settings on a TriggerFlow execution. With `auto_close=True` (the default), the execution closes itself after `auto_close_timeout` seconds of idle. Hidden execution sugar (`flow.start()` / `flow.async_start()`) defaults to `auto_close_timeout=0.0`. `flow.start(auto_close=False)` is illegal and raises.
@@ -98,6 +125,16 @@ Flow-scoped shared data. Calling `get_flow_data(...)` / `set_flow_data(...)` and
 
 The three protocol-level model request plugins: `OpenAICompatible`, `OpenAIResponsesCompatible`, and `AnthropicCompatible`. Most Chat Completions compatible providers configure `OpenAICompatible`; Responses API-shaped endpoints use `OpenAIResponsesCompatible`; Claude configures `AnthropicCompatible`. See [Models Overview](../models/overview.md).
 
+## Programmatic Action Calling (PTC)
+
+An ActionRuntime planning protocol in which one bounded model-generated Python
+program calls eligible read-only, replay-safe Actions and returns a compact
+projection. `PTC` is documentation shorthand; the public API value is
+`planning_protocol="programmatic"`. It owns ephemeral micro-orchestration inside
+one Action round, not TaskDAG/TriggerFlow lifecycle, approval, persistence, or
+live-interpreter recovery. See
+[Programmatic Action Calling](../actions/programmatic-action-calling.md).
+
 ## Runtime resources
 
 Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load execution snapshots; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.
@@ -112,9 +149,18 @@ A per-execution stream of items emitted by chunks via `data.put_into_stream(...)
 
 The owner of installed real-world Skill packages: discovery, validation,
 immutable revisions, trust state, resource graphs, and exact resource reads.
-Skill guidance reaches a task through a `TaskContext` source; authorized Skill
-scripts bind as ordinary Workspace-backed CodeExecution Actions. SkillLibrary
-does not select task routes or execute Skills. See
+Skill guidance reaches a task through a `TaskContext` source. Authorized Skill
+scripts execute through one stable restricted CodeExecution Action definition
+per Agent/language, with authorization and visibility bound only to the current
+execution; scripts are resources, not separately
+discovered Action candidates. SkillLibrary does not select task routes or
+execute Skills. It is not automatically exposed as a model-visible candidate
+set. Skills compose like Actions:
+`agent.use_skills(..., always=True)` supplies Agent defaults and
+`execution.use_skills(...)` supplies one-run additions; AgentExecution freezes
+their exact revisions for that run. A later user message creates a fresh
+AgentExecution and selects against its current task; Session carries only
+conversation and memory. See
 [SkillsExecutor Migration](../development/skills-executor.md).
 
 ## seal / sealed
@@ -177,3 +223,10 @@ A reserved state key written by the deprecated `set_result()` and `.end()` paths
 ## wait_for_result=
 
 Deprecated parameter on `flow.start()`, `flow.async_start()`, `start_execution()`, `execution.start()`, and friends. The value is now **ignored** with a warning; return shape is controlled by `auto_close` (and the choice between hidden sugar and explicit execution).
+
+## Audio capability (4.1.4.8 development)
+
+`AudioModelRequest` owns independent TTS/STT calls; `AudioModelRequester` is its
+replaceable transport plugin. `AudioCapability` is the complete replaceable Agent
+binding contract. These are not text Prompt or AgentExecution modes. See
+[Audio requests](../models/audio.md) for streaming and dependency boundaries.

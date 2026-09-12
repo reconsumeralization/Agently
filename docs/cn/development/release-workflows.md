@@ -229,6 +229,16 @@ release PR body 或 review notes 应列出本次运行的锁定 examples、纳�
 保留了既有开发者可见用法形态。不要为了让 release gate 通过而静默把锁定 example 替换成
 新模式。
 
+Pull request 使用
+`python scripts/check_changed_python_quality.py --base <reviewed-base>` 提供快速的
+changed-file 反馈。最终 release validation 会在全量 Pyright 和 pytest 前，对完整的
+`agently`、`tests`、`examples` 与 `scripts` Python surface 运行 Ruff。有意的 package
+re-export、精确 scalar 比较和 example/bootstrap import ordering 只能使用窄范围
+path-level 例外；AgentTask mixin 必须显式声明各自的 `TaskShared` 依赖。不要为了让
+branch 通过而增加全局 ignore。新增或实质修改的 runtime 路径还应在
+`-W error::RuntimeWarning` 下运行。兼容性测试若故意触发 warning，应在测试中明确
+表达，不能在全仓静默屏蔽所有 warning。
+
 ## Release PR 正文
 
 从 `dev` 到 `main` 的 release PR 必须包含足够信息，让 reviewer 不需要重新从 commit
@@ -272,6 +282,11 @@ Agently-Stage），先运行 typing 与测试；随后 publish job 检测 Agentl
 提升 package version，也不要改为本地手工上传。
 
 PyPI 项目列表页展示的是包元数据 `Summary`，来源于 `pyproject.toml` 的 `[project].description`。项目内页展示完整 README，来源于 `[project].readme`。
+
+将该 workflow 迁移到 PyPI Trusted Publishing 前，必须先同时准备 OIDC 信任关系的
+两端：受保护的 GitHub `pypi` environment，以及与本仓库/workflow/environment 精确
+匹配的 PyPI project publisher。两边核验完成后，再用一次经过 review 的变更替换
+token 发布。只准备好仓库侧时，不要删除仍可用的发布凭据。
 
 准备 release 时：
 

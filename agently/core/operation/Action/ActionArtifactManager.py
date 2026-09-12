@@ -39,6 +39,7 @@ from .ActionNormalization import normalize_execution_record
 
 class ActionArtifactManager:
     _RECALL_ACTION_ID = "read_action_artifact"
+    _PROGRAMMATIC_TRANSPORT_ID = "run_action_program"
     _MODEL_VISIBLE_RECORD_MAX_BYTES = 6000
     _MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES = 2400
     _MODEL_VISIBLE_INSTRUCTION_MAX_BYTES = 1200
@@ -52,6 +53,7 @@ class ActionArtifactManager:
         "sqlite",
         "browse",
         "search",
+        "programmatic_action",
     }
     _INSTRUCTION_HEAVY_KWARGS = {
         "cmd",
@@ -59,6 +61,7 @@ class ActionArtifactManager:
         "python_code",
         "js_code",
         "code",
+        "program",
         "query",
         "sql",
         "url",
@@ -218,10 +221,7 @@ class ActionArtifactManager:
                 seen.add(item_id)
                 meta = item.get("meta")
                 item_scope = meta.get("artifact_scope") if isinstance(meta, dict) else None
-                if (
-                    item.get("selection_key")
-                    or item.get("artifact_id") and item_scope == normalized_scope
-                ):
+                if item.get("selection_key") or item.get("artifact_id") and item_scope == normalized_scope:
                     item["available"] = False
                     item["full_value_available"] = False
                 for nested in item.values():
@@ -663,6 +663,21 @@ class ActionArtifactManager:
         kwargs = record.get("kwargs", {})
         if not isinstance(kwargs, dict):
             return {}
+        if str(record.get("action_id") or "") == self._PROGRAMMATIC_TRANSPORT_ID and isinstance(
+            kwargs.get("program"), str
+        ):
+            program = str(kwargs["program"])
+            raw = program.encode("utf-8", errors="replace")
+            return {
+                "kind": "program",
+                "program_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "program_bytes": len(raw),
+                "description": self._compact_text(kwargs.get("description", ""), limit=800),
+                "catalog_revision": self._compact_text(
+                    kwargs.get("catalog_revision", ""),
+                    limit=100,
+                ),
+            }
         for key in ("cmd", "command", "python_code", "js_code", "code", "query", "sql", "url"):
             if key in kwargs:
                 return {
@@ -670,6 +685,102 @@ class ActionArtifactManager:
                     "preview": self._compact_value(kwargs.get(key), limit=6000),
                 }
         return self._compact_value(kwargs, limit=4000)
+
+    @classmethod
+    def _programmatic_result_preview(
+        cls,
+        value: Any,
+        *,
+        max_bytes: int,
+    ) -> Any:
+        """Preserve one deliberate outer JSON projection before evidence detail.
+
+        Generic Action compaction limits recursive mapping depth because most
+        instruction-heavy results are diagnostic carriers. A programmatic
+        result is different: ``data.value`` is the model-authored projection
+        intended for the next request. Preserve the complete redacted JSON
+        shape when it fits, then prioritize that value over logs and subcall
+        evidence under real byte pressure.
+        """
+
+        safe_value = cls._redact_value(value)
+        if cls._safe_json_size(safe_value) <= max_bytes:
+            return deepcopy(safe_value)
+
+        if not isinstance(safe_value, Mapping):
+            raw = cls._json_bytes(safe_value)
+            return {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(raw),
+                "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            }
+
+        projected: dict[str, Any] = {}
+        outer_value = safe_value.get("value")
+        outer_raw = cls._json_bytes(outer_value)
+        outer_budget = max(400, max_bytes - 800)
+        projected["value"] = (
+            deepcopy(outer_value)
+            if len(outer_raw) <= outer_budget
+            else {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(outer_raw),
+                "sha256": "sha256:" + hashlib.sha256(outer_raw).hexdigest(),
+            }
+        )
+
+        logs = safe_value.get("logs", [])
+        if isinstance(logs, list):
+            projected["logs"] = [cls._bounded_runtime_text(item, max_bytes=400) for item in logs[:20]]
+            if len(logs) > 20:
+                projected["logs_omitted_count"] = len(logs) - 20
+        projected["logs_truncated"] = bool(safe_value.get("logs_truncated", False))
+
+        evidence = safe_value.get("subcall_evidence", [])
+        if isinstance(evidence, list):
+            compact_evidence: list[dict[str, Any]] = []
+            for item in evidence[:20]:
+                if not isinstance(item, Mapping):
+                    continue
+                compact_evidence.append(
+                    {
+                        key: deepcopy(item.get(key))
+                        for key in (
+                            "action_call_id",
+                            "action_id",
+                            "status",
+                            "success",
+                        )
+                        if item.get(key) is not None
+                    }
+                )
+            projected["subcall_evidence"] = compact_evidence
+            if len(evidence) > len(compact_evidence):
+                projected["subcall_evidence_omitted_count"] = len(evidence) - len(compact_evidence)
+
+        if cls._safe_json_size(projected) > max_bytes:
+            projected["subcall_evidence"] = {
+                "omitted": True,
+                "count": len(evidence) if isinstance(evidence, list) else 0,
+            }
+            projected.pop("subcall_evidence_omitted_count", None)
+        if cls._safe_json_size(projected) > max_bytes:
+            log_count = len(logs) if isinstance(logs, list) else 0
+            projected["logs"] = {
+                "omitted": True,
+                "count": log_count,
+            }
+            projected.pop("logs_omitted_count", None)
+        if cls._safe_json_size(projected) > max_bytes:
+            projected["value"] = {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(outer_raw),
+                "sha256": "sha256:" + hashlib.sha256(outer_raw).hexdigest(),
+            }
+        return projected
 
     def _build_execution_digest(
         self,
@@ -679,7 +790,11 @@ class ActionArtifactManager:
         redaction_report: list[str],
     ) -> dict[str, Any]:
         data = record.get("data", record.get("result"))
-        result_preview = self._compact_value(data, limit=8000)
+        result_preview = (
+            self._programmatic_result_preview(data, max_bytes=8000)
+            if str(record.get("action_id") or "") == self._PROGRAMMATIC_TRANSPORT_ID
+            else self._compact_value(data, limit=8000)
+        )
         result_size = self._safe_json_size(data)
         result_preview_size = self._safe_json_size(result_preview)
         digest: dict[str, Any] = {
@@ -702,7 +817,12 @@ class ActionArtifactManager:
         }
         error = record.get("error", "")
         if isinstance(error, str) and error:
-            digest["error"] = self._compact_text(error, limit=4000)
+            digest["error"] = (
+                "Programmatic Action execution failed; inspect retained diagnostics "
+                "and log refs for host-side details."
+                if str(record.get("action_id") or "") == self._PROGRAMMATIC_TRANSPORT_ID
+                else self._compact_text(error, limit=4000)
+            )
         diagnostics = record.get("diagnostics", [])
         if isinstance(diagnostics, list) and diagnostics:
             digest["diagnostics"] = self._compact_value(diagnostics, limit=4000)
@@ -781,13 +901,35 @@ class ActionArtifactManager:
 
     # ── result finalization ────────────────────────────────────────────────
 
+    @classmethod
+    def _is_finalized_action_carrier(cls, record: Any) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        data = record.get("data")
+        model_digest = record.get("model_digest")
+        result = record.get("result")
+        if not (isinstance(data, Mapping) and isinstance(model_digest, Mapping) and isinstance(result, Mapping)):
+            return False
+        if data.get("same_as") != "result" or model_digest.get("same_as") != "result":
+            return False
+        marker_keys = (
+            "carrier_compacted",
+            "hot_path_compacted",
+            "explicit_recall_transfer",
+        )
+        return any(data.get(key) is True and model_digest.get(key) is True for key in marker_keys)
+
     def finalize_action_result(
         self,
         result: Any,
         *,
         artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionResult:
-        record = normalize_execution_record(result, None, 0) if not isinstance(result, dict) else cast(ActionResult, result)
+        record = (
+            normalize_execution_record(result, None, 0) if not isinstance(result, dict) else cast(ActionResult, result)
+        )
+        if self._is_finalized_action_carrier(record):
+            return cast(ActionResult, deepcopy(record))
         meta = record.get("meta", {})
         if not isinstance(meta, dict):
             meta = {}
@@ -831,10 +973,7 @@ class ActionArtifactManager:
             artifact_scope=artifact_scope,
         )
 
-        result_exceeds_inline_limit = (
-            self._safe_json_size(data) > 8000
-            or meta.get("max_output_bytes_exceeded") is True
-        )
+        result_exceeds_inline_limit = self._safe_json_size(data) > 8000 or meta.get("max_output_bytes_exceeded") is True
         should_externalize = self._is_instruction_heavy_record(record) or result_exceeds_inline_limit
         file_refs = self._collect_file_refs(record)
         if file_refs:
@@ -913,8 +1052,13 @@ class ActionArtifactManager:
         seen_call_ids: set[str] = set()
         for index, record in enumerate(records):
             command = commands[index] if index < len(commands) else None
+            candidate = (
+                record
+                if self._is_finalized_action_carrier(record)
+                else normalize_execution_record(record, command, index)
+            )
             finalized = self.finalize_action_result(
-                normalize_execution_record(record, command, index),
+                candidate,
                 artifact_scope=artifact_scope,
             )
             action_call_id = str(finalized.get("action_call_id", ""))
@@ -984,10 +1128,7 @@ class ActionArtifactManager:
             return {
                 "type": "sequence",
                 "item_count": len(items),
-                "items": [
-                    cls._to_runtime_error_argument_fact(item, depth=depth + 1)
-                    for item in items[:20]
-                ],
+                "items": [cls._to_runtime_error_argument_fact(item, depth=depth + 1) for item in items[:20]],
                 "omitted_item_count": max(0, len(items) - 20),
             }
         if isinstance(value, (int, float, bool)) or value is None:
@@ -1049,24 +1190,16 @@ class ActionArtifactManager:
 
         argument_facts = [cls._to_runtime_error_argument_fact(value) for value in error.args]
         opaque_arguments = [value for value in error.args if isinstance(value, (str, bytes, bytearray))]
-        message = (
-            "Opaque exception message redacted."
-            if opaque_arguments
-            else "Structured exception details redacted."
-        )
+        message = "Opaque exception message redacted." if opaque_arguments else "Structured exception details redacted."
 
         traceback_lines: list[str] = []
         current: BaseException | None = error
         seen: set[int] = set()
         while current is not None and id(current) not in seen and len(seen) < 4:
             seen.add(id(current))
-            traceback_lines.append(
-                f"{current.__class__.__module__}.{current.__class__.__name__}: stack frames"
-            )
+            traceback_lines.append(f"{current.__class__.__module__}.{current.__class__.__name__}: stack frames")
             for frame in traceback.extract_tb(current.__traceback__, limit=20):
-                traceback_lines.append(
-                    f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
-                )
+                traceback_lines.append(f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}')
             next_error = current.__cause__
             if next_error is None and not current.__suppress_context__:
                 next_error = current.__context__
@@ -1127,15 +1260,28 @@ class ActionArtifactManager:
         action_input = command.get("action_input", command.get("tool_kwargs", {}))
         if not isinstance(action_input, dict):
             action_input = {}
+        action_id = str(command.get("action_id", command.get("tool_name", "")))
+        if action_id == cls._PROGRAMMATIC_TRANSPORT_ID and isinstance(action_input.get("program"), str):
+            program = str(action_input["program"])
+            raw = program.encode("utf-8", errors="replace")
+            action_input = {
+                "description": cls._compact_text(
+                    action_input.get("description", ""),
+                    limit=800,
+                ),
+                "catalog_revision": cls._compact_text(
+                    action_input.get("catalog_revision", ""),
+                    limit=100,
+                ),
+                "program_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "program_bytes": len(raw),
+            }
         policy_override = command.get("policy_override", {})
         if not isinstance(policy_override, dict):
             policy_override = {}
         return {
             "purpose": cls._compact_text(command.get("purpose", ""), limit=800),
-            "action_id": cls._compact_text(
-                command.get("action_id", command.get("tool_name", "")),
-                limit=400,
-            ),
+            "action_id": cls._compact_text(action_id, limit=400),
             "action_input": cls._compact_hot_path_field(
                 cls._redact_value(action_input),
                 max_bytes=2400,
@@ -1193,6 +1339,27 @@ class ActionArtifactManager:
                 max_bytes=1200,
             ),
         }
+        planning_observation = decision.get("planning_observation")
+        if isinstance(planning_observation, Mapping):
+            projected["planning_observation"] = {
+                key: value
+                for key, value in planning_observation.items()
+                if key
+                in {
+                    "planning_protocol",
+                    "sdk_renderer_version",
+                    "eligible_action_count",
+                    "ineligible_action_count",
+                    "sdk_bytes",
+                    "contract_bytes",
+                    "program_bytes",
+                }
+                and (
+                    isinstance(value, str)
+                    if key in {"planning_protocol", "sdk_renderer_version"}
+                    else isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                )
+            }
         if omitted_count:
             projected["omitted_action_call_count"] = omitted_count
         return projected
@@ -1200,6 +1367,38 @@ class ActionArtifactManager:
     @classmethod
     def _to_runtime_visible_record(cls, record: ActionResult) -> ActionResult:
         visible = cast(ActionResult, cls._redact_value(cls._to_model_visible_record(record)))
+        record_meta = record.get("meta")
+        programmatic_observation = (
+            record_meta.get("programmatic_observation")
+            if isinstance(record_meta, Mapping)
+            else None
+        )
+        if isinstance(programmatic_observation, Mapping):
+            visible["meta"] = {
+                "programmatic_observation": {
+                    key: value
+                    for key, value in programmatic_observation.items()
+                    if key
+                    in {
+                        "sdk_renderer_version",
+                        "eligible_action_count",
+                        "ineligible_action_count",
+                        "sdk_bytes",
+                        "contract_bytes",
+                        "program_bytes",
+                        "wrapper_bytes",
+                        "binding_call_count",
+                        "successful_binding_calls",
+                        "failed_binding_calls",
+                        "peak_active_binding_calls",
+                    }
+                    and (
+                        isinstance(value, str)
+                        if key == "sdk_renderer_version"
+                        else isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    )
+                }
+            }
         if cls._safe_json_size(visible) <= 12000:
             return visible
         compact = cast(
@@ -1307,14 +1506,31 @@ class ActionArtifactManager:
         return visible_observation
 
     @classmethod
+    def _without_programmatic_observation_meta(cls, record: ActionResult) -> ActionResult:
+        """Keep host accounting out of the next model-facing Action record."""
+
+        projected = cls._project_model_artifact_refs(record)
+        meta = projected.get("meta")
+        if not isinstance(meta, dict) or "programmatic_observation" not in meta:
+            return projected
+        projected = cast(ActionResult, dict(projected))
+        projected_meta = dict(meta)
+        projected_meta.pop("programmatic_observation", None)
+        if projected_meta:
+            projected["meta"] = projected_meta
+        else:
+            projected.pop("meta", None)
+        return projected
+
+    @classmethod
     def _to_model_visible_record(cls, record: ActionResult) -> ActionResult:
         if not isinstance(record, dict):
             return record
         digest = record.get("model_digest")
         if not isinstance(digest, dict):
-            return cls._project_model_artifact_refs(record)
+            return cls._without_programmatic_observation_meta(record)
         if digest.get("same_as") == "result" and isinstance(record.get("result"), dict):
-            return cls._project_model_artifact_refs(record)
+            return cls._without_programmatic_observation_meta(record)
         visible_digest = (
             dict(digest)
             if (
@@ -1323,18 +1539,21 @@ class ActionArtifactManager:
             )
             else cls._to_hot_path_digest(digest)
         )
-        visible = cast(ActionResult, {
-            "action_call_id": record.get("action_call_id", visible_digest.get("action_call_id", "")),
-            "action_id": record.get("action_id", visible_digest.get("action_id", "")),
-            "tool_name": record.get("tool_name", record.get("action_id", visible_digest.get("action_id", ""))),
-            "purpose": record.get("purpose", visible_digest.get("purpose", "")),
-            "status": record.get("status", visible_digest.get("status", "")),
-            "success": bool(record.get("success", visible_digest.get("success", False))),
-            "ok": bool(record.get("ok", record.get("success", visible_digest.get("success", False)))),
-            "todo_suggestion": record.get("todo_suggestion", record.get("next", "")),
-            "next": record.get("next", record.get("todo_suggestion", "")),
-            "executor_type": record.get("executor_type", visible_digest.get("executor_type", "")),
-        })
+        visible = cast(
+            ActionResult,
+            {
+                "action_call_id": record.get("action_call_id", visible_digest.get("action_call_id", "")),
+                "action_id": record.get("action_id", visible_digest.get("action_id", "")),
+                "tool_name": record.get("tool_name", record.get("action_id", visible_digest.get("action_id", ""))),
+                "purpose": record.get("purpose", visible_digest.get("purpose", "")),
+                "status": record.get("status", visible_digest.get("status", "")),
+                "success": bool(record.get("success", visible_digest.get("success", False))),
+                "ok": bool(record.get("ok", record.get("success", visible_digest.get("success", False)))),
+                "todo_suggestion": record.get("todo_suggestion", record.get("next", "")),
+                "next": record.get("next", record.get("todo_suggestion", "")),
+                "executor_type": record.get("executor_type", visible_digest.get("executor_type", "")),
+            },
+        )
         visible["result"] = visible_digest
         preview_meta = visible_digest.get("result_preview_meta")
         hot_path_compacted = isinstance(preview_meta, dict) and preview_meta.get("hot_path_compacted") is True
@@ -1353,16 +1572,21 @@ class ActionArtifactManager:
             visible["data"] = visible_digest
             visible["model_digest"] = visible_digest
         artifact_refs = visible_digest.get("artifact_refs", [])
-        visible["artifact_refs"] = [
-            cls._to_model_selection_candidate(ref)
-            for ref in artifact_refs
-            if isinstance(ref, dict)
-        ] if isinstance(artifact_refs, list) else []
+        visible["artifact_refs"] = (
+            [cls._to_model_selection_candidate(ref) for ref in artifact_refs if isinstance(ref, dict)]
+            if isinstance(artifact_refs, list)
+            else []
+        )
         if isinstance(visible.get("result"), dict):
             visible["result"]["artifact_refs"] = visible["artifact_refs"]
         visible["artifacts"] = visible["artifact_refs"]
         if record.get("error"):
-            visible["error"] = cls._compact_text(record.get("error"), limit=1200)
+            visible["error"] = (
+                "Programmatic Action execution failed; inspect retained diagnostics "
+                "and log refs for host-side details."
+                if str(record.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
+                else cls._compact_text(record.get("error"), limit=1200)
+            )
         return visible
 
     @classmethod
@@ -1370,6 +1594,58 @@ class ActionArtifactManager:
         if not isinstance(records, list):
             return []
         return [cls._to_model_visible_record(record) for record in records]
+
+    @classmethod
+    def to_model_planning_records(cls, records: list[ActionResult] | None) -> list[ActionResult]:
+        """Keep decision evidence while omitting host-only execution mechanics."""
+
+        if not isinstance(records, list):
+            return []
+        projected: list[ActionResult] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            item = cast(
+                ActionResult,
+                {
+                    "action_call_id": record.get("action_call_id", ""),
+                    "action_id": record.get("action_id", record.get("tool_name", "")),
+                    "purpose": cls._compact_text(record.get("purpose", ""), limit=800),
+                    "status": record.get("status", ""),
+                    "success": bool(record.get("success", record.get("ok", False))),
+                },
+            )
+            if record.get("error") not in (None, ""):
+                item["error"] = cls._compact_text(record.get("error"), limit=1200)
+            suggestion = record.get("todo_suggestion", record.get("next"))
+            if suggestion not in (None, ""):
+                item["todo_suggestion"] = cls._compact_text(suggestion, limit=800)
+            result = record.get("result", record.get("data"))
+            if isinstance(result, dict):
+                result = {
+                    str(key): value
+                    for key, value in result.items()
+                    if str(key) not in {"meta", "model_digest", "artifacts"}
+                }
+            if result not in (None, "", {}, []):
+                item["result"] = cls._compact_value(result, limit=3000)
+            artifact_refs = record.get("artifact_refs")
+            if isinstance(artifact_refs, list) and artifact_refs:
+                planning_refs = [
+                    cls._to_model_selection_candidate(ref)
+                    for ref in artifact_refs[:20]
+                    if isinstance(ref, dict)
+                ]
+                item["artifact_refs"] = planning_refs
+                result_item = item.get("result")
+                if isinstance(result_item, dict):
+                    # The generic bounded-value projection may compact nested
+                    # artifact refs into structural strings.  Selection refs
+                    # are an actionable model contract, so always restore the
+                    # bounded host-issued candidates after that projection.
+                    result_item["artifact_refs"] = planning_refs
+            projected.append(item)
+        return projected
 
     @classmethod
     def _to_action_flow_return_records(
@@ -1391,19 +1667,22 @@ class ActionArtifactManager:
                 and isinstance(model_digest, dict)
                 and model_digest.get("transfer_kind") == "explicit_action_artifact_readback"
             )
+            programmatic_transport = str(record.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
             # Normalization deliberately retains host aliases (`data`,
             # `result`, `artifact_refs`, `artifacts`). Those aliases can push a
             # modest authoritative result just above the carrier threshold even
             # though no large value is crossing the boundary. Preserve such a
             # host result; compact only when the value itself is large (or the
             # action carries instruction-heavy material).
-            should_compact = explicit_recall_transfer or (
-                record_size > cls._ACTION_CARRIER_MAX_BYTES
-                and (result_size > 8000 or cls._is_instruction_heavy_record(record))
+            should_compact = (
+                explicit_recall_transfer
+                or programmatic_transport
+                or (
+                    record_size > cls._ACTION_CARRIER_MAX_BYTES
+                    and (result_size > 8000 or cls._is_instruction_heavy_record(record))
+                )
             )
-            projected.append(
-                cls._to_action_carrier_record(record) if should_compact else record
-            )
+            projected.append(cls._to_action_carrier_record(record) if should_compact else record)
         return projected
 
     @classmethod
@@ -1424,20 +1703,21 @@ class ActionArtifactManager:
                 str(visible.get("action_id") or "") == cls._RECALL_ACTION_ID
                 and compact_digest.get("transfer_kind") == "explicit_action_artifact_readback"
             )
-            if not explicit_recall_transfer:
+            programmatic_outer_transfer = str(visible.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
+            if not explicit_recall_transfer and not programmatic_outer_transfer:
                 if "instruction" in compact_digest:
                     compact_digest["instruction"] = {"omitted": True}
                 if "result_preview" in compact_digest:
                     compact_digest["result_preview"] = {"omitted": True}
+            elif programmatic_outer_transfer:
+                preview_meta = dict(compact_digest.get("result_preview_meta") or {})
+                preview_meta["programmatic_outer_transfer"] = True
+                compact_digest["result_preview_meta"] = preview_meta
             visible["result"] = compact_digest
             visible["data"] = {
                 "same_as": "result",
                 "action_call_id": compact_digest.get("action_call_id", ""),
-                (
-                    "explicit_recall_transfer"
-                    if explicit_recall_transfer
-                    else "carrier_compacted"
-                ): True,
+                ("explicit_recall_transfer" if explicit_recall_transfer else "carrier_compacted"): True,
             }
             visible["model_digest"] = dict(visible["data"])
         return visible
@@ -1476,18 +1756,23 @@ class ActionArtifactManager:
             digest.get("instruction"),
             max_bytes=cls._MODEL_VISIBLE_INSTRUCTION_MAX_BYTES,
         )
-        compact["result_preview"] = cls._compact_hot_path_field(
-            digest.get("result_preview"),
-            max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+        compact["result_preview"] = (
+            cls._programmatic_result_preview(
+                digest.get("result_preview"),
+                max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+            )
+            if str(digest.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
+            else cls._compact_hot_path_field(
+                digest.get("result_preview"),
+                max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+            )
         )
         preview_meta = dict(digest.get("result_preview_meta") or {})
         preview_meta["hot_path_compacted"] = True
         preview_meta["hot_path_preview_size"] = cls._safe_json_size(compact["result_preview"])
         compact["result_preview_meta"] = preview_meta
         compact["artifact_refs"] = [
-            cls._compact_hot_path_artifact_ref(ref)
-            for ref in digest.get("artifact_refs", [])
-            if isinstance(ref, dict)
+            cls._compact_hot_path_artifact_ref(ref) for ref in digest.get("artifact_refs", []) if isinstance(ref, dict)
         ]
         if "artifacts" in compact:
             compact["artifacts"] = compact["artifact_refs"]
@@ -1554,8 +1839,7 @@ class ActionArtifactManager:
         primary_values = container.get("artifact_refs")
         primary_alias = (
             "artifact_refs"
-            if isinstance(primary_values, Sequence)
-            and not isinstance(primary_values, (str, bytes, bytearray))
+            if isinstance(primary_values, Sequence) and not isinstance(primary_values, (str, bytes, bytearray))
             else "artifacts"
         )
         seen_primary: set[tuple[str, str, str, str]] = set()

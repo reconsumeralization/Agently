@@ -1,11 +1,10 @@
-import os
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
 
-import asyncio
+import asyncio  # noqa: E402
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 Agently.set_settings(
     "OpenAICompatible",

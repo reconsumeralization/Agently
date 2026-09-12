@@ -50,4 +50,5 @@ if __name__ == "__main__":
 # Any OpenAI-compatible VLM can be used here; set QIANFAN_BASE_URL,
 # QIANFAN_VLM_MODEL, and QIANFAN_API_KEY or adapt those env vars for another
 # provider (Ollama, OpenAI, DeepSeek-VL, etc.).
-# debug="detail" prints the raw request/response stream to console.
+# debug="detail" prints sanitized request diagnostics and one deduplicated
+# response stream; use EventCenter when every raw event is required.

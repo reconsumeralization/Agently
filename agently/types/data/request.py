@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 from typing_extensions import TypedDict
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -25,6 +25,17 @@ class AgentlyRequestDataDict(TypedDict):
     data: dict[str, Any]
     request_options: dict[str, Any]
     request_url: str
+
+
+class ModelProfileResolution(TypedDict):
+    """Non-secret, read-only projection of one effective model profile."""
+
+    model_key: str
+    provider: str
+    model: str | None
+    base_url: str | None
+    full_url: str | None
+    auth_present: bool
 
 
 class AgentlyRequestData(BaseModel):
@@ -54,7 +65,7 @@ class AgentlyRequestData(BaseModel):
     @field_validator("stream")
     @classmethod
     def fix_stream(cls, _: bool | None):
-        if cls.request_options["stream"] == True:
+        if cls.request_options["stream"] is True:
             return True
         else:
             return False

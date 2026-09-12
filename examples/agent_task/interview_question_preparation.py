@@ -497,7 +497,6 @@ async def main(argv: list[str] | None = None):
         always=True,
     )
     agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
-    task_workspace = agent.task_workspace
     record_store = agent.record_store
 
     agent.set_agent_prompt(

@@ -19,6 +19,8 @@ from agently.types.data import (
 
 @dataclass(frozen=True)
 class BoundSkillAction:
+    """Compatibility result for one explicitly bound Skill script Action."""
+
     action_id: str
     skill_binding_id: str
     skill_revision_ref: str
@@ -26,7 +28,7 @@ class BoundSkillAction:
 
 
 class SkillActionBinder:
-    """Projects an authorized exact Skill script revision as an ordinary Action."""
+    """Compatibility adapter for one explicitly authorized Skill script."""
 
     _LANGUAGES = {
         ".py": "python",
@@ -47,7 +49,9 @@ class SkillActionBinder:
         suffix = PurePosixPath(resource_path).suffix.casefold()
         language = cls._LANGUAGES.get(suffix)
         if language is None:
-            raise ValueError(f"Skill script language is unsupported: {suffix or resource_path!r}")
+            raise ValueError(
+                f"Skill script language is unsupported: {suffix or resource_path!r}"
+            )
         return language
 
     @staticmethod
@@ -72,11 +76,18 @@ class SkillActionBinder:
     ) -> BoundSkillAction:
         if str(getattr(execution, "id", "")) != skill_binding.task_id:
             raise PermissionError("Skill binding belongs to another task execution.")
-        if not isinstance(authorization, SkillScriptAuthorization) or not authorization.auto_allow:
-            raise PermissionError("Skill script authorization requires explicit auto_allow=True.")
+        if (
+            not isinstance(authorization, SkillScriptAuthorization)
+            or not authorization.auto_allow
+        ):
+            raise PermissionError(
+                "Skill script authorization requires explicit auto_allow=True."
+            )
         package = self.library.resolve(skill_binding.revision_ref)
         if package.revision_ref != skill_binding.revision_ref or package.trust != "trusted":
-            raise PermissionError("Skill script execution requires a trusted exact revision.")
+            raise PermissionError(
+                "Skill script execution requires a trusted exact revision."
+            )
         descriptor = package.resource(resource_path)
         if descriptor.kind != "script" or not descriptor.executable:
             raise PermissionError("Skill resource is not an executable script.")
@@ -89,7 +100,9 @@ class SkillActionBinder:
             else ["docker"]
         )
         if not isinstance(configured_providers, list) or not configured_providers:
-            raise ValueError("code_execution.providers must be a non-empty ordered list.")
+            raise ValueError(
+                "code_execution.providers must be a non-empty ordered list."
+            )
         execution.action.register_action(
             action_id=action_id,
             desc=f"Run the authorized {package.name} Skill script {resource_path}.",
@@ -130,11 +143,18 @@ class SkillActionBinder:
                 "expected_outputs": list(authorization.expected_outputs),
             },
         )
-        local_action_ids = getattr(execution, "local_action_ids", None)
-        if not isinstance(local_action_ids, list):
-            raise TypeError("AgentExecution.local_action_ids must be a list.")
-        if action_id not in local_action_ids:
-            local_action_ids.append(action_id)
+        # Use the ordinary Action composition path so tags and execution-local
+        # visibility stay consistent with every other Action. Keep the narrow
+        # list fallback for released direct binder callers with a small adapter.
+        use_actions = getattr(execution, "use_actions", None)
+        if callable(use_actions):
+            use_actions(action_id)
+        else:
+            local_action_ids = getattr(execution, "local_action_ids", None)
+            if not isinstance(local_action_ids, list):
+                raise TypeError("AgentExecution.local_action_ids must be a list.")
+            if action_id not in local_action_ids:
+                local_action_ids.append(action_id)
         return BoundSkillAction(
             action_id=action_id,
             skill_binding_id=skill_binding.binding_id,

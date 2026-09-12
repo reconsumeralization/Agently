@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from agently.builtins.plugins.ExecutionResourceProvider.Shell import BashExecutor
+
 
 DEFAULT_SAFE_CMD_PREFIXES = [
     "pwd",
@@ -60,6 +62,8 @@ def normalize_command_argv(cmd: str | Sequence[str]) -> list[str]:
 
 
 class Cmd:
+    """Legacy argv/Action adapter; native execution belongs to the new executor."""
+
     def __init__(
         self,
         *,
@@ -71,9 +75,7 @@ class Cmd:
         output_artifact_dir: str | Path | None = None,
     ):
         self.allowed_cmd_prefixes = set(
-            allowed_cmd_prefixes
-            if allowed_cmd_prefixes is not None
-            else DEFAULT_SAFE_CMD_PREFIXES
+            allowed_cmd_prefixes if allowed_cmd_prefixes is not None else DEFAULT_SAFE_CMD_PREFIXES
         )
         self._allowed_cmd_prefix_tokens = [
             self._normalize_cmd(prefix)
@@ -89,6 +91,7 @@ class Cmd:
         self.env = env
         self.max_output_chars = max(1, int(max_output_chars))
         self.output_artifact_dir = Path(output_artifact_dir).resolve() if output_artifact_dir is not None else None
+        self._executor = BashExecutor()
 
     def register_actions(
         self,
@@ -100,7 +103,7 @@ class Cmd:
         default_policy: dict | None = None,
     ) -> list[str]:
         prefix = action_prefix.strip()
-        action_id = f"{ prefix }cmd" if prefix else "cmd"
+        action_id = f"{prefix}cmd" if prefix else "cmd"
         action.register_action(
             action_id=action_id,
             desc=(
@@ -183,9 +186,7 @@ class Cmd:
                 0,
                 -1,
             ):
-                if tuple(root_parts[-prefix_size:]) != tuple(
-                    requested_parts[:prefix_size]
-                ):
+                if tuple(root_parts[-prefix_size:]) != tuple(requested_parts[:prefix_size]):
                     continue
                 return root.joinpath(*requested_parts[prefix_size:]).resolve()
             return (root / requested).resolve()
@@ -235,13 +236,9 @@ class Cmd:
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
         try:
-            result = subprocess.run(
-                args,
-                cwd=str(workdir_path),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                env=self.env,
+            # Exact argv delegation never invokes Bash, including on Windows.
+            result = await self._executor.run_argv(
+                args, workdir=workdir_path, timeout=self.timeout, env=self.env
             )
         except subprocess.TimeoutExpired as error:
             stdout, stdout_truncated, stdout_artifact = self._bounded_output("stdout", error.stdout or "")

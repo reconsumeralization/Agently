@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from httpx import AsyncClient
+
 from .modules.types import OpenAIResponsesCompatibleSettings
-from .plugin import AsyncClient, OpenAIResponsesCompatible
+from .plugin import OpenAIResponsesCompatible
 
 __all__ = [
     "AsyncClient",

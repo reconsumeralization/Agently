@@ -28,7 +28,7 @@ from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import Settings, SettingsNamespace
 from agently.types.data import StreamingData
 from agently.core.application.AgentExecution import AgentExecutionStream
-from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routing import HybridRoutePlanner
+from agently.builtins.plugins.AgentExecution.modules.routing import HybridRoutePlanner
 from agently.builtins.plugins.ActionFlow.TriggerFlowActionFlow import TriggerFlowActionFlow
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
 
@@ -151,6 +151,16 @@ def test_agent_activate_model_sets_default_model_key_for_requests():
 
     with pytest.raises(ValueError, match="non-empty model_key"):
         agent.activate_model("")
+
+
+def test_model_request_rejects_unknown_key_before_provider_dispatch():
+    agent = Agently.create_agent("model-key-validation")
+    agent.set_settings("model_pool", {"known-model": "configured-model"})
+
+    request = agent.create_request(model_key="unknown-model").input("must not be dispatched")
+
+    with pytest.raises(ValueError, match="Unknown model_key 'unknown-model'"):
+        request.get_result()
 
 
 def test_action_executor_plugins_registered():
@@ -1502,3 +1512,14 @@ def test_agent_quick_prompt_supports_key_value_and_kwargs():
         "context": "Public-facing API handler",
         "framework": "FastAPI",
     }
+
+
+def test_agent_execution_info_preserves_fluent_execution_chain():
+    agent = Agently.create_agent()
+
+    execution = agent.input("Summarize the incident.")
+    chained = execution.info("The audience is the support team.")
+
+    assert chained is execution
+    assert chained.instruct("Be concise.").output({"summary": (str,)}) is execution
+    assert execution.request.prompt.to_prompt_object().info == "The audience is the support team."

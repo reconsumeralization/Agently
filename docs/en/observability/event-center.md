@@ -256,6 +256,20 @@ Action Runtime lifecycle events use `action.*` as the primary namespace. When th
 
 Paired compatibility events include `meta.compat_event_alias=True`, `meta.compat_alias_for`, and `meta.primary_event_id` so consumers can deduplicate them from the primary `action.*` event.
 
+Default Action-or-Response planning requests identify their runtime role with
+additive `run.meta.model_request_role="action_planning"`. The simple console
+uses that fact to suppress normal internal planning streams and show the accepted
+outer business response once. Detail mode and EventCenter hooks can still inspect
+the planning request and decision; validation warnings remain visible in simple.
+
+For programmatic planning, `action.plan_ready` may include the bounded
+`payload.decision.planning_observation` accounting view. A settled
+`run_action_program` record may include `meta.programmatic_observation` with
+SDK/contract/program/wrapper sizes, binding outcomes, and observed peak active
+binding calls. Exact SDK, catalog, program source, binding values, and provider
+logs remain cold. These additive fields are diagnostics and must not drive
+route, retry, policy, or acceptance decisions.
+
 Concrete action execution uses `action.started`, `action.completed`, and
 `action.failed`. Policy or sandbox gates that stop an action before normal
 execution use `action.approval_required` or `action.blocked` instead of being
@@ -267,7 +281,13 @@ may be `"tool"`; that does not change the event family.
 ExecutionResource lifecycle uses `execution_resource.*`. Providers and
 DevTools consumers should treat this namespace as extensible. Current manager
 events include `declared`, `approval_required`, `ensuring`, `ready`,
-`unhealthy`, `releasing`, `released`, and `failed`. `unhealthy` means a ready
+`probed`, `progress`, `unhealthy`, `releasing`, `released`, and `failed`.
+`probed` records selected-provider and bounded probe facts; `progress` carries
+bounded preparation updates such as an authorized Docker image pull.
+The simple console translates these facts into readable environment stages and
+compact image-layer lines instead of exposing `provider=` or `phase=` fields.
+Detail leads with the same explanation and then adds labeled diagnostics.
+`unhealthy` means a ready
 handle failed the health check before reuse; the manager releases it and ensures
 a fresh handle.
 
@@ -284,10 +304,15 @@ AgentExecution records progress in `async_get_meta()["diagnostics"]`:
 - `diagnostics["timeouts"]` records hard-deadline failures.
 - `diagnostics["stalls"]` records idle no-progress failures.
 
-When debugging a live app, attach a temporary Event Center hook or enable
-console logs with `.set_settings("debug", True)` for request/result and process
-summaries, or `.set_settings("debug", "detail")` for full observation and model
-delta output. RuntimeEvent diagnostics and public business text are separate:
+When debugging a live app, use `.set_settings("debug", True)` for a readable
+Prompt, request/result, and process summary. Use `.set_settings("debug", "detail")`
+to add sanitized provider request JSON, attempt/validation/telemetry, Action
+details, and route/stage metadata. Both console profiles are selected projections
+for a person, not complete event streams; detail also removes compatibility
+aliases and repeated facts such as `runtime.progress.*` mirrors. Each ModelRequest
+delta stream is displayed in one updating block. Attach an Event Center hook or
+use DevTools for complete observation audit, storage, or replay. RuntimeEvent
+diagnostics and public business text are separate:
 also consume `execution.get_async_generator(type="delta")` or call
 `await execution.async_streaming_print()` to see the complete readable process
 and final result. Remove temporary debug hooks and debug settings after the

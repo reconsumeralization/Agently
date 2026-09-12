@@ -15,14 +15,17 @@
 from .ActionFlow import TriggerFlowActionFlow
 from .ActionExecutor import (
     BashSandboxActionExecutor,
+    ShellActionExecutor,
     CodeExecutionActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
+    ProgrammaticActionExecutor,
 )
 from .ActionRuntime import AgentlyActionRuntime
 from .ExecutionResourceProvider import (
     ACPExecutionResourceProvider,
     BashExecutionResourceProvider,
+    ShellProvider,
     GVisorDockerExecutionResourceProvider,
     LandlockExecutionResourceProvider,
     SeatbeltExecutionResourceProvider,
@@ -32,6 +35,7 @@ from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .TaskDAGPlanner import AgentlyTaskDAGPlanner
 from .Blocks import AgentlyBlocks
 from .AgentOrchestrator import AgentlyAgentOrchestrator
+from .AgentExecution import AgentExecution, RequestExecution, LongTaskExecution, PlanExecution, LongContentExecution
 from .ModelRequester.AnthropicCompatible import AnthropicCompatible
 from .ModelRequester.OpenAICompatible import OpenAICompatible
 from .ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible

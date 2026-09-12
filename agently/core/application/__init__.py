@@ -17,6 +17,7 @@ from .AgentExecution import (
     AgentExecutionLimitExceeded,
     AgentExecutionResult,
     AgentExecutionStream,
+    AgentReviewError,
     RuntimeStageStallError,
 )
 from .AgentTask import AgentTask
@@ -40,6 +41,7 @@ __all__ = [
     "AgentExecutionLimitExceeded",
     "AgentExecutionResult",
     "AgentExecutionStream",
+    "AgentReviewError",
     "AgentTask",
     "Blocks",
     "DynamicTask",

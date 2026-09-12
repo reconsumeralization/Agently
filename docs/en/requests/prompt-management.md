@@ -22,37 +22,58 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 
 ## Collaborative prompt design and review
 
+Use this method when an Agently developer needs to understand model-node
+responsibilities, tune execution effects, check data-flow correctness or
+missing/redundant information, or judge model-versus-Host/workflow ownership.
+It also applies to explicit Prompt review and solution design. Choose it because
+contracts and handoffs can answer the question, not because particular words
+appear; an unrelated mechanical fix does not require this review.
+
 For multi-round work, begin each substantive response with a status-left/item-right
 table and a timestamped, versioned change-log table. Distinguish confirmed,
 applied, verified and abandoned changes; reuse existing records. See
 [the multi-round guidance and example](prompt-collaboration.md#multi-round-progress-and-changes).
 
-Apply this method by default when it is known that the user is developing with
-Agently and the current work is solution design, workflow/block optimization,
-or Prompt review. Do not wait for the user to request a table. Ordinary
-implementation, bug fixing, provider setup, or unrelated configuration does not
-trigger this review ceremony merely because the repository uses Agently.
 Follow an explicit request to batch reviews, skip details, or delegate decisions.
 
-When collaborating on a complex workflow or one scoped block, first explain
-the overall scenario and ask the user to confirm the logical ModelRequest
-inventory and each request's responsibility. A concise table can show each
-request's role, relevant input, consumer, and dependencies. Reuse the existing
-topology plan; distinguish model work from Host work and repeated request
-families from provider retries.
+For a complex workflow, first show the entire in-scope flow from source inputs
+to final consumers. Highlight and label model nodes and their responsibilities;
+distinguish Host, Action/tool and human work. Label key input/output edges,
+branches, joins, waits and loops. Reuse existing topology and distinguish
+observed behavior, proposed changes and unknown edges.
 
-After the inventory is confirmed, select requests for detailed review based on
-the user's needs or explain why a request is critical, for example an unresolved
-business decision or consequential policy/output boundary. By default, show
-one selected design, then wait for confirmation or revision before moving to
-the next one or treating the design as approved. An explicit user preference
-for batch review or delegated decisions may change that pace.
+Prefer an available image-generation tool such as imagegen or a diagram
+renderer when it makes the flow clearer. Verify generated labels, edges and
+responsibilities against the source. Mermaid/SVG/ASCII is a valid fallback;
+unavailable image tools must not block review. Keep exact contracts in tables,
+not only inside an image.
 
-Inventory approval is not approval of every selected Prompt. Apply revisions
-to the actual chain/config and check affected producer/consumer contracts and
-workflow roles. Reconfirm changed scope or handoffs, not unchanged decisions.
-Keep pending/confirmed/revising state clear in ordinary review notes; no new
-runtime protocol or mandatory approval of every routine request is implied.
+Invite correction of the inventory and responsibilities. When scope is clear,
+the overview and related Prompt tables may share a reply; an inventory-only
+confirmation turn is not required. Resolve important ownership ambiguity before
+dependent design. With up to three logical model nodes/request families,
+consider showing all their Prompt tables in separate blocks in one reply.
+Tightly coupled nodes may exceed three when joint review makes their handoffs
+clearer. Split dense flows at meaningful dependency/decision boundaries, not a
+rigid count. A repeated family may be shown once with its varying inputs and
+loop visible; do not conceal distinct contracts or actual call counts.
+
+Choose groups by developer preference, coupling, information volume and risk.
+Review grouping does not merge runtime requests. Shared context can be displayed
+once with explicit per-node references, but check that it actually reaches each
+consumer. Repetition across independent request snapshots is not automatically
+redundancy.
+
+Inventory approval alone does not approve new Prompt wording. Mark existing
+versus proposed content and pending/confirmed decisions clearly. Confirm
+consequential changes at a useful group boundary before implementation unless
+the developer delegates the decision. Apply revisions to the actual chain/config
+and recheck affected handoffs; preserve unchanged confirmations.
+
+Diagrams and tables can expose missing inputs, unused fields or wrong ownership;
+they do not prove execution quality or root cause. Check actual post-injection
+requests, outputs and run evidence for those claims. No new runtime protocol or
+approval ceremony for every routine request is implied.
 
 ## Show a business prompt for review
 
@@ -61,7 +82,7 @@ the problem this request owns, its boundary, and the result's consumer. A small
 Agently slot table can then expose the concrete prompt and field constraints
 without asking the user to inspect scattered code.
 
-Prefer a table-first layout: request overview, a `Slot | Topic | Actual prompt
+After the flow overview, prefer table-first node details: request overview, a `Slot | Topic | Actual prompt
 content` main table, a visible examples table when used, and a field/type/
 requiredness/meaning table for output constraints. Include enum, format, range,
 nullability, and downstream checks where applicable. Adapt the layout; show
@@ -86,9 +107,10 @@ Collapsed views may help navigation, but expose full permitted content and
 mark omissions/redactions. The review must stay aligned with the real
 chain/config and rendered-prompt audit, not a separate prompt source.
 
-See the optional [table-first collaboration example](prompt-collaboration.md).
+See the optional [flow-first collaboration example](prompt-collaboration.md).
 Its scenario, request list, and fields demonstrate presentation, not a mandatory
-business template. Selected reviews still wait for confirmation as above.
+business template. Related requests may be reviewed together under the grouping
+and confirmation boundaries above.
 
 ## Keep one request contract local
 
@@ -392,9 +414,20 @@ not final-prompt evidence when runtime extensions can inject later.
 
 ## Placeholders
 
-Inside any prompt slot, `{name}` references another slot by key, and `${name}` is replaced by `mappings={"name": "value"}` at load time. Common patterns:
+Distinguish literal model-facing references from framework substitutions:
 
-- `instruct: "Reply {input} politely."` — pulls the request `input` into the instruct text.
+- `instruct: "Assess [input.candidate] using [info.rules]; return [output]."`
+  uses literal mentions to direct model attention to existing content. The
+  references stay unchanged; no copying, substitution, or renderer support is
+  required. Use an ordinary string, not a Python f-string or `.format(...)`.
+  Backticks around field paths or unambiguous literal braces also work as a
+  writing convention; clear reference matters, not a mandatory delimiter.
+- Keep facts/rubrics in `info`, field constraints in `output`, and behavior
+  in `instruct`. Refer to the owning section instead of repeating it.
+  The referenced content must be present; a mention does not load evidence,
+  trigger progressive disclosure, or validate a path.
+- `${name}` with explicit `mappings={"name": "value"}` performs value
+  substitution at load time. It is different from a literal mention.
 - `${ENV.OPENAI_API_KEY}` in *settings* (not prompts) is replaced by the env var; prompts use `${name}` with explicit mappings.
 - `${INPUT.customer}`, `${INFO.policy}`, and `${INSTRUCT.step}` are render-time
   slot references. They become prompt section pointers such as
@@ -408,6 +441,15 @@ To trigger placeholder substitution while loading, pass `mappings=...` explicitl
 ```python
 agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 ```
+
+## Qualitative evaluation
+
+For qualitative review, define descriptive levels and their boundaries in the
+rubric and constrain the output label. Do not ask the model to invent numeric
+quality scores or probabilities. Keep mandatory acceptance and evidence
+sufficiency separate from quality levels. Label-to-number mappings are ordinal
+policy codes, not measured quality; compute numeric metrics from recorded facts
+with an explicit formula, unit, and missing-data policy.
 
 ## Where each layer's prompt comes from
 

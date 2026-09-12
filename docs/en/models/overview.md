@@ -110,6 +110,10 @@ result = (
 `activate_model(...)` affects subsequent Agent-owned requests, including
 chain-style `agent.input(...).start()` and `agent.create_execution()`.
 For a one-off override, use `agent.create_request(model_key="deepseek-v4")`.
+With a non-empty `model_pool`, explicit model keys must be members of the pool;
+unknown aliases fail before provider dispatch. Use
+`resolve_model_profile(model_key, settings)` from `agently.utils` for a
+non-secret, read-only preflight of provider, model, endpoint, and auth presence.
 
 API keys are selected at request time by the key-pool `selection` policy:
 `fixed`, `random`, `round_robin`, or `least_used`. The legacy

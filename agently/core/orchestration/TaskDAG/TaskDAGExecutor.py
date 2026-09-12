@@ -21,10 +21,7 @@ from typing import TYPE_CHECKING, Any
 from agently.types.data import TaskDAG, TaskDAGNode
 
 from .TaskDAGResolver import (
-    _GRAPH_SCHEMA_VERSION,
-    _TASK_ID_PATTERN,
     TaskDAGContext,
-    TaskDAGHandler,
     TaskDAGResolver,
     task_dag_resolver_factory,
     _coerce_resolver,
@@ -33,8 +30,6 @@ from .TaskDAGRuntime import CompiledTaskDAG, compile_task_dag
 from .TaskDAGValidation import (
     TaskDAGValidation,
     TaskDAGValidator,
-    validate_task_dag,
-    validate_task_dag_planner_output,
 )
 
 if TYPE_CHECKING:

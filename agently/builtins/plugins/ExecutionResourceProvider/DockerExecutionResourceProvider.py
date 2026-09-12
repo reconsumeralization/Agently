@@ -20,10 +20,12 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Sequence
 
 from agently.builtins.actions.Cmd import normalize_command_argv
 from agently.types.data import (
+    CodeExecutionBinding,
+    CodeExecutionBindingLimits,
     CodeExecutionBundle,
     TaskWorkspaceAccessGrant,
     TaskWorkspaceExecutionManifest,
@@ -33,6 +35,15 @@ from agently.types.data.code_execution import extract_code_toolchain_version
 
 from ._base import BuiltinExecutionResourceProvider
 from ._bounded_process import run_bounded_process
+from ._code_execution_binding_bridge import (
+    CODE_EXECUTION_BINDING_CLIENT_MODULE,
+    CODE_EXECUTION_BINDING_PROTOCOL,
+    CodeExecutionBindingBridge,
+    host_async_bindings_supported,
+    python_binding_client_source,
+    reserved_binding_environment_keys,
+)
+from ._code_execution_binding_process import run_bounded_binding_process
 
 if TYPE_CHECKING:
     from agently.types.data import (
@@ -86,7 +97,24 @@ class DockerExecutionResource:
         self.max_output_bytes = max(1, int(max_output_bytes))
         self._prepared_images: dict[str, dict[str, Any]] = {}
         self._active_containers: set[str] = set()
+        self._active_binding_bridges: set[CodeExecutionBindingBridge] = set()
+        self._active_binding_runtime_dirs: set[Path] = set()
         self._closed = False
+        self._progress_handler: Callable[..., Awaitable[None]] | None = None
+
+    async def _report_progress(
+        self,
+        *,
+        phase: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if self._progress_handler is not None:
+            await self._progress_handler(
+                phase=phase,
+                message=message,
+                details=dict(details or {}),
+            )
 
     async def _remove_container(self, name: str) -> None:
         if not name:
@@ -105,19 +133,21 @@ class DockerExecutionResource:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            raise RuntimeError(
-                f"docker_runtime.container_cleanup_timeout:{name}"
-            )
+            raise RuntimeError(f"docker_runtime.container_cleanup_timeout:{name}")
         if returncode != 0:
-            raise RuntimeError(
-                f"docker_runtime.container_cleanup_failed:{name}:returncode={returncode}"
-            )
+            raise RuntimeError(f"docker_runtime.container_cleanup_failed:{name}:returncode={returncode}")
         self._active_containers.discard(name)
 
     async def async_close(self) -> None:
         self._closed = True
+        for bridge in tuple(self._active_binding_bridges):
+            await bridge.async_close(cancel_active=True)
+            self._active_binding_bridges.discard(bridge)
         for name in tuple(self._active_containers):
             await self._remove_container(name)
+        for runtime_dir in tuple(self._active_binding_runtime_dirs):
+            self._cleanup_binding_runtime_dir(runtime_dir)
+            self._active_binding_runtime_dirs.discard(runtime_dir)
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -154,6 +184,21 @@ class DockerExecutionResource:
                 raise PermissionError("Docker source file is not the exact materialized bundle byte set.")
         return area
 
+    @staticmethod
+    def _cleanup_binding_runtime_dir(runtime_dir: Path) -> None:
+        if runtime_dir.is_symlink():
+            runtime_dir.unlink(missing_ok=True)
+        elif runtime_dir.exists():
+            shutil.rmtree(runtime_dir)
+
+    @staticmethod
+    def _bounded_text(value: str, *, limit: int) -> tuple[str, bool]:
+        encoded = str(value).encode("utf-8")
+        return (
+            encoded[:limit].decode("utf-8", errors="replace"),
+            len(encoded) > limit,
+        )
+
     async def async_execute_code(
         self,
         *,
@@ -161,17 +206,35 @@ class DockerExecutionResource:
         manifest: TaskWorkspaceExecutionManifest,
         grant: TaskWorkspaceAccessGrant,
         timeout: int,
+        bindings: Sequence[CodeExecutionBinding] = (),
+        binding_limits: CodeExecutionBindingLimits | None = None,
     ) -> dict[str, Any]:
         area = self._validate_workspace_bundle(
             bundle=bundle,
             manifest=manifest,
             grant=grant,
         )
+        frozen_bindings = tuple(bindings)
+        if any(not isinstance(item, CodeExecutionBinding) for item in frozen_bindings):
+            raise TypeError("bindings must contain CodeExecutionBinding values")
+        binding_keys = [item.binding_key for item in frozen_bindings]
+        if len(set(binding_keys)) != len(binding_keys):
+            raise ValueError("code execution binding keys must be unique")
+        if binding_limits is not None and not isinstance(binding_limits, CodeExecutionBindingLimits):
+            raise TypeError("binding_limits must be CodeExecutionBindingLimits")
+        active_binding_limits = binding_limits or CodeExecutionBindingLimits()
+        if frozen_bindings:
+            if bundle.language != "python":
+                raise ValueError("Docker host async bindings currently require the Python code runtime.")
+            if not host_async_bindings_supported():
+                raise RuntimeError("Docker host async binding transport is unavailable on this host.")
+            program_bytes = sum(len(item.content) for item in bundle.files)
+            if program_bytes > active_binding_limits.max_program_bytes:
+                raise ValueError("bound code execution bundle exceeds max_program_bytes")
         profile = self._profile(
             {
                 "language": bundle.language,
-                "image": self.runtime_profile.get("image")
-                or self._default_image(bundle.language),
+                "image": self.runtime_profile.get("image") or self._default_image(bundle.language),
             }
         )
         image = str(profile["image"])
@@ -198,21 +261,39 @@ class DockerExecutionResource:
             "logs": "/workspace/logs",
         }
         log_refs: list[str] = []
-        for index, step in enumerate((*bundle.build_steps, bundle.run_step)):
+
+        async def execute_step(
+            *,
+            index: int,
+            step: Any,
+            extra_env: Mapping[str, str] | None = None,
+            binding_bridge: CodeExecutionBindingBridge | None = None,
+        ) -> dict[str, Any]:
+            resolved_env = {
+                key: resolve_code_execution_workspace_uri(
+                    value,
+                    roots=container_roots,
+                )
+                for key, value in step.env.items()
+            }
+            if extra_env:
+                reserved = reserved_binding_environment_keys().intersection(resolved_env)
+                if reserved:
+                    raise ValueError("Code execution step cannot override provider-owned binding environment.")
+                existing_python_path = resolved_env.get("PYTHONPATH", "")
+                resolved_env.update(dict(extra_env))
+                runtime_python_path = str(extra_env.get("PYTHONPATH", ""))
+                if existing_python_path and runtime_python_path:
+                    resolved_env["PYTHONPATH"] = f"{runtime_python_path}:{existing_python_path}"
             result = await self._run_container(
                 image=image,
                 cmd=list(step.argv),
                 profile=profile,
                 workdir=f"/workspace/{step.cwd}",
-                env={
-                    key: resolve_code_execution_workspace_uri(
-                        value,
-                        roots=container_roots,
-                    )
-                    for key, value in step.env.items()
-                },
+                env=resolved_env,
                 timeout=timeout,
                 extra_mounts=mounts,
+                binding_bridge=binding_bridge,
             )
             stdout = str(result.get("stdout", ""))
             stderr = str(result.get("stderr", ""))
@@ -220,24 +301,117 @@ class DockerExecutionResource:
             stderr_path = area / "logs" / f"{index:02d}-{step.role}.stderr.log"
             stdout_path.write_text(stdout, encoding="utf-8")
             stderr_path.write_text(stderr, encoding="utf-8")
-            log_refs.extend(
-                [f"logs/{stdout_path.name}", f"logs/{stderr_path.name}"]
+            log_refs.extend([f"logs/{stdout_path.name}", f"logs/{stderr_path.name}"])
+            output_limit = (
+                min(self.max_output_bytes, active_binding_limits.max_log_bytes)
+                if frozen_bindings
+                else self.max_output_bytes
             )
-            final = dict(result)
-            final["stdout"] = stdout.encode("utf-8")[: self.max_output_bytes].decode(
-                "utf-8", errors="replace"
+            bounded_stdout, stdout_truncated = self._bounded_text(
+                stdout,
+                limit=output_limit,
             )
-            final["stderr"] = stderr.encode("utf-8")[: self.max_output_bytes].decode(
-                "utf-8", errors="replace"
+            bounded_stderr, stderr_truncated = self._bounded_text(
+                stderr,
+                limit=output_limit,
             )
-            final["stdout_truncated"] = bool(
-                result.get("stdout_truncated")
-            ) or len(stdout.encode("utf-8")) > self.max_output_bytes
-            final["stderr_truncated"] = bool(
-                result.get("stderr_truncated")
-            ) or len(stderr.encode("utf-8")) > self.max_output_bytes
-            if not result.get("ok"):
+            result = dict(result)
+            result["stdout"] = bounded_stdout
+            result["stderr"] = bounded_stderr
+            result["stdout_truncated"] = bool(result.get("stdout_truncated")) or stdout_truncated
+            result["stderr_truncated"] = bool(result.get("stderr_truncated")) or stderr_truncated
+            return result
+
+        for index, step in enumerate(bundle.build_steps):
+            final = await execute_step(index=index, step=step)
+            if not final.get("ok"):
                 break
+        else:
+            run_index = len(bundle.build_steps)
+            if not frozen_bindings:
+                final = await execute_step(index=run_index, step=bundle.run_step)
+            else:
+                runtime_name = f".agently-bindings-{uuid.uuid4().hex[:16]}"
+                runtime_dir = area / "build" / runtime_name
+                container_runtime_dir = f"/workspace/build/{runtime_name}"
+                runtime_dir.mkdir(exist_ok=False)
+                bridge = CodeExecutionBindingBridge(
+                    bindings=frozen_bindings,
+                    limits=active_binding_limits,
+                    socket_path=runtime_dir / "unused.sock",
+                    container_socket_path="/unused.sock",
+                    transport="stdio_framed",
+                )
+                self._active_binding_bridges.add(bridge)
+                self._active_binding_runtime_dirs.add(runtime_dir)
+                run_result: dict[str, Any] | None = None
+                try:
+                    await bridge.async_start()
+                    client_path = runtime_dir / CODE_EXECUTION_BINDING_CLIENT_MODULE
+                    client_path.write_text(
+                        python_binding_client_source(),
+                        encoding="utf-8",
+                    )
+                    client_path.chmod(0o444)
+                    binding_env = {
+                        **bridge.environment,
+                        "PYTHONPATH": container_runtime_dir,
+                    }
+                    run_result = await execute_step(
+                        index=run_index,
+                        step=bundle.run_step,
+                        extra_env=binding_env,
+                        binding_bridge=bridge,
+                    )
+                except asyncio.CancelledError:
+                    await asyncio.shield(bridge.async_close(cancel_active=True))
+                    raise
+                finally:
+                    await bridge.async_close(cancel_active=not bool(run_result is not None and run_result.get("ok")))
+                    self._active_binding_bridges.discard(bridge)
+                    self._cleanup_binding_runtime_dir(runtime_dir)
+                    self._active_binding_runtime_dirs.discard(runtime_dir)
+                if run_result is None:
+                    raise RuntimeError("docker_runtime.binding_program_result_unavailable")
+                final = dict(run_result)
+                completion = bridge.program_completion
+                binding_meta = {
+                    "host_async_bindings": True,
+                    "protocol": CODE_EXECUTION_BINDING_PROTOCOL,
+                    "transport": bridge.transport,
+                    "transport_error": bridge.transport_error,
+                    "calls": bridge.call_records,
+                    "summary": bridge.summary,
+                }
+                existing_meta = final.get("meta")
+                final["meta"] = {
+                    **(existing_meta if isinstance(existing_meta, dict) else {}),
+                    "binding": binding_meta,
+                }
+                if final.get("ok") and completion is None:
+                    final["ok"] = False
+                    final["status"] = "error"
+                    final.setdefault("diagnostics", []).append(
+                        {"code": "docker_runtime.binding_program_completion_missing"}
+                    )
+                elif final.get("ok") and completion is not None and completion.get("ok"):
+                    final["value"] = completion.get("value")
+                    final["logs"] = list(completion.get("logs", []))
+                    final["logs_truncated"] = bool(completion.get("logs_truncated", False))
+                elif completion is not None and not completion.get("ok"):
+                    error = completion.get("error")
+                    error = error if isinstance(error, dict) else {}
+                    final["ok"] = False
+                    final["status"] = str(error.get("status") or "error")
+                    final["logs"] = list(completion.get("logs", []))
+                    final["logs_truncated"] = bool(completion.get("logs_truncated", False))
+                    final.setdefault("diagnostics", []).append(
+                        {
+                            "code": "docker_runtime.binding_program_failed",
+                            "status": final["status"],
+                            "message": str(error.get("message") or "")[:1000],
+                        }
+                    )
         final["status"] = "success" if final.get("ok") else str(final.get("status") or "error")
         final["outputs"] = [
             path
@@ -434,8 +608,16 @@ class DockerExecutionResource:
                 timeout=timeout or max(self.timeout, 300),
             )
         except subprocess.TimeoutExpired as error:
-            stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else str(error.stdout or "")
-            stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else str(error.stderr or "")
+            stdout = (
+                error.stdout.decode("utf-8", errors="replace")
+                if isinstance(error.stdout, bytes)
+                else str(error.stdout or "")
+            )
+            stderr = (
+                error.stderr.decode("utf-8", errors="replace")
+                if isinstance(error.stderr, bytes)
+                else str(error.stderr or "")
+            )
             return {
                 "ok": False,
                 "status": "timed_out",
@@ -451,6 +633,81 @@ class DockerExecutionResource:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+
+    async def async_pull_image(self, image: str, *, timeout: int | None = None) -> dict[str, Any]:
+        timeout_seconds = timeout or max(self.timeout, 300)
+        await self._report_progress(
+            phase="image_pull_started",
+            message=f"Downloading Docker image {image}.",
+            details={"image": image, "timeout_seconds": timeout_seconds},
+        )
+        process = await asyncio.create_subprocess_exec(
+            self.docker_binary,
+            "pull",
+            image,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        emitted_lines = 0
+
+        async def read_stream(name: str, stream: asyncio.StreamReader | None) -> None:
+            nonlocal emitted_lines
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.readline()
+                if not chunk:
+                    break
+                line = chunk.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                captured[name].append(line)
+                if emitted_lines < 200:
+                    emitted_lines += 1
+                    await self._report_progress(
+                        phase="image_pull_progress",
+                        message=line[:500],
+                        details={"image": image, "stream": name, "line": line[:500]},
+                    )
+
+        readers = [
+            asyncio.create_task(read_stream("stdout", process.stdout)),
+            asyncio.create_task(read_stream("stderr", process.stderr)),
+        ]
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+            await asyncio.gather(*readers)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            await asyncio.gather(*readers, return_exceptions=True)
+            return {
+                "ok": False,
+                "status": "timed_out",
+                "image": image,
+                "timeout_seconds": timeout_seconds,
+                "stdout": "\n".join(captured["stdout"])[-20000:],
+                "stderr": "\n".join(captured["stderr"])[-20000:],
+            }
+        result = {
+            "ok": process.returncode == 0,
+            "image": image,
+            "returncode": process.returncode,
+            "stdout": "\n".join(captured["stdout"])[-20000:],
+            "stderr": "\n".join(captured["stderr"])[-20000:],
+        }
+        await self._report_progress(
+            phase="image_pull_completed" if result["ok"] else "image_pull_failed",
+            message=(
+                f"Docker image {image} downloaded."
+                if result["ok"]
+                else f"Docker image download failed for {image}."
+            ),
+            details={"image": image, "returncode": process.returncode},
+        )
+        return result
 
     def ensure_image_ready(self, image: str, *, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         active_profile = self._profile(profile)
@@ -507,6 +764,95 @@ class DockerExecutionResource:
         if not second_inspect.get("exists"):
             raise ExecutionResourceError(
                 f"Docker image '{ image }' was pulled but could not be inspected.",
+                code="execution_resource.docker_image_pull_failed",
+                payload={
+                    "image": image,
+                    "image_pull_policy": image_pull_policy,
+                    "pull": pull,
+                    "inspect": second_inspect,
+                },
+            )
+        prepared = {
+            "status": "pulled" if not first_inspect.get("exists") else "refreshed",
+            "image": image,
+            "image_id": second_inspect.get("image_id", ""),
+            "image_pull_policy": image_pull_policy,
+            "pull": pull,
+        }
+        self._prepared_images[cache_key] = prepared
+        return prepared
+
+    async def async_ensure_image_ready(
+        self,
+        image: str,
+        *,
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Keep the established synchronous extension seam working for provider
+        # subclasses while the built-in Docker resource uses the non-blocking,
+        # progress-reporting implementation below.
+        if type(self).ensure_image_ready is not DockerExecutionResource.ensure_image_ready:
+            return await asyncio.to_thread(
+                self.ensure_image_ready,
+                image,
+                profile=profile,
+            )
+        active_profile = self._profile(profile)
+        image_pull_policy = str(active_profile.get("image_pull_policy", "never"))
+        cache_key = f"{image}::{image_pull_policy}"
+        if image_pull_policy != "always" and cache_key in self._prepared_images:
+            return self._prepared_images[cache_key]
+        from agently.core import ExecutionResourceError
+
+        await self._report_progress(
+            phase="image_inspection",
+            message=f"Checking Docker image {image}.",
+            details={"image": image, "image_pull_policy": image_pull_policy},
+        )
+        first_inspect = await asyncio.to_thread(self.inspect_image, image)
+        if first_inspect.get("exists") and image_pull_policy != "always":
+            prepared = {
+                "status": "local",
+                "image": image,
+                "image_id": first_inspect.get("image_id", ""),
+                "image_pull_policy": image_pull_policy,
+            }
+            self._prepared_images[cache_key] = prepared
+            await self._report_progress(
+                phase="image_ready",
+                message=f"Docker image {image} is available locally.",
+                details=prepared,
+            )
+            return prepared
+        if image_pull_policy == "never":
+            raise ExecutionResourceError(
+                f"Docker image '{image}' is not available locally and image_pull_policy='never'.",
+                code="execution_resource.docker_image_missing",
+                payload={"image": image, "image_pull_policy": image_pull_policy, "inspect": first_inspect},
+            )
+        if image_pull_policy == "request":
+            raise ExecutionResourceError(
+                f"Docker image '{image}' requires approval before pulling.",
+                code="execution_resource.docker_image_pull_approval_required",
+                payload={"image": image, "image_pull_policy": image_pull_policy, "inspect": first_inspect},
+            )
+        pull_timeout = int(active_profile.get("image_pull_timeout_seconds", 300) or 300)
+        pull = await self.async_pull_image(image, timeout=pull_timeout)
+        if not pull.get("ok"):
+            raise ExecutionResourceError(
+                f"Docker image pull failed for '{image}'.",
+                code="execution_resource.docker_image_pull_failed",
+                payload={
+                    "image": image,
+                    "image_pull_policy": image_pull_policy,
+                    "pull": pull,
+                    "inspect": first_inspect,
+                },
+            )
+        second_inspect = await asyncio.to_thread(self.inspect_image, image)
+        if not second_inspect.get("exists"):
+            raise ExecutionResourceError(
+                f"Docker image '{image}' was pulled but could not be inspected.",
                 code="execution_resource.docker_image_pull_failed",
                 payload={
                     "image": image,
@@ -625,8 +971,9 @@ class DockerExecutionResource:
         profile: dict[str, Any] | None = None,
         workdir: str = "/sandbox",
         env: dict[str, str] | None = None,
-        timeout: int | None = None,
+        timeout: float | None = None,
         extra_mounts: list[str] | None = None,
+        binding_bridge: CodeExecutionBindingBridge | None = None,
     ) -> dict[str, Any]:
         if self._closed:
             return {"ok": False, "status": "error", "error": "Docker execution resource is closed."}
@@ -635,8 +982,7 @@ class DockerExecutionResource:
         if not self.is_binary_available():
             return {"ok": False, "error": f"Docker binary not found: { self.docker_binary }"}
         active_profile = self._profile(profile)
-        await asyncio.to_thread(
-            self.ensure_image_ready,
+        await self.async_ensure_image_ready(
             image,
             profile=active_profile,
         )
@@ -661,19 +1007,36 @@ class DockerExecutionResource:
                 extra_mounts=mounts,
                 env=env,
             )
+            if binding_bridge is not None:
+                # Keep only the provider-owned framed protocol channel open.
+                # Ordinary code execution retains DEVNULL stdin.
+                args.insert(2, "-i")
             container_name = f"agently-code-{uuid.uuid4().hex[:20]}"
             args.extend(["--name", container_name])
             args.append(image)
             args.extend(cmd)
             self._active_containers.add(container_name)
             completed = None
+            binding_transport_error = ""
             try:
-                completed = await run_bounded_process(
-                    args,
-                    timeout=float(timeout or self.timeout),
-                    max_output_bytes=self.max_output_bytes,
-                    on_terminate=lambda: self._remove_container(container_name),
-                )
+                if binding_bridge is None:
+                    completed = await run_bounded_process(
+                        args,
+                        timeout=float(timeout or self.timeout),
+                        max_output_bytes=self.max_output_bytes,
+                        on_terminate=lambda: self._remove_container(container_name),
+                    )
+                else:
+                    completed, binding_transport_error = await run_bounded_binding_process(
+                        args,
+                        bridge=binding_bridge,
+                        timeout=float(timeout or self.timeout),
+                        max_output_bytes=min(
+                            self.max_output_bytes,
+                            binding_bridge.limits.max_log_bytes,
+                        ),
+                        on_terminate=lambda: self._remove_container(container_name),
+                    )
             finally:
                 # A normally exited ``docker run --rm`` has already removed
                 # its container. Timeout/cancellation cleanup owns removal and
@@ -686,9 +1049,7 @@ class DockerExecutionResource:
                 # return a result. Keep the invariant explicit for static
                 # consumers and for any future runner implementation that
                 # might violate that contract.
-                raise RuntimeError(
-                    "docker_runtime.container_result_unavailable"
-                )
+                raise RuntimeError("docker_runtime.container_result_unavailable")
             stdout = completed.stdout.decode("utf-8", errors="replace")
             stderr = completed.stderr.decode("utf-8", errors="replace")
             if completed.timed_out:
@@ -703,6 +1064,22 @@ class DockerExecutionResource:
                         {
                             "code": "docker_runtime.container_timeout",
                             "timeout_seconds": timeout or self.timeout,
+                        }
+                    ],
+                    "stdout_truncated": completed.stdout_truncated,
+                    "stderr_truncated": completed.stderr_truncated,
+                }
+            if binding_transport_error:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "reason": "binding_stdio_protocol_failed",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "diagnostics": [
+                        {
+                            "code": "docker_runtime.binding_stdio_protocol_failed",
+                            "detail": binding_transport_error[:500],
                         }
                     ],
                     "stdout_truncated": completed.stdout_truncated,
@@ -782,9 +1159,7 @@ class DockerExecutionResource:
                     continue
                 mounted_workdir = container_path.rstrip("/") or "/"
                 if str(relative_workdir) != ".":
-                    mounted_workdir = (
-                        f"{mounted_workdir.rstrip('/')}/{relative_workdir.as_posix()}"
-                    )
+                    mounted_workdir = f"{mounted_workdir.rstrip('/')}/{relative_workdir.as_posix()}"
                 mounted_workdirs.append((len(host_path.parts), mounted_workdir))
             if not mounted_workdirs:
                 return {
@@ -858,6 +1233,29 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
     DEFAULT_SETTINGS = {}
     kind = "docker"
 
+    def __init__(self) -> None:
+        self._runtime_event_emitter: Callable[..., Awaitable[None]] | None = None
+
+    def _bind_runtime_event_emitter(self, emitter: Callable[..., Awaitable[None]]) -> None:
+        self._runtime_event_emitter = emitter
+
+    def _attach_progress_handler(
+        self,
+        resource: DockerExecutionResource,
+        requirement: "ExecutionResourceRequirement",
+        *,
+        pull_only: bool = False,
+    ) -> DockerExecutionResource:
+        emitter = getattr(self, "_runtime_event_emitter", None)
+        if emitter is not None:
+            async def report(**payload: Any) -> None:
+                if pull_only and not str(payload.get("phase", "")).startswith("image_pull"):
+                    return
+                await emitter(requirement, **payload)
+
+            resource._progress_handler = report
+        return resource
+
     @property
     def provider_id(self) -> str:
         return "docker"
@@ -920,24 +1318,20 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
         }
         privileged_override = any(
             item == "--privileged"
-            or (
-                item.startswith("--privileged=")
-                and item.partition("=")[2] not in {"false", "0", "no"}
-            )
+            or (item.startswith("--privileged=") and item.partition("=")[2] not in {"false", "0", "no"})
             for item in normalized
         )
-        split_overrides = {
-            (item, normalized[index + 1])
-            for index, item in enumerate(normalized[:-1])
-        }
-        has_unsafe_override = any(
-            item in unsafe_exact
-            or item in {"-v", "--volume", "--mount", "--device", "--cap-add"}
-            or item.startswith("-v=")
-            or item.startswith(unsafe_prefixes)
-            for item in normalized
-        ) or privileged_override or bool(
-            split_overrides.intersection(unsafe_split_options)
+        split_overrides = {(item, normalized[index + 1]) for index, item in enumerate(normalized[:-1])}
+        has_unsafe_override = (
+            any(
+                item in unsafe_exact
+                or item in {"-v", "--volume", "--mount", "--device", "--cap-add"}
+                or item.startswith("-v=")
+                or item.startswith(unsafe_prefixes)
+                for item in normalized
+            )
+            or privileged_override
+            or bool(split_overrides.intersection(unsafe_split_options))
         )
         return {
             "process_contained": not has_unsafe_override,
@@ -960,12 +1354,12 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
         default_args = default_args if isinstance(default_args, list) else []
         runtime_profile = config.get("runtime_profile", {})
         runtime_profile = runtime_profile if isinstance(runtime_profile, dict) else {}
-        resource = self.create_resource(
+        resource = self._attach_progress_handler(self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
-        )
+        ), requirement, pull_only=True)
         availability = await asyncio.to_thread(resource.inspect_availability)
         available = bool(availability.get("available"))
         reason = str(availability.get("reason", "unavailable"))
@@ -1017,17 +1411,21 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "toolchains": toolchain_facts,
                 "isolation": {
                     **self._isolation_capabilities(default_args),
-                    "network_mode": str(
-                        runtime_profile.get("network_mode", "disabled")
-                    ),
+                    "network_mode": str(runtime_profile.get("network_mode", "disabled")),
                 },
                 "workspace_access_modes": ["snapshot", "read_only", "read_write"],
                 "network": "configurable",
                 "safety_class": "isolated",
+                "host_async_bindings": host_async_bindings_supported(),
                 "container_runtime": "runc",
             },
             "reason": reason,
-            "meta": {"availability": availability, "runtime_image": image_fact},
+            "meta": {
+                "availability": availability,
+                "runtime_image": image_fact,
+                "host_async_binding_protocol": CODE_EXECUTION_BINDING_PROTOCOL,
+                "host_async_binding_transport": "stdio_framed",
+            },
         }
 
     @staticmethod
@@ -1073,21 +1471,20 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "image": DockerExecutionResource._default_image(language),
                 **runtime_profile,
             }
-        resource = self.create_resource(
+        resource = self._attach_progress_handler(self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
             workspace_grant=grant if isinstance(grant, TaskWorkspaceAccessGrant) else None,
             max_output_bytes=int(policy.get("max_output_bytes", 20000)),
-        )
+        ), requirement)
         availability = await asyncio.to_thread(resource.ensure_available)
         active_profile = resource._profile()
         image_preparation: dict[str, Any] | None = None
         image = str(active_profile.get("image", ""))
         if image:
-            image_preparation = await asyncio.to_thread(
-                resource.ensure_image_ready,
+            image_preparation = await resource.async_ensure_image_ready(
                 image,
                 profile=active_profile,
             )

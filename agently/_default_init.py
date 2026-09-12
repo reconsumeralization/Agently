@@ -22,21 +22,28 @@ if TYPE_CHECKING:
 
 
 def _load_default_plugins(plugin_manager: "PluginManager"):
+    from agently.builtins.plugins.AudioModelRequester import OpenAICompatible as AudioHTTP, OMLX
+
+    plugin_manager.register("AudioModelRequester", AudioHTTP, activate=False)
+    plugin_manager.register("AudioModelRequester", OMLX, activate=False)
     from agently.builtins.plugins.ActionFlow import DAGActionFlow, TriggerFlowActionFlow
     from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
     from agently.builtins.plugins.ActionExecutor import (
         BashSandboxActionExecutor,
+        ShellActionExecutor,
         BrowseActionExecutor,
         CodeExecutionActionExecutor,
         DockerActionExecutor,
         LocalFunctionActionExecutor,
         MCPActionExecutor,
+        ProgrammaticActionExecutor,
         SQLiteActionExecutor,
         SearchActionExecutor,
     )
     from agently.builtins.plugins.ExecutionResourceProvider import (
         ACPExecutionResourceProvider,
         BashExecutionResourceProvider,
+        ShellProvider,
         BrowserExecutionResourceProvider,
         DockerExecutionResourceProvider,
         GVisorDockerExecutionResourceProvider,
@@ -53,14 +60,17 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionExecutor", LocalFunctionActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", MCPActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BashSandboxActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", ShellActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SearchActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BrowseActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", CodeExecutionActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", ProgrammaticActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", DockerActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SQLiteActionExecutor, activate=False)
     plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", MCPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BashExecutionResourceProvider, activate=False)
+    plugin_manager.register("ExecutionResourceProvider", ShellProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", DockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", GVisorDockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", LandlockExecutionResourceProvider, activate=False)
@@ -104,6 +114,14 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.Blocks import AgentlyBlocks
 
     plugin_manager.register("Blocks", AgentlyBlocks)
+
+    from agently.builtins.plugins.AgentExecution import (
+        AgentExecution, RequestExecution, LongTaskExecution, PlanExecution, LongContentExecution,
+    )
+
+    plugin_manager.register("AgentExecution", AgentExecution)
+    for execution_class in (RequestExecution, LongTaskExecution, PlanExecution, LongContentExecution):
+        plugin_manager.register("AgentExecution", execution_class, activate=False)
 
     from agently.builtins.plugins.AgentOrchestrator import AgentlyAgentOrchestrator
 

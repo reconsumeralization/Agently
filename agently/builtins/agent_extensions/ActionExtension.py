@@ -14,19 +14,25 @@
 
 from agently_stage import default_stage_call_bridge
 
+import asyncio
+import contextlib
+import math
+import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, TypeVar, cast
-from typing_extensions import Self
+from typing_extensions import Self, overload
 
 from agently.core import BaseAgent
+from agently.core.operation.Action.ActionMetadata import _scoped_action_list
+from agently.core.model.ModelRequestRunner import PreparedModelResponse
 from agently.core.runtime.RuntimeContext import (
     get_current_action_policy,
-    get_current_agent_execution_context,
 )
 from agently.utils import DeprecationWarnings
 from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
+from agently.types.data.shell import ShellApproval, ShellEnvironment, ShellLanguage, ShellRiskHandler
 
 if TYPE_CHECKING:
     from agently.core import Prompt, TaskWorkspace
@@ -53,8 +59,6 @@ class ActionExtension(BaseAgent):
         self.action = type(global_action)(self.plugin_manager, self.settings)
         self.tool = self.action
 
-        self.use_action = self.use_actions
-        self.use_tool = self.use_tools
         self.use_mcp = default_stage_call_bridge.as_sync(self.async_use_mcp)
         self.use_sandbox = self.use_action_sandbox
         self.use_python = self.enable_python
@@ -124,6 +128,10 @@ class ActionExtension(BaseAgent):
             approval_required=bool(copied_spec.get("approval_required", False)),
             sandbox_required=bool(copied_spec.get("sandbox_required", False)),
             replay_safe=bool(copied_spec.get("replay_safe", True)),
+            concurrency_mode=cast(
+                Literal["parallel", "exclusive"],
+                copied_spec.get("concurrency_mode", "exclusive"),
+            ),
             expose_to_model=bool(copied_spec.get("expose_to_model", True)),
             execution_resources=copied_spec.get("execution_resources", []),
             meta=copied_spec.get("meta", {}),
@@ -137,7 +145,14 @@ class ActionExtension(BaseAgent):
         kwargs: "KwargsType",
         func: Callable,
         returns: "ReturnType | None" = None,
+        concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
     ) -> Self:
+        """Register one Agent-local Action.
+
+        In eligible programmatic batches, ``concurrency_mode="parallel"``
+        permits overlap with other parallel Actions. ``"exclusive"`` keeps
+        this Action behind an ordering barrier.
+        """
         self.action.register_action(
             action_id=name,
             desc=desc,
@@ -145,6 +160,7 @@ class ActionExtension(BaseAgent):
             func=func,
             tags=[f"agent-{ self.name }"],
             returns=returns,
+            concurrency_mode=concurrency_mode,
         )
         return self
 
@@ -206,23 +222,67 @@ class ActionExtension(BaseAgent):
                 action_name = getattr(action_item, "__name__", "")
                 if not action_name:
                     raise TypeError("use_actions() expects action names, callables, or built-in action packages.")
-                if action_name not in self.action.tool_funcs and (local_registry is None or not local_registry.has(action_name)):
+                if action_name not in self.action.tool_funcs and (
+                    local_registry is None or not local_registry.has(action_name)
+                ):
                     self.action_func(action_item)
                 names.append(action_name)
         if names:
             self.action.tag(names, agent_tag)
         return names
 
+    @overload
     def use_actions(
         self,
-        actions: Callable | str | list[str | Callable] | Any,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_actions(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_actions(
+        self,
+        actions: object,
         *,
         always: bool = False,
     ) -> "Self | AgentExecution":
+        """Attach Actions to one execution, or to future runs with ``always=True``."""
         if not always:
             return self.create_execution().use_actions(actions)
         self._register_action_items(actions)
         return self
+
+    @overload
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_action(
+        self,
+        actions: object,
+        *,
+        always: bool = False,
+    ) -> "Self | AgentExecution":
+        """Attach one Action to a run, or to future runs with ``always=True``."""
+        return self.use_actions(actions, always=always)
 
     def use_acp(
         self,
@@ -256,12 +316,29 @@ class ActionExtension(BaseAgent):
             self.settings.set("agent.acp.diagnostics", cast(Any, diagnostics))
         return self
 
+    @overload
     def require_actions(
         self,
-        actions: Callable | str | list[str | Callable] | Any,
+        actions: object,
+        *,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def require_actions(
+        self,
+        actions: object,
+        *,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def require_actions(
+        self,
+        actions: object,
         *,
         always: bool = False,
     ) -> "Self | AgentExecution":
+        """Require Actions for one execution, or for future runs with ``always=True``."""
         if not always:
             return self.create_execution().require_actions(actions)
         for name in self._register_action_items(actions):
@@ -277,33 +354,15 @@ class ActionExtension(BaseAgent):
         return str(item.get("action_id") or item.get("name") or "").strip()
 
     def _get_scoped_action_list(self) -> list[dict[str, Any]]:
-        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
-        execution_context = get_current_agent_execution_context()
-        scoped_action_ids = getattr(execution_context, "scoped_action_ids", None)
-        raw_allowed_ids = scoped_action_ids() if callable(scoped_action_ids) else None
-        allowed_ids = (
-            {str(item).strip() for item in raw_allowed_ids if str(item).strip()}
-            if isinstance(raw_allowed_ids, set)
-            else set()
-        )
-        if not allowed_ids:
-            scoped_list = action_list
-        else:
-            scoped_list = [
-            item
-            for item in action_list
-            if self._action_item_id(item) in allowed_ids
-            ]
-        recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
-        if callable(recall_records):
-            scoped_list = self.action._with_action_artifact_recall_action(
-                scoped_list,
-                cast(list["ActionResult"], recall_records()),
-            )
-        return scoped_list
+        return _scoped_action_list(self.action, self.name)
 
-    def use_tools(self, tools: Callable | str | list[str | Callable] | Any) -> "Self | AgentExecution":
+    def use_tools(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for execution-local ``use_actions(...)``."""
         return self.use_actions(tools)
+
+    def use_tool(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for execution-local ``use_action(...)``."""
+        return self.use_action(tools)
 
     @staticmethod
     def _build_capability_desc(
@@ -432,25 +491,134 @@ class ActionExtension(BaseAgent):
         *,
         root: str | Path | None = None,
         commands: list[str] | None = None,
-        action_id: str = "run_bash",
+        action_id: str | None = None,
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
         expose_to_model: bool = True,
         timeout: int = 20,
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
-        sandbox: CodeSandboxMode = "auto",
+        sandbox: CodeSandboxMode | None = None,
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
         dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
         provisioning_profile: ProvisioningProfileMode = "strict",
         image_pull_policy: ImagePullPolicyMode | None = None,
+        environment: ShellEnvironment | None = None,
+        approval: ShellApproval = "all",
+        shell: ShellLanguage | None = None,
+        binary: str | None = None,
+        read_paths: Mapping[str, str | Path] | None = None,
+        max_output_bytes: int = 20000,
+        deny: Sequence[str] = (),
+        risk_handler: ShellRiskHandler | None = None,
     ) -> Self:
+        """Expose general Shell source with explicit environment and approval.
+
+        Defaults to offline isolation and approval for every call. Windows uses
+        PowerShell; other hosts use Bash. ``host`` has no filesystem/network
+        sandbox. ``read_paths`` maps resource aliases to host-selected read-only
+        directories (e.g. an entire Skill package, without per-script Actions).
+        Selective write/delete approval uses advisory risk analysis, not a hard
+        sandbox. Missing providers never fall back to host execution.
+
+        Explicit legacy ``commands``/``sandbox`` retains the old argv contract;
+        do not mix it with the new Shell policy parameters.
+        """
         task_workspace = getattr(self, "task_workspace", None)
         if root is None and task_workspace is not None:
             root = getattr(task_workspace, "root", None)
         root_path = Path(root).expanduser().resolve() if root is not None else None
+        if commands is None and sandbox is None:
+            if root_path is None or not root_path.is_dir():
+                raise ValueError("Shell requires an existing root or bound TaskWorkspace")
+            environment = environment or "offline"
+            shell = shell or ("powershell" if os.name == "nt" else "bash")
+            if environment not in {"offline", "online", "host"} or approval not in {"all", "write", "delete", "none"}:
+                raise ValueError("Invalid Shell environment or approval mode")
+            if shell not in {"bash", "powershell"}:
+                raise ValueError("shell must be 'bash' or 'powershell'")
+            if (
+                isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0
+                or isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes <= 0
+            ):
+                raise ValueError("Shell timeout and output byte limit must be positive")
+            if docker_default_args or dependency_policy is not None or max_output_chars != 20000:
+                raise ValueError("General Shell does not accept legacy Docker arguments or dependency_policy")
+            read_only = task_workspace is not None and root_path == Path(str(task_workspace.root)).resolve() and task_workspace.mode == "read_only"
+            if read_only and environment == "host":
+                raise ValueError("Host Shell cannot enforce a read-only TaskWorkspace; select isolation or grant read_write")
+            paths: dict[str, str] = {}
+            for alias, path in (read_paths or {}).items():
+                if not isinstance(alias, str) or not alias.isidentifier():
+                    raise ValueError("Shell read_paths aliases must be identifiers")
+                resolved = Path(path).expanduser().resolve(strict=True)
+                if not resolved.is_dir() or resolved == Path(resolved.anchor):
+                    raise ValueError("Shell read_paths requires bounded directories, not a filesystem root")
+                paths[alias] = str(resolved)
+            forbidden = ("\n", "\r", "%") if os.name == "nt" else (":", "\n", "\r")
+            if environment != "host" and any(char in path for path in [str(root_path), *paths.values()] for char in forbidden):
+                raise ValueError("Shell mount paths contain unsupported platform mount characters")
+            if any(not isinstance(rule, str) or not rule for rule in deny):
+                raise ValueError("Shell deny rules must be non-empty strings")
+            if isinstance(deny, str):
+                raise ValueError("Shell deny must be a sequence of rules, not a string")
+            if binary is not None and (not isinstance(binary, str) or not binary or "\0" in binary):
+                raise ValueError("Shell binary must be a non-empty NUL-free string")
+            if root_path == Path(root_path.anchor):
+                raise ValueError("Shell root cannot be a filesystem root")
+            config = {
+                "root": str(root_path), "shell": shell, "environment": environment,
+                "binary": binary or ("powershell.exe" if os.name == "nt" and shell == "powershell" else "pwsh" if shell == "powershell" else "bash"),
+                "env": dict(env or {}), "timeout": timeout, "max_output_bytes": max_output_bytes,
+                "read_paths": paths, "read_only": read_only, "docker_image": docker_image,
+                "docker_binary": docker_binary, "provisioning_profile": provisioning_profile,
+                "image_pull_policy": image_pull_policy,
+            }
+            executor = self.action._create_executor("ShellActionExecutor",
+                config=config, approval=approval, deny=tuple(deny),
+                request_factory=self.create_temp_request, risk_handler=risk_handler,
+            )
+            action_id = action_id or "run_shell"
+            from agently.builtins.plugins.ExecutionResourceProvider._windows_sandbox import sandbox_paths
+            visible_root, visible_paths = sandbox_paths(config)
+            default_desc = (
+                f"Run one {shell} script in environment={environment}. "
+                f"Starting root: {visible_root}. "
+                f"Resource paths: {visible_paths}. "
+                "Pipes, redirection and multiline source use the selected interpreter's syntax. "
+                "No interactive input, persistent sessions or detached background work. "
+                "Return bounded stdout/stderr, exit code and truncation facts. "
+                + ("Host mode is NOT sandboxed; cwd does not constrain command effects." if environment == "host" else "Only host-authorized paths are mounted.")
+            )
+            self.action.register_action(
+                action_id=action_id, desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+                kwargs={"command": (str, "Complete source for the selected Shell."), "workdir": (str, "Starting directory under the stated root; defaults to '.'.")},
+                required_input_keys=["command"], executor=executor,
+                tags=[f"agent-{self.name}"], expose_to_model=expose_to_model,
+                side_effect_level="exec", replay_safe=False, sandbox_required=environment != "host",
+                execution_resources=[{
+                    "requirement_id": f"shell:{action_id}", "kind": "shell", "scope": "action_call",
+                    "resource_key": action_id, "config": config,
+                    "required_capabilities": {"shell": shell, **({"isolation": {
+                        "process_contained": True, "host_filesystem_restricted": True,
+                        "network_mode": "disabled" if environment == "offline" else "enabled",
+                    }} if environment != "host" else {})},
+                }],
+                meta={"_host_approval_required_when": lambda call: executor.needs_approval(call)},
+            )
+            return self
+        if environment is not None or approval != "all" or shell is not None or binary is not None or read_paths or deny or risk_handler is not None or max_output_bytes != 20000:
+            raise ValueError("Do not mix legacy argv commands/sandbox with general Shell configuration")
+        DeprecationWarnings.warn_deprecated_once(
+            "enable_shell.argv",
+            "enable_shell(commands=.../sandbox=...) is the legacy argv interface. "
+            "For general Shell source, select environment= and approval= without legacy parameters; "
+            "the default Action becomes run_shell(command=..., workdir=...). Legacy cleanup is planned for 4.2.",
+        )
+        action_id = action_id or "run_bash"
+        sandbox = sandbox or "auto"
         if (
             task_workspace is not None
             and root_path is not None
@@ -709,8 +877,7 @@ class ActionExtension(BaseAgent):
             root = getattr(task_workspace, "root")
         elif root is _TASK_WORKSPACE_ROOT_UNSET:
             raise RuntimeError(
-                "TaskWorkspace file actions require an explicit root or an Agent "
-                "TaskWorkspace binding."
+                "TaskWorkspace file actions require an explicit root or an Agent " "TaskWorkspace binding."
             )
         root_path = Path(str(root)).expanduser().resolve()
         agent_tag = f"agent-{ self.name }"
@@ -779,8 +946,7 @@ class ActionExtension(BaseAgent):
             if operation == "apply_patch":
                 paths = patch_paths(str(action_input.get("patch") or ""))
                 external_required = any(
-                    active_task_workspace._resolve_external_file_path(item).exists()
-                    for item in paths
+                    active_task_workspace._resolve_external_file_path(item).exists() for item in paths
                 )
             else:
                 target = active_task_workspace._resolve_external_file_path(path)
@@ -1259,7 +1425,10 @@ class ActionExtension(BaseAgent):
                 ),
                 kwargs={
                     "patch": (str, "Unified diff patch to apply."),
-                    "expected_files": ([str], "Optional exact list of TaskWorkspace-relative files expected in the patch."),
+                    "expected_files": (
+                        [str],
+                        "Optional exact list of TaskWorkspace-relative files expected in the patch.",
+                    ),
                 },
                 func=apply_patch,
                 tags=[agent_tag],
@@ -1364,7 +1533,21 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
+        planning_protocol: (
+            Literal[
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            ]
+            | None
+        ) = None,
     ) -> Self:
+        """Configure the Action loop and its model-planning protocol.
+
+        ``structured_plan`` uses Agently's structured planner,
+        ``native_tool_calls`` consumes provider-native tool calls, and
+        ``programmatic`` asks an eligible model for executable Action-call code.
+        """
         if enabled is not None:
             self.settings.set("action.loop.enabled", bool(enabled))
             self.settings.set("tool.loop.enabled", bool(enabled))
@@ -1383,6 +1566,17 @@ class ActionExtension(BaseAgent):
                 raise ValueError("timeout must be a number > 0.")
             self.settings.set("action.loop.timeout", float(timeout))
             self.settings.set("tool.loop.timeout", float(timeout))
+        if planning_protocol is not None:
+            if planning_protocol not in {
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            }:
+                raise ValueError(
+                    "planning_protocol must be one of: 'structured_plan', " "'native_tool_calls', 'programmatic'."
+                )
+            self.settings.set("action.protocol", planning_protocol)
+            self.settings.set("tool.protocol", planning_protocol)
         return self
 
     def set_tool_loop(
@@ -1392,12 +1586,21 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
+        planning_protocol: (
+            Literal[
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            ]
+            | None
+        ) = None,
     ) -> Self:
         return self.set_action_loop(
             enabled=enabled,
             max_rounds=max_rounds,
             concurrency=concurrency,
             timeout=timeout,
+            planning_protocol=planning_protocol,
         )
 
     def register_action_planning_handler(self, handler: Any) -> Self:
@@ -1457,6 +1660,17 @@ class ActionExtension(BaseAgent):
             max_rounds=max_rounds,
             planning_protocol=planning_protocol,
         )
+
+    def release_programmatic_action_calls(
+        self,
+        action_calls: list["ActionCall"] | list[dict[str, Any]],
+    ) -> int:
+        """Release generated program calls that will not be executed.
+
+        Returns the number of retained program leases released by this call.
+        """
+
+        return self.action.release_programmatic_action_calls(action_calls)
 
     async def async_get_action_result(
         self,
@@ -1617,26 +1831,121 @@ class ActionExtension(BaseAgent):
         if settings.get("action.loop.enabled", settings.get("tool.loop.enabled", True)) is not True:
             return
 
+        if settings.get("$agent_execution.ensure_long_output", False) is True:
+            return
+
         action_list = self._get_scoped_action_list()
         if len(action_list) == 0:
             return
 
-        records = await self.action.async_plan_and_execute(
-            prompt=prompt,
-            settings=settings,
-            action_list=action_list,
-            agent_name=self.name,
-            planning_handler=self.__action_planning_handler,
-            action_execution_handler=self.__action_execution_handler,
-            max_rounds=settings.get("action.loop.max_rounds", settings.get("tool.loop.max_rounds", None)),  # type: ignore[arg-type]
-            concurrency=settings.get("action.loop.concurrency", settings.get("tool.loop.concurrency", None)),  # type: ignore[arg-type]
-            timeout=settings.get("action.loop.timeout", settings.get("tool.loop.timeout", None)),  # type: ignore[arg-type]
-        )
+        prepared_response = PreparedModelResponse()
 
-        if len(records) > 0:
-            prompt.set("action_results", self.action.to_action_results(records))
-            prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
-            self.__action_logs = records
+        async def response_generator():
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+            terminal_decision: dict[str, Any] = {}
+            streamed_response_parts: list[str] = []
+
+            async def response_stream_handler(event: str, data: Any) -> None:
+                if event == "status" and isinstance(data, Mapping) and data.get("retry"):
+                    streamed_response_parts.clear()
+                elif event == "delta" and isinstance(data, str):
+                    streamed_response_parts.append(data)
+                await queue.put((event, data))
+
+            async def terminal_response_handler(decision: dict[str, Any]) -> None:
+                terminal_decision.clear()
+                terminal_decision.update(decision)
+
+            async def run_action_loop() -> None:
+                try:
+                    records = await self.action.async_plan_and_execute(
+                        prompt=prompt,
+                        settings=settings,
+                        action_list=action_list,
+                        agent_name=self.name,
+                        planning_handler=self.__action_planning_handler,
+                        action_execution_handler=self.__action_execution_handler,
+                        max_rounds=settings.get(  # type: ignore[arg-type]
+                            "action.loop.max_rounds",
+                            settings.get("tool.loop.max_rounds", None),
+                        ),
+                        concurrency=settings.get(  # type: ignore[arg-type]
+                            "action.loop.concurrency",
+                            settings.get("tool.loop.concurrency", None),
+                        ),
+                        timeout=settings.get(  # type: ignore[arg-type]
+                            "action.loop.timeout",
+                            settings.get("tool.loop.timeout", None),
+                        ),
+                        response_stream_handler=response_stream_handler,
+                        terminal_response_handler=terminal_response_handler,
+                    )
+                except BaseException as error:
+                    await queue.put(("$action_loop_error", error))
+                    return
+                await queue.put(("$action_loop_done", records))
+
+            action_loop_task = asyncio.create_task(run_action_loop())
+            try:
+                while True:
+                    event, data = await queue.get()
+                    if event == "$action_loop_error":
+                        raise data
+                    if event == "$action_loop_done":
+                        records = data if isinstance(data, list) else []
+                        action_results = self.action.to_action_results(records)
+                        prompt.set("action_results", action_results)
+                        if records:
+                            prompt.set("extra_instruction", self.action.ACTION_RESULT_QUOTE_NOTICE)
+                        self.__action_logs = records
+                        self.__prepared_action_results = action_results
+
+                        response = terminal_decision.get("response")
+                        if isinstance(response, str) and response.strip():
+                            streamed_response = "".join(streamed_response_parts)
+                            if not streamed_response:
+                                yield "delta", response
+                            elif response.startswith(streamed_response):
+                                remainder = response[len(streamed_response) :]
+                                if remainder:
+                                    yield "delta", remainder
+                            elif streamed_response != response:
+                                yield "status", {
+                                    "status": "failed",
+                                    "retry": True,
+                                    "reason": "Replacing a provisional Action response with the accepted response.",
+                                }
+                                yield "delta", response
+                            prepared_response.mark_handled(
+                                delivery="action_response_direct",
+                                planning_protocol=settings.get(
+                                    "action.protocol",
+                                    settings.get("tool.protocol", "structured_plan"),
+                                ),
+                            )
+                            yield "meta", {
+                                "action_response_delivery": "direct",
+                                "action_response_fallback": False,
+                            }
+                            yield "status", {"status": "completed", "retry": False}
+                            yield "done", response
+                        else:
+                            prepared_response.meta.update(
+                                {
+                                    "delivery": "final_request_fallback",
+                                    "reason": "terminal_response_unavailable",
+                                }
+                            )
+                        break
+                    yield event, data
+            finally:
+                if not action_loop_task.done():
+                    action_loop_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await action_loop_task
+
+        prepared_response.set_generator(response_generator())
+        return prepared_response
 
     async def __broadcast_prefix(self, full_result_data: "AgentlyModelResult", _):
         if len(self.__action_logs) == 0:

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from agently.core.application.AgentTask.TaskEvidenceContextSource import (
+from agently.builtins.plugins.AgentExecution.long_task.TaskEvidenceContextSource import (
     TaskEvidenceContextSource,
 )
-from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+from agently.builtins.plugins.AgentExecution.long_task.TaskReferences import TaskReferenceCatalog
 
 
 @pytest.mark.asyncio

@@ -23,8 +23,7 @@ from agently.types.data import ChatMessage, ChatMessageDict
 from agently.utils import DeprecationWarnings, StateData, DataPathBuilder
 
 if TYPE_CHECKING:
-    from agently.types.data import ChatMessage, AgentlyModelResult, PromptStandardSlot
-    from agently.core import Prompt
+    from agently.types.data import ChatMessage, PromptStandardSlot
     from agently.core.model import ModelRequestResult
     from agently.utils import Settings
 

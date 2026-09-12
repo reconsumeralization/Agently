@@ -1,0 +1,12 @@
+{
+  "include": [
+    "agent_execution_finite_invalid.py",
+    "release_4_1_4_8_finite_invalid.py"
+  ],
+  "extraPaths": [
+    "../.."
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": "none"
+}

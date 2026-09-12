@@ -16,6 +16,28 @@ Agently 三层 Action 栈的中间层：`TriggerFlow`（顶，编排）→ `Acti
 
 `ActionRuntime`、`ActionFlow`、`ActionExecutor` 是当前的公开 plugin type。旧的 `ToolManager` plugin type 仅作为遗留兼容保留并发出 deprecation 警告。详见 [Action Runtime](../actions/action-runtime.md)。
 
+## Agent Interaction Handler
+
+通过 `AgentExecution.interact(handler)` 绑定的标准请求级 callback。只有现有行为或
+Action 打开 connected HITL exchange 时，它才接收标准化 `ExecutionExchangeView`，并
+返回该 exchange 的响应 payload。它不决定何时需要交互，也不创建另一套 wait/resume
+lifecycle。provider/envelope 仍由 ExecutionExchange 负责，pause/resume 仍由 TriggerFlow
+负责；durable integration 继续使用已注册的 ExecutionExchange provider 与 routing
+settings。
+
+## AgentExecution 插件
+
+通过 `agent.create_execution(name)` 选择的已注册执行类。返回的对象本身负责 draft、
+生产过程、最终策略和结果读取；Agent 负责可复用配置与能力。内置实现为 `auto`、
+`request`、`long_task`、`plan` 与 `long_content`，内部可组合 ModelRequest、任务规划、
+TriggerFlow 等组件。
+
+`.goal(...)` 声明目标，默认同时打开长任务便利开关；`turn_on_long_task=False` 只声明
+语义目标。显式 producer 或 strategy 选择仍有优先权。未发布的 Pattern 选择器已被替换；
+已发布的 AgentTask、AgentOrchestrator 名称保留为兼容入口，不是并行的默认执行所有者。
+
+详见 [Execution 插件](../start/auto-orchestration.md#execution-插件)。
+
 ## auto_close / auto_close_timeout
 
 TriggerFlow execution 的设置。`auto_close=True`（默认）时，execution 在空闲超过 `auto_close_timeout` 秒后自动关闭。隐式 execution 语法糖（`flow.start()` / `flow.async_start()`）默认 `auto_close_timeout=0.0`。`flow.start(auto_close=False)` 是非法用法，会直接报错。
@@ -90,6 +112,14 @@ Flow scope 的共享数据。调用 `get_flow_data(...)` / `set_flow_data(...)` 
 
 三个协议层 Model Request 插件：`OpenAICompatible`、`OpenAIResponsesCompatible`、`AnthropicCompatible`。多数 Chat Completions 兼容 provider 配置 `OpenAICompatible`；Responses API 形态用 `OpenAIResponsesCompatible`；Claude 配置 `AnthropicCompatible`。详见 [模型概览](../models/overview.md)。
 
+## Programmatic Action Calling（PTC，程序化 Action 调用）
+
+一种 ActionRuntime 规划协议：由模型生成一段有边界 Python 程序，调用合格的只读、
+replay-safe Actions，并返回紧凑结果投影。`PTC` 是文档简称；公开 API 值是
+`planning_protocol="programmatic"`。它负责一轮 Action 内短时的微观编排，不负责
+TaskDAG/TriggerFlow lifecycle、审批、持久化或 live interpreter 恢复。详见
+[程序化 Action 调用](../actions/programmatic-action-calling.md)。
+
 ## Runtime resources
 
 Execution-local 的活对象存储——数据库 client、回调、socket、函数指针、cache 句柄。Runtime resources **不**可序列化、**不**进 close snapshot，也**不**进 save/load execution snapshot；只记录 `resource_keys`。`load()` 后调用方必须重新注入。
@@ -104,8 +134,13 @@ Execution-local 的活对象存储——数据库 client、回调、socket、函
 
 真实世界 Skill package 的安装事实 owner，负责 discovery、validation、不可变 revision、
 trust state、resource graph 与精确 resource read。Skill guidance 通过 `TaskContext` source
-进入任务；获授权的 Skill script 绑定为普通 Workspace-backed CodeExecution Action。
-SkillLibrary 不选择任务 route，也不“执行 Skill”。详见
+进入任务；获授权的 Skill script 通过每个 Agent/语言一个稳定的受限 CodeExecution Action
+定义执行，授权和可见性只绑定当前 execution，script 仍是 resource，不会成为另一批待发现的
+Action candidates。SkillLibrary 不选择任务 route、不“执行 Skill”，也不会自动成为模型可见候选集。
+Skills 与 Actions 使用相同组合语法：`agent.use_skills(..., always=True)` 提供 Agent
+默认声明，`execution.use_skills(...)` 提供本次运行声明，由 AgentExecution 冻结本次
+运行的精确 revisions。后续用户消息创建新的 AgentExecution 并按当前任务重新选择；Session
+只延续对话和 memory。详见
 [SkillsExecutor 迁移](../development/skills-executor.md)。
 
 ## seal / sealed
@@ -163,3 +198,9 @@ terminal artifact 先从暂存 bytes 验证，只在通过后原子提升，并�
 ## wait_for_result=
 
 `flow.start()`、`flow.async_start()`、`start_execution()`、`execution.start()` 等接口上 deprecated 的参数。值现在被**忽略**并发 warning；返回值形态由 `auto_close` 与「隐式语法糖 vs 显式 execution」决定。
+
+## 音频能力（4.1.4.8 开发版）
+
+`AudioModelRequest` 是独立的 TTS/STT 请求能力；`AudioModelRequester` 是可替换传输驱动。
+`AudioCapability` 是 Agent 可挂载的完整能力协议。它们不是文本 Prompt 或 Execution 模式。
+流式与依赖边界见[音频请求](../models/audio.md)。

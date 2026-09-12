@@ -1,6 +1,6 @@
 # Agent 自动编排
 
-Agently 4.1.3 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
+Agently 4.1.4 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
 业务结果，但 Agent 可以在显式注入候选能力后，路由到普通模型响应、Actions 或
 AgentExecution-bound Skill context。
 
@@ -36,6 +36,10 @@ results = await asyncio.gather(
 )
 ```
 
+quick prompt 后继续配置 capability 时仍然保留同一个未启动 execution。例如
+`agent.input(...).info(...).use_action(...)` 会保留 input 和 info，不会静默创建一个
+替代 execution。
+
 多语句 setup 应显式拿住 execution draft：
 
 ```python
@@ -53,18 +57,245 @@ result = await execution.async_start()
 已验收开发线的路由是候选驱动、确定性优先：required Skills 将不可变 guidance
 绑定进 `TaskContext`；具体模型响应对 Skill Context 的消费记录与可执行 capability
 evidence 分开。普通 Actions 进入 `model_request` AgentExecution action loop。
-Skills 不创建 route，也不是 planner capability。
+默认每轮选择继续调用 Actions 或给出最终 response；终态 response 直接由同一个
+AgentExecution 交付。只有 legacy/custom fallback 或 `auto_continue` 这类独立交付
+策略才追加最终生成请求。Skills 不创建 route，也不是 planner capability。
 
-公开 Agent API 仍由 core 持有，但路线规划和执行由 active
-`AgentOrchestrator` plugin 通过 `AgentOrchestrator` protocol 承担。这样
-Skill Context、DAG substrate 和后续 route 实现都可以替换，而不需要 core 知道内置
-plugin 的内部实现。
+公开 Agent API 仍由 core 持有；其工厂直接创建所选 AgentExecution 插件，
+由该实例持有生产和最终处理规则。Skill Context 与 DAG substrate
+仍是 execution 内可替换的组件。
+
+## 人机交互
+
+当本次 AgentExecution 需要通过请求级回调响应 connected HITL exchange 时，使用标准
+方法 `.interact(handler)`：
+
+```python
+def handle_exchange(exchange):
+    if exchange["kind"] == "approval":
+        return {"status": "approved", "approved": True}
+    return {"audience": "framework developers"}
+
+result = (
+    agent.create_execution("plan")
+    .input("规划这次发布。")
+    .interact(handle_exchange)
+    .start()
+)
+```
+
+handler 接收一个标准化 `ExecutionExchangeView`，其中稳定提供 `kind`、`subject`、
+`payload`、`request` 等字段；handler 可以同步或异步执行，返回该 exchange consumer
+所需的响应 payload。approval 通常返回 Boolean 或 decision mapping，clarification
+可以返回文本、list 或 mapping。
+
+`.interact(...)` 声明响应机制，不会强制产生交互。普通请求没有打开 exchange 时，
+handler 不会被调用。声明仅属于当前 AgentExecution，会为其 request 选择 connected
+interaction，且在启动前重新配置 execution 时仍保留；它不会注册或替换全局 provider。
+启动前再次调用 `.interact(...)` 会替换前一个 handler。
+
+既有 owner 边界保持不变：ExecutionExchange 负责标准化 request/provider envelope，
+TriggerFlow 负责 pause/resume。durable queue、webhook、跨进程 host 或应用级 routing
+继续使用已注册的 ExecutionExchange provider、routing handler 和 `interaction.*`
+settings；这些高级 transport 选择不会变成 `.interact(...)` 的 kwargs。
+
+## Review 与最终结果校验
+
+使用 `.review(handler=None, *, rules=None, on_fail="warn")` 审查最终结果及其关键产物。
+`rules` 支持字符串或字符串序列。同步/异步 handler 接收 `(result, context)`，
+替换整个评估过程；context 包含规则、原始合同、可信产物引用与 TaskWorkspace。
+返回 Boolean，或包含 Boolean `passed` 的 mapping。
+
+```python
+result = (
+    agent.input(task).output(contract)
+    .review(rules=["检查结论是否有输入证据支持。"])
+    .start()
+)
+
+result = (
+    agent.input(task).output(contract)
+    .validate(release_check)  # (value, context) -> bool 或 {"ok": bool, ...}
+    .review(on_fail="block")
+    .start()
+)
+```
+
+`on_fail="warn"` 记录失败评价，不改变结果和成功状态；`"block"` 抛出
+`AgentReviewError`，阻止终态成功。它控制 Host 行为，不改变模型审查标准。
+两种模式都不会改写或重试；暂不支持 `"retry"`。
+Agent/AgentExecution 不提供公开 `verify()`。
+
+不传 handler 时，默认审查器通过 TaskWorkspace 读取完整可信文本产物、核对内容版本，
+再发起一次结构化模型请求。结果文本与产物完全相同时仅发送一次正文。
+非文本、不可读、已变更或不完整产物得到 `not_assessable`，不会以元数据检查冒充
+内容审查；其他格式需使用合适的自定义 handler。此处不隐含渐进式或分段模型审查，
+上下文溢出会明确失败。plan 按计划产物及已接受的澄清回复审查，不要求已经执行计划；
+缺少 goals 时不会另行编造目标。
+
+报告包含 `passed`、描述档位 `quality_level`（`strong`、`adequate`、`weak`、
+`not_assessable`）、`summary`、逐条规则对应的 `checks[]`、
+结构化 `issues[]`（`criterion`、`finding`、`evidence`、`suggestions[]`），以及
+不重复问题局部建议的 `overall_suggestions[]`。Boolean handler 不虚构档位，
+`quality_level=None`。不使用模型生成的数字评分。
+通过 `(await execution.async_get_meta())["reviews"]` 读取报告；
+事件包括 `review.started`、`review.completed`、`review.warning`、`review.blocked`。
+
+`validate(handler)` 硬校验的是**当前调用的最终输出**：直接响应、最终计划、
+Host 组装的完整文档、长任务最终业务输出或自定义 Execution 返回值，
+不自动检查内部步骤。直接 ModelRequest 与 `auto_continue` 保留已有受控修复；
+其他最终校验仅执行一次，不重放内部步骤或副作用。后者的 context 使用
+`meta.scope="agent_execution_final"`，没有 provider response ID，`max_retries=0`。
+校验先于声明式产物交付及 review，但不会撤销任务已经产生的副作用。
+需要安全修复循环时，使用显式 TriggerFlow 编排。
+
+## Artifact 交付
+
+当已接受的业务结果还必须交付为经过验证的文件时，使用
+`.artifact(path, handler=None)`：
+
+```python
+result = (
+    agent
+    .input("准备上线报告。")
+    .output(report_contract)
+    .artifact("reports/launch.json")
+    .review()
+    .start()
+)
+```
+
+它适用于普通文本和结构化请求，并不局限于 workspace-oriented AgentTask；但它的可信
+边界始终是 Agent 绑定的 TaskWorkspace。字符串会原样写入；mapping、list、tuple 和
+JSON primitive 会序列化为易读 JSON。自定义同步或异步 handler 接收
+`(result, context)`，返回 `str` 或 `bytes`：
+
+```python
+agent.input(task).artifact(
+    "exports/result.bin",
+    lambda result, context: encode_result(result),
+).start()
+```
+
+handler 只负责渲染内容。路径 containment、写权限、物理 digest 回读、可信文件身份和
+终态保留仍由 TaskWorkspace 负责。只读 workspace 中，新请求路径会写入当前 execution
+的私有 fallback area，应从可信 ref 的 `path` 读取实际位置；读写 workspace 则使用请求
+路径。
+
+artifact 交付不会替换或包装业务结果。可信 refs 位于
+`meta["logs"]["artifact_refs"]`，并通过 `artifact.started` / `artifact.completed`
+stream event 暴露。连续调用可创建多个分别校验的文件；任一已声明交付失败都会使本次
+run 失败。artifact 物化总是在 review 之前完成。
+
+## Execution 插件
+
+Agent 持有可复用配置与能力；AgentExecution 插件持有一次执行的隔离草稿、
+生产生命周期、结果和最终处理规则。`agent.create_execution(name)`
+返回的就是已注册类的实例。
+
+| 名称 | 生产行为 | 可显式搭配的策略 |
+| --- | --- | --- |
+| `auto`（默认） | 启动时选择已有请求、长任务或 DAG 路由 | 已有路由策略 |
+| `request` | 单次请求，包括请求自己的解析与修复 | `auto`、`direct` |
+| `long_task` | 保留状态的多步目标执行 | `auto`、`task`、`task_loop`、`long_task`、`flat`、`taskboard` |
+| `plan` | 就绪检查、必要时连接式澄清、最终计划 | `auto` |
+| `long_content` | 章节规划、依赖式写作、宿主按序组装 | `auto` |
+
+显式选择优先于配置中的默认插件。不兼容的策略组合在模型或 Action 调用前报错。
+路由策略不能悄悄把显式插件换成另一种生产方式。普通链式调用保留延迟
+`auto` 选择；仅注册插件不会额外发起模型请求、规划或 review。
+
+```python
+execution = (
+    agent.create_execution("plan")
+    .input("根据已提供的事实规划一次工作坊。")
+    .info(workshop_facts)
+    .interact(handle_exchange)
+    .output(plan_schema)
+    .validate(validate_plan)
+)
+plan = execution.start()
+meta = execution.get_meta()
+print(meta["plugin"], meta["route"]["selected_route"])
+```
+
+调用方的 `validate(...)` 只硬校验生产方最终返回的值，不审查中间的就绪响应、
+章节计划或任务步骤。直接请求的修复仍由 ModelRequest 负责。
+Artifact 写入、回读和可选 review 在最终校验后由同一个 execution 执行。
+
+`plan` 使用有界的就绪检查与规划请求。就绪检查也会读取最终 `output(...)`
+的字段描述和约束，但自身仍返回独立的就绪判断，不提前填写最终计划。
+最终规划直接使用原始任务与已接受的澄清回复，不要求先重新生成一份目标和交付要求的复述。
+需要澄清时，连接式 handler 接收
+`ExecutionExchangeView`。缺失或拒绝的回答、澄清次数耗尽会产生明确的 blocked
+结果，不会伪造回答。本内置连接式流程尚不承诺持久化恢复计划。
+配置为 `plugins.AgentExecution.plan.max_clarification_rounds`（默认 3）及
+`max_questions_per_round`（默认 3）。
+
+`long_content` 先规划章节，逐章生成正文，并在后续章节需要时生成一份实际章级
+摘要；宿主保留完整子目录，按计划顺序组装正文，不让模型再复制全文。
+配置 `plugins.AgentExecution.long_content.max_sections`（默认 12）。
+整个 `long_content` Execution 输出文本，不能搭配结构化 `output(...)`。
+结构内的长文则在普通请求上用 `(LongContent, "写作要求")` 或兼容字符串
+`("long_content", "写作要求")` 声明；框架独立生成正文并填回原结构。
+两种作用域不要混淆，详见[字段级长文声明](../requests/output-control.md)。
+章节请求使用底层条件续写，正常完成不追加请求；根 `.auto_continue()` 不会把
+组装后的全文重新请求。已发布 `.ensure_long_output()` 保留为同实现兼容入口。
+长文生产与请求续写的职责独立，通用结构内长字符串接续仍有未完成的验收项。
+
+自定义实现也注册到 `AgentExecution` 分类。可以继承内置实现复用生命周期，
+在同一个实例上覆盖带明确类型的受保护生产方法：
+
+```python
+from agently.builtins.plugins.AgentExecution import RequestExecution, ProductionOptions
+
+class AuditedRequest(RequestExecution):
+    name = "audited_request"
+
+    async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        route, value = await super()._async_produce(options)
+        self.logs["audit"] = {"produced": True}
+        return route, value
+
+agent.plugin_manager.register("AgentExecution", AuditedRequest, activate=False)
+execution = agent.create_execution("audited_request").input("解释这次迁移。")
+result = execution.start()
+```
+
+仅在确实要改变默认插件时使用 `activate=True`。完整替换实现也可以直接遵守公开
+协议。`run/async_run` 与兼容的 `start/async_start`、结果读取入口共享一次生产；
+预先取得的结果读取器不会再启动另一份执行。
+
+元数据提供 `plugin`；多请求生产方发出 `execution.stage.started/completed`，
+在 `diagnostics.execution_run` 中记录阶段。类型从 `agently.types.plugins`
+和 `agently.types.data` 导入，不额外扩张根包导出。
+已发布的 AgentOrchestrator 激活路径作为兼容适配保留，但不再参与默认创建。
+未发布的 `pattern()` 与 AgentPattern 分类已被替换，不作为并行 API 保留。
+
+本地 Ollama Qwen 示例：
+
+- [带连接式澄清的计划](../../../examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py)
+- [带产物回读与 review 的长内容](../../../examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py)
 
 ## Goal Pursuit
 
-当业务目标需要有边界的 planning、execution、evidence、verification 和 replan
-闭环时，使用 `agent.goal(goal_or_goals, success_criteria=None)`。
-`agent.goals(...)` 只是同一个入口的复数 alias。
+`agent.goal(goal_or_goals, success_criteria=None, *, turn_on_long_task=True)`
+声明语义目标与成功标准；默认还为普通 auto 路由开启有界长任务便捷路径。
+`turn_on_long_task=False` 写入相同 Prompt 声明，但不因此开启长任务，
+也不会禁止独立选择的 long_task 插件或策略。显式 `direct` 策略和插件选择仍然有效。
+`agent.goals(...)` 是复数别名；两者均不自动开启 review。
+启动前再次调用 goal() 会替换该声明拥有的便捷开关。
+
+已选定的长任务生产方若缺少 goal 或 success criteria，会在构造任务状态前调用模型，
+仅从原始请求推导缺失字段。显式声明与原始 Prompt 保持不变，metadata 记录模型来源；
+推导标准不能授权新工作或虚构业务门槛。必要事实不足时返回 blocked。
+推导会参考最终输出合同（含字段描述、格式和必填要求）；未声明输出时不添加空合同。
+补全阶段消耗同一 execution 的模型请求与时间预算，构造任务不会重新计时。
+任务创建前超时会抛出 `RuntimeStageStallError`；创建后沿用任务的 `timed_out`
+结果封装，并受 execution 剩余时间约束。
+完整或已恢复的合同跳过此节点；普通请求与 review 不增加前置调用，plan/long_content
+继续使用各自的规划节点。参见 [缺失目标补全示例](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
+及其记录的 27B 成功样例与 9B 未通过结果；单次运行不代表稳定性保证。
 
 task-specific options 单独组装时，应通过 task strategy 传入：
 
@@ -690,11 +921,40 @@ dependency `TaskBoardCardResult` 中的可信 artifact refs 做确定性关联�
 Flat AgentTask step 使用同一个命令降低 owner。Flat planner 只从紧凑 capability list
 选择 `required_action_ids`，不会在缺少严格 kwargs schema 时猜测参数。如果内部结构化 plan
 已经携带通过校验的 `action_commands`，宿主无需追加规划请求即可执行；否则只发出一次窄结构化
-请求，该请求仅接收必需 Actions 的权威 schema 与有界 step context，返回命令批次后由宿主校验
-并按依赖顺序串行交给 ActionRuntime，从而在不重开规划循环的情况下保留 write/read 等 step
-内依赖。未知或不可用的必需 Action 会在该请求之前 fail closed。只有 step
-没有固定必需 Action ids、且后续 Action 选择确实依赖 Action 结果时，Flat 才回退到开放式
-ActionLoop。
+请求，该请求仅接收必需 Actions 的权威 schema 与有界 step context，返回完整命令批次，或
+`requires_observation=true` 与空命令列表。所有参数已经有依据时，宿主校验后串行交给
+ActionRuntime；仅顺序依赖（例如写入再读取已知路径）不需要另开规划轮次。
+后续参数必须依赖前一 Action 的新结果时，即使全部 Action id 已知，Flat 也会使用已有
+有界子 ActionLoop，先观察结果再规划下一调用。交接前不会执行半个批次。
+就绪字段缺失或自相矛盾会明确失败；未知或不可用的必需 Action 在窄请求之前失败。
+显式 `action_commands` 仍是固定 kwargs，不是结果引用或变量替换语言。
+子执行的 scope、权限、deadline 和最终验收保持不变；交接时还会将批次 required ids
+绑定到子执行已有的 `require_actions` 证据门槛，不能仅设置可见范围。
+该门槛证明成功调用，不代替参数语义或重复调用次数的业务验收。交接时的一次窄请求记录在
+`execution_meta.action_command_planning` 中。
+这种自适应交接不套用普通子执行隐式的两轮上限，因为调用后可能还需要终态请求；
+显式任务 `action_loop_max_rounds`、任务 deadline 和请求预算继续生效。
+
+如果该步骤已完成 `scoped_retrieval`，参数请求同时接收本步有界读取结果和既有证据账本，
+保留原任务、步骤和上下文，不重复读取或额外请求模型。失败、空结果、仅引用和截断状态
+保持原义；未读正文不能作为参数依据。没有本步读取时请求保持原样；显式预计划命令仍使用
+固定参数，转交子执行时继续携带同一份证据。
+
+任务级 `require_actions` 在全任务累计 Action 证据中检查，不会重复变成每次子请求的
+必调用要求。仅撰写最终答复或产物的子执行无需重做已完成的 Action；显式 step-required
+仍由子执行检查，任务所需 Action 缺失或失败仍会阻止验收。Agent 默认要求在任务创建时
+确定，并随任务 options 保存，恢复时不因后来新增默认要求而改变原任务义务。
+
+Flat 中仅产生普通观察的成功命令批次会交给下一步消费，不先把尚未完成全任务判成失败。
+这一交接只适用于没有显式终态就绪标记、实际候选、产物引用或既存终态修复的已知命令结果；
+计划中的 `inline_final` 只声明交付格式，不表示正文已经生成。累计 required 待办和精确
+Action 返回值继续传递，真实失败、权限、grounding 与修复要求不被隐藏。
+最终候选仍须经过终态验收；仅有中间观察或预算耗尽不能成为已接受结果。
+TaskBoard、产物读回和外层 `review` / `validate` 的原有职责不变。
+
+`examples/agent_task/action_result_dependency.py` 用真实模型执行工单读取/确认任务，
+revision 只在 Action 调用时生成。配置 `MODEL_BASE_URL`、`MODEL_API_KEY` 和
+`MODEL_NAME` 即可运行；可选 `MODEL_REQUEST_OPTIONS` 接收 JSON 对象形式的 provider 参数。
 
 AgentTask observation 也会在结构化 stream 上发布归一化 action 事实：
 `agent_task.action.started`、`agent_task.action.completed` 和
@@ -1051,12 +1311,20 @@ await task.async_streaming_print()
 result = await task.async_get_full_data()
 ```
 
-`debug=True`（即 `simple` profile）打印精简的模型请求/结果和过程摘要；
-`debug="detail"` 打印完整诊断 RuntimeEvent 流，包括模型流式 delta、ActionRuntime、
-TriggerFlow 与 AgentExecution 明细。它不会替代或重复业务输出：要查看可读的任务阶段和
-最终结果，仍需消费 `type="delta"` 或调用 `async_streaming_print()`。两者同时使用，
-才是完整的开发观察视图。问题定位后，应从示例和生产代码中移除 debug settings；
-如果需要自定义诊断出口，仍可挂 EventCenter hook。
+`debug=True`（即 `simple` profile）打印可读 Prompt、精简请求/结果和关键过程；
+`debug="detail"` 增加脱敏 provider 请求 JSON、attempt/validation/telemetry、Action 与
+路由/阶段明细，但仍会筛选兼容别名、传输镜像和重复进展。控制台不是完整 RuntimeEvent
+流，也不会替代业务输出：要查看可读的任务阶段和最终结果，仍需消费 `type="delta"` 或
+调用 `async_streaming_print()`；要完整审计、存储或重放则使用 EventCenter hook 或
+DevTools。问题定位后，应从示例和生产代码中移除 debug settings。
+并发模型响应仍然并发执行：ConsoleSink 只把最先产生 delta 的响应设为前台展示，将后到
+响应的展示按 FIFO 缓冲，并在前台终止后提升；这只影响展示，绝不阻塞或重排底层执行。
+前台流存在时，普通 Prompt/request/process/成功状态会有界延后到全部 FIFO 响应展示完成
+之后，正文间只插入一条精简后台提示。需要处理的 warning、failure、cancellation、interrupt
+与 approval 仍即时出现，EventCenter 与 DevTools 的事件时序不变。
+simple 模式会为每个成功模型响应保留一个完整投影：要么是完整展示的实时流，要么是完整
+终态结果。后台重放 buffer 若已满，控制台会在完成时用完整权威结果替代残缺重放，不会把
+部分正文当成全部输出。
 
 ## 提交式 DAG 输入
 
@@ -1086,8 +1354,10 @@ snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 ## Skills 语义
 
 `agent.use_skills(...)` 和 `agent.use_skills_packs(...)` 在 AgentExecution 上登记
-binding intent。`mode="model_decision"` 用结构化语义 selector 从已安装 revision
-中选择；`mode="required"` 以 fail-closed 方式绑定 SKILL.md guidance。普通
+binding intent，并与 `use_actions(...)` 使用同一种组合表达；没有另一套公开的
+Skill 集合 API。每个 execution 只把这些声明解析成自己的精确 revision 范围，不扫描
+全局 SkillLibrary。`mode="model_decision"` 用结构化语义 selector 从本次 execution
+范围中选择；`mode="required"` 以 fail-closed 方式绑定 SKILL.md guidance。普通
 `model_request` 或显式 AgentTask strategy 再通过 TaskContext 消费这些 guidance。
 
 `run_skills_task(...)` 只是同一 AgentExecution path 的已发布 result-shaped
@@ -1128,3 +1398,77 @@ async for item in execution.get_async_runtime_stream({"ticket": ticket}, timeout
 ```
 
 这样可以把 AgentExecution stream 语义和独立 DAG runtime stream 语义分开。
+
+
+## 统一执行控制
+
+`run()` / `async_run()` 与结果 reader 共享同一个自有运行任务，并发读取不会
+重复生产。启动前可查看 `execution.control_capabilities` 确认支持边界。
+
+- `pause()` / `async_pause()` 请求在生产前，或候选产生后、最终策略前暂停。
+  requested 不等于 paused；在途 provider 先结算。实际暂停时 run 和 reader
+  抛出 `AgentExecutionPaused`，不会伪造终态结果。
+- `resume()` / `async_resume()` 显式继续原 TriggerFlow；普通读取不会自动恢复，
+  候选暂停后的恢复不会重复生产。已完成的结果不能借 resume 再次生产。
+- `interrupt(content, author=None)` 通过 TaskContext 补充后续请求的信息；回执
+  区分插入、请求消费与忽略，不会修改已分发请求。候选已经产生时明确忽略。
+- `cancel(reason=..., timeout=...)` 取消并等待自有工作清理。超时仍未结算，
+  重复调用继续等待同一清理过程；取消不回滚外部副作用。
+- `close(reason=..., timeout=..., pending="error")` 默认排空并关闭；未解决的
+  等待会报错，只有显式 `pending="cancel"` 才放弃。关闭 draft 禁止启动，
+  关闭已完成结果仍保留 reader。所有控制方法均提供 async 对应形式。
+
+在已经结算的安全暂停处调用 `snapshot = execution.save()`；先配置新的执行
+对象，再 `restored.load(snapshot)`，最后显式 `await restored.async_resume()`。
+load 本身不调用模型或 Action。恢复新对象前先取消旧暂停对象，避免保留两份可继续的句柄。
+
+新对象须重新绑定同一原始 draft、预算、策略 callback、Action/Skill、Workspace、
+RecordStore 及外部 ContextSource。快照只有 JSON 数据与资源身份，没有 settings、
+密钥、客户端或可执行 callback；缺失或变更的绑定明确失败。目前保守拒绝任何
+Skill 目录变化。累计模型调用数与 elapsed time 跨 load 保留，停机时间也计入。
+
+恢复后首次 `get_data_object()` 使用重绑的原输出 schema 在本地校验并重建对象，
+之后复用缓存；支持 Pydantic 嵌套/根类型及 `LongContent` 声明。load 不运行
+输出模型校验器，typed reader 不重新调用模型或最终 validate/artifact/review。
+历史 revision 从各自候选重建，不能读到新版本的类型化缓存；本地重建失败会抛错。
+
+### 返工与历史版本
+
+```python
+execution = agent.create_execution("request", limits={"max_model_requests": 3}).input(
+    "总结：staging 已通过；production 尚待批准。"
+)
+previous = execution.get_result()  # 固定读取 revision 0。
+first = await execution.async_run()
+revised = await execution.async_rework("先说明待批准事项。", max_reworks=2)
+assert execution.revision == 1  # 同一个对象、同一个 execution ID。
+assert await previous.async_get_full_data() == first
+assert await execution.get_result(revision=0).async_get_full_data() == first
+```
+
+`rework` 返回新候选的完整结果，已有 reader 保留原版本的数据、meta 和 stream；
+新 reader 默认读取当前 revision。原始任务和验收标准与本次反馈一起交给生产者。
+Request 修改上一候选；Plan 保留已接受的澄清；LongContent 复用未变的前缀，
+重写受影响章节及后续章节。LongTask 由模型选择需失效的工作，Host 校验 ID
+并失效依赖：Flat 失效后续串行工作，TaskBoard 保留无关卡片并核验复用文件内容。
+也可以只选择最终 candidate 返工，保留全部已完成工作，重新生产交付结果。
+
+模型调用数、耗时、Flat 迭代数和 TaskBoard tick 累计。用
+`create_execution("long_task", limits=...)` 声明总模型预算；兼容
+`create_task(limits=...)` 的模型次数仍保持原有单步含义，但墙钟跨返工累计。
+`max_reworks` 建立的次数
+上限不能被后续调用提高。失败的 revision 不会变成成功，旧候选仍可读取。
+已分发的 Action（包括副作用结果不确定的失败）再次执行，需要 `replay_safe`
+声明或 Host 显式传入 `allow_replay=True`；子执行不能放宽父执行限制。
+Artifact callback 同样需要显式允许重放。副作用不会回滚，历史文件引用不等于
+文件备份；自定义生产者须声明自己的安全返工契约。
+
+安全暂停快照包含版本历史、生产者状态和重放保护。使用 `create_task` 恢复时
+须显式重新绑定原 `task_id`；已结算任务资源通过原有 task recovery 契约恢复，
+不能恢复的 ContextSource 明确失败。快照恢复历史数据、meta、stream 记录，
+不恢复 provider 活对象或原 Python 异常类。仍存活且没有 checkpoint 契约的
+ExecutionResource 会阻止保存，须先结算或释放；终态清理释放当前执行自有的 execution scope。
+
+当前仅支持外层执行安全边界；在途 provider、活跃子执行、离线 Plan 澄清和
+嵌套父预算恢复仍不支持，不能用旧 AgentTask resume 能力代替。真实模型快照
+交接与同一 execution 返工示例见 `examples/agent_auto_orchestration/29_execution_controls_ollama.py`。

@@ -19,8 +19,8 @@ import os
 import uuid
 
 from collections.abc import Mapping
-from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Literal, cast, overload
-from typing_extensions import Self
+from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Literal, cast
+from typing_extensions import Self, overload
 
 from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask, DynamicTask
@@ -37,6 +37,11 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentExecutionEffort,
+        AgentExecutionStrategy,
+        AgentArtifactHandler,
+        AgentInteractionHandler,
+        AgentReviewHandler,
         AgentlyModelResultMessage,
         AgentlyOriginalResultPayload,
         AgentlySpecificResultMessage,
@@ -165,6 +170,7 @@ class BaseAgent:
         self.name = name if name is not None else self.id[:7]
 
         self.plugin_manager = plugin_manager
+        self.__agent_capabilities: dict[str, object] = {}
         self.settings = Settings(
             name=f"Agent-{ self.name }-Settings",
             parent=parent_settings,
@@ -178,7 +184,7 @@ class BaseAgent:
             {
                 "request_prefixes": [],
                 "broadcast_prefixes": [],
-                "broadcast_suffixes": [],
+                "broadcast_suffixes": {},
                 "finally": [],
                 "validate_handlers": [],
             },
@@ -252,6 +258,7 @@ class BaseAgent:
 
         The model key is resolved through the existing model_pool /
         key_pool_strategy / key_pool settings when a request is consumed.
+        A configured non-empty model_pool rejects unknown aliases at that point.
         Passing None clears the active model key.
         """
         if model_key is None:
@@ -1028,18 +1035,59 @@ class BaseAgent:
             raise_ensure_failure=raise_ensure_failure,
         )
 
+    @overload
     def create_execution(
         self,
+        name: Literal["auto", "request", "long_task", "plan", "long_content"] | None = None,
+        *,
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def create_execution(
+        self,
+        name: str | None = None,
+        *,
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: "ExecutionOptions | dict[str, Any] | None" = None,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "AgentExecution": ...
+
+    def create_execution(
+        self,
+        name: str | None = None,
         *,
         lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
         limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
         options: "ExecutionOptions | dict[str, Any] | None" = None,
         parent_run_context: "RunContext | None" = None,
     ) -> "AgentExecution":
-        plugin_name = str(self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator"))
-        plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", plugin_name))
-        orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
-        return orchestrator.create_execution(
+        """Create the selected execution plugin; no model work runs here.
+
+        Built-ins: auto, request, long_task, plan, long_content. Explicit names
+        take precedence over configured defaults and released creation adapters.
+        """
+        selected = name if name is not None else self.settings.get("plugins.AgentExecution.activate", "auto")
+        if not isinstance(selected, str) or not selected.strip():
+            raise ValueError("AgentExecution name must be a non-empty registered name.")
+        selected = selected.strip()
+        legacy = self.settings.get("plugins.AgentOrchestrator.activate", "AgentlyAgentOrchestrator")
+        if name is None and selected == "auto" and legacy != "AgentlyAgentOrchestrator":
+            plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentOrchestrator", str(legacy)))
+            orchestrator = plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
+            return orchestrator.create_execution(
+                self, lineage=lineage, limits=limits, options=options, parent_run_context=parent_run_context,
+            )
+        try:
+            plugin_class = cast(Any, self.plugin_manager.get_plugin("AgentExecution", selected))
+        except (KeyError, TypeError) as error:
+            raise ValueError(f"AgentExecution {selected!r} is not registered.") from error
+        self._bind_required_capabilities(getattr(plugin_class, "required_agent_capabilities", ()))
+        return plugin_class(
             self,
             lineage=lineage,
             limits=limits,
@@ -1047,12 +1095,51 @@ class BaseAgent:
             parent_run_context=parent_run_context,
         )
 
+    def use_capability(self, name: str, capability: object | None) -> "BaseAgent":
+        """Bind an extra capability for future executions; None removes the binding.
+
+        This is dependency injection, not an Action permission or a health check.
+        Existing executions retain objects they have already bound.
+        """
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise ValueError("Capability name must be a non-empty, unpadded string.")
+        if capability is None:
+            self.__agent_capabilities.pop(name, None)
+        else:
+            self.__agent_capabilities[name] = capability
+        return self
+
+    def require_capability(self, name: str) -> object:
+        """Return a bound extra capability or fail before dependent work."""
+        try:
+            return self.__agent_capabilities[name]
+        except KeyError as error:
+            raise RuntimeError(f"Agent capability {name!r} is not bound.") from error
+
+    def _bind_required_capabilities(self, names: tuple[str, ...]) -> dict[str, object]:
+        if not isinstance(names, tuple) or any(not isinstance(name, str) or not name.strip() for name in names):
+            raise TypeError("required_agent_capabilities must be a tuple of non-empty capability names.")
+        return {name: self.require_capability(name) for name in names}
+
     def create_task(
         self,
         *,
         goal: str,
         success_criteria: list[str] | None = None,
-        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
+        execution: Literal[
+            "auto",
+            "flat",
+            "taskboard",
+            "default",
+            "automatic",
+            "linear",
+            "react",
+            "flat_react",
+            "task_board",
+            "board",
+            "taskboard_evidenceview",
+        ]
+        | None = "auto",
         task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
@@ -1246,7 +1333,20 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
-        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
+        execution: Literal[
+            "auto",
+            "flat",
+            "taskboard",
+            "default",
+            "automatic",
+            "linear",
+            "react",
+            "flat_react",
+            "task_board",
+            "board",
+            "taskboard_evidenceview",
+        ]
+        | None = "auto",
         task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
@@ -1273,6 +1373,11 @@ class BaseAgent:
         return agent_execution
 
     def validate(self, handler: "OutputValidateHandler") -> Self:
+        """Register a hard final-output validator for requests and executions.
+
+        Internal Pattern/AgentTask steps are not checked by this callback.
+        Use execution.validate(...) for a single execution-local declaration.
+        """
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
@@ -1775,18 +1880,92 @@ class BaseAgent:
             return self
         return self.create_execution().set_prompt_options(options)
 
-    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
-        return self.create_execution().goal(goal, success_criteria=success_criteria)
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        turn_on_long_task: bool = True,
+    ) -> "AgentExecution":
+        """Declare a goal, enabling long-task execution by default.
+
+        Use turn_on_long_task=False for a semantic Prompt declaration only.
+        """
+        return self.create_execution().goal(
+            goal, success_criteria=success_criteria, turn_on_long_task=turn_on_long_task,
+        )
 
     goals = goal
 
-    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
+    def interact(self, handler: "AgentInteractionHandler") -> "AgentExecution":
+        """Bind a connected human-interaction handler to a fresh execution."""
+        return self.create_execution().interact(handler)
+
+    def review(
+        self, handler: "AgentReviewHandler | None" = None, *,
+        rules: str | Sequence[str] | None = None,
+        on_fail: Literal["warn", "block"] = "warn",
+    ) -> "AgentExecution":
+        """Review final output and artifacts using rules or a replacement handler.
+
+        on_fail warns by default or blocks delivery with AgentReviewError.
+        It does not change the evaluator's rubric or replay execution steps.
+        """
+        return self.create_execution().review(handler, rules=rules, on_fail=on_fail)
+
+    def artifact(
+        self,
+        path: str | os.PathLike[str],
+        handler: "AgentArtifactHandler | None" = None,
+    ) -> "AgentExecution":
+        """Declare a TaskWorkspace-relative artifact for a fresh execution."""
+        return self.create_execution().artifact(path, handler)
+
+    @overload
+    def effort(
+        self,
+        value: Literal["minimal", "low", "fast", "medium", "normal", "high", "max"] = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def effort(
+        self,
+        value: "AgentExecutionEffort" = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    def effort(
+        self,
+        value: "AgentExecutionEffort" = "medium",
+        **strategy: object,
+    ) -> "AgentExecution":
+        """Apply an execution effort profile while preserving fluent typing."""
         return self.create_execution().effort(value, **strategy)
 
     def route_policy(self, value: Any) -> "AgentExecution":
         return self.create_execution().route_policy(value)
 
-    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
+    @overload
+    def strategy(
+        self,
+        value: Literal["auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"] | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: "AgentExecutionStrategy | None" = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def strategy(
+        self,
+        value: "AgentExecutionStrategy | None" = None,
+        **options: object,
+    ) -> "AgentExecution":
+        """Select an execution strategy and optional strategy-specific settings."""
         return self.create_execution().strategy(value, **options)
 
     # Prompt

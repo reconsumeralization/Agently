@@ -220,8 +220,15 @@ def normalize_action_decision(decision: Any) -> ActionDecision:
     if not isinstance(diagnostics, list):
         diagnostics = []
 
+    response = decision.get("response")
+    if not isinstance(response, str):
+        response = ""
+    if next_action == "execute":
+        response = ""
+
     return {
         "next_action": next_action,
+        "response": response,
         "use_action": final_use_action,
         "next": fallback_next,
         "execution_actions": action_calls,

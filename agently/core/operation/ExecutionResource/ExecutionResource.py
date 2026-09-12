@@ -130,7 +130,26 @@ class ExecutionResourceManager:
         self._providers_by_id[provider_id] = provider
         for kind in self._supported_kinds(provider):
             self._providers.setdefault(kind, {})[provider_id] = provider
+        bind_event_emitter = getattr(provider, "_bind_runtime_event_emitter", None)
+        if callable(bind_event_emitter):
+            bind_event_emitter(self._emit_provider_progress)
         return self
+
+    async def _emit_provider_progress(
+        self,
+        requirement: ExecutionResourceRequirement,
+        *,
+        phase: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        await self._emit(
+            "execution_resource.progress",
+            requirement=requirement,
+            status="ensuring",
+            message=message,
+            details={"phase": phase, **dict(details or {})},
+        )
 
     def _load_plugin_providers(self) -> None:
         if self._plugins_loaded:
@@ -600,6 +619,7 @@ class ExecutionResourceManager:
         *,
         status: ExecutionResourceStatus | None = None,
         error: str | None = None,
+        details: dict[str, Any] | None = None,
     ):
         source = handle if handle is not None else requirement if requirement is not None else {}
         payload = {
@@ -615,6 +635,8 @@ class ExecutionResourceManager:
         }
         if error:
             payload["error"] = error
+        if details:
+            payload.update(details)
         return payload
 
     async def _emit(
@@ -626,6 +648,7 @@ class ExecutionResourceManager:
         status: ExecutionResourceStatus | None = None,
         message: str | None = None,
         error: str | None = None,
+        details: dict[str, Any] | None = None,
     ):
         await self.event_center.async_emit(
             {
@@ -633,9 +656,59 @@ class ExecutionResourceManager:
                 "source": "ExecutionResourceManager",
                 "level": "ERROR" if error else "INFO",
                 "message": message,
-                "payload": self._event_payload(requirement, handle, status=status, error=error),
+                "payload": self._event_payload(
+                    requirement,
+                    handle,
+                    status=status,
+                    error=error,
+                    details=details,
+                ),
             }
         )
+
+    @staticmethod
+    def _failure_details(error: Exception) -> dict[str, Any]:
+        code = str(getattr(error, "code", "") or "execution_resource.failed")
+        raw_payload = getattr(error, "payload", {})
+        error_payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+        details: dict[str, Any] = {"error_code": code}
+        probes = error_payload.get("provider_probes")
+        if isinstance(probes, list):
+            details["provider_probes"] = probes[:20]
+            for probe in probes:
+                if not isinstance(probe, dict):
+                    continue
+                details.setdefault("provider_id", str(probe.get("provider_id", "")))
+                reason = str(probe.get("reason", ""))
+                if reason:
+                    details.setdefault("reason", reason)
+                meta = probe.get("meta")
+                runtime_image = meta.get("runtime_image") if isinstance(meta, dict) else None
+                if isinstance(runtime_image, dict) and runtime_image:
+                    details.setdefault("runtime_image", runtime_image)
+        for key in ("image", "image_pull_policy", "reason"):
+            if key in error_payload and error_payload[key] not in (None, ""):
+                details[key] = error_payload[key]
+        runtime_image = details.get("runtime_image")
+        if (
+            code == "execution_resource.provider_unavailable"
+            and isinstance(runtime_image, dict)
+            and runtime_image.get("exists") is False
+        ):
+            details["suggestion"] = (
+                "Pull the listed image or use image_pull_policy='if_missing' / "
+                "provisioning_profile='developer'."
+            )
+        elif code in {
+            "execution_resource.provider_unavailable",
+            "execution_resource.docker_unavailable",
+        }:
+            details["suggestion"] = (
+                "Start Docker for isolated execution. For trusted code only, explicitly opt into "
+                "sandbox='trusted_local' (or providers=['trusted_local'] with unsafe_fallback=True); "
+                "Agently never enables this unsafe fallback automatically."
+            )
+        return details
 
     def declare(self, requirement: ExecutionResourceRequirement):
         normalized = self._normalize_requirement(requirement)
@@ -718,11 +791,41 @@ class ExecutionResourceManager:
             self._requirements[str(requirement.get("requirement_id", ""))] = requirement
         policy = cast(ExecutionResourcePolicy, merge_access_control_policy(requirement.get("policy", {}), self.settings))
         policy = await self._resolve_approval(requirement, policy)
-        provider, provider_probes, selected_requirement, selected_candidate = await self._select_provider(
+        await self._emit(
+            "execution_resource.ensuring",
             requirement=requirement,
-            policy=policy,
+            status="ensuring",
+            message="Checking execution environment providers.",
+            details={"phase": "provider_probe"},
         )
+        try:
+            provider, provider_probes, selected_requirement, selected_candidate = await self._select_provider(
+                requirement=requirement,
+                policy=policy,
+            )
+        except Exception as error:
+            await self._emit(
+                "execution_resource.failed",
+                requirement=requirement,
+                status="failed",
+                message="Execution environment check failed.",
+                error=str(error),
+                details=self._failure_details(error),
+            )
+            raise
         provider_id = self._provider_id(provider)
+        await self._emit(
+            "execution_resource.probed",
+            requirement=requirement,
+            status="ensuring",
+            message="Execution environment provider selected.",
+            details={
+                "phase": "provider_selected",
+                "provider_id": provider_id,
+                "provider_probes": provider_probes,
+                "selected_provider_candidate": selected_candidate,
+            },
+        )
         reuse_key = self._stable_json(
             {
                 "requirement": str(requirement.get("reuse_key", "")),
@@ -754,12 +857,6 @@ class ExecutionResourceManager:
             else:
                 await self._async_release_handle(existing_id, force=True)
 
-        await self._emit(
-            "execution_resource.ensuring",
-            requirement=requirement,
-            status="ensuring",
-            message="Execution environment ensuring started.",
-        )
         try:
             handle = await provider.async_ensure(
                 requirement=selected_requirement,
@@ -773,6 +870,7 @@ class ExecutionResourceManager:
                 status="failed",
                 message="Execution environment ensure failed.",
                 error=str(error),
+                details=self._failure_details(error),
             )
             raise
         normalized_handle = cast(ExecutionResourceHandle, dict(handle))
@@ -800,6 +898,11 @@ class ExecutionResourceManager:
             handle=normalized_handle,
             status="ready",
             message="Execution environment is ready.",
+            details={
+                "phase": "ready",
+                "provider_id": provider_id,
+                "image_preparation": normalized_handle.get("meta", {}).get("image_preparation"),
+            },
         )
         return normalized_handle
 

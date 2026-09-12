@@ -236,6 +236,19 @@ Action Runtime 生命周期事件以 `action.*` 作为主命名空间。当当�
 
 配对兼容事件会带上 `meta.compat_event_alias=True`、`meta.compat_alias_for` 和 `meta.primary_event_id`，方便消费者与主 `action.*` 事件去重。
 
+默认 Action-or-Response 规划请求会用增量字段
+`run.meta.model_request_role="action_planning"` 标识运行角色。simple 控制台据此隐藏正常
+内部规划流，只展示一次已接受的外层业务 response；detail 和 EventCenter hook 仍可检查
+规划请求与决策，validation warning 在 simple 中也保持可见。
+
+程序化规划的 `action.plan_ready` 可以包含有界的
+`payload.decision.planning_observation` 计量视图。settle 后的
+`run_action_program` record 可以在 `meta.programmatic_observation` 中提供
+SDK/contract/program/wrapper 大小、binding 调用结果与观测到的 active binding
+并发峰值。完整 SDK、catalog、program source、binding values 与 provider logs
+仍保留在 cold 边界。这些 additive 字段只用于诊断，不能驱动 route、retry、policy
+或 acceptance。
+
 具体 action 执行使用 `action.started`、`action.completed` 和 `action.failed`。
 因 policy 或 sandbox gate 在正常执行前停止的 action 使用
 `action.approval_required` 或 `action.blocked`，不会再被记录成普通失败。
@@ -245,8 +258,10 @@ Action Runtime 生命周期事件以 `action.*` 作为主命名空间。当当�
 
 ExecutionResource 生命周期使用 `execution_resource.*`。Provider 与 DevTools
 消费者都应把这个 namespace 当作可扩展协议处理。当前 manager 事件包括 `declared`、
-`approval_required`、`ensuring`、`ready`、`unhealthy`、`releasing`、`released`
-和 `failed`。`unhealthy` 表示 ready handle 在复用前 health check 失败；manager 会释放它并
+`approval_required`、`ensuring`、`probed`、`progress`、`ready`、`unhealthy`、
+`releasing`、`released` 和 `failed`。`probed` 记录选中的 provider 与有界 probe 事实；
+`progress` 承载有界准备进度，例如已经授权的 Docker 镜像下载。`unhealthy` 表示 ready
+handle 在复用前 health check 失败；manager 会释放它并
 ensure 一个新 handle。
 
 ## 运行进展与卡死诊断
@@ -261,9 +276,14 @@ AgentExecution 会把进展记录在 `async_get_meta()["diagnostics"]`：
 - `diagnostics["timeouts"]` 记录硬截止超时。
 - `diagnostics["stalls"]` 记录 idle 无进展卡死。
 
-调试线上或本地应用时，可以临时挂 Event Center hook，或用
-`.set_settings("debug", True)` 打开请求/结果与过程摘要，用
-`.set_settings("debug", "detail")` 打开完整 observation 与模型 delta 输出。
+调试线上或本地应用时，可以用 `.set_settings("debug", True)` 打开可读 Prompt、请求/
+结果与过程摘要，用 `.set_settings("debug", "detail")` 增加脱敏 provider 请求 JSON、
+attempt/validation/telemetry、Action 明细和路由/阶段元数据。两种控制台 profile 都是面向
+人的筛选投影，不是完整事件流；detail 也会去掉兼容别名、`runtime.progress.*` 镜像等
+重复事实。每个 ModelRequest delta 流只在一个持续更新的块中展示。需要完整 observation
+审计、存储或重放时，应挂 Event Center hook 或使用 DevTools。
+ExecutionResource 在 simple 模式使用可读环境阶段和紧凑镜像层进度，不直接显示
+`provider=`/`phase=` 字段；detail 先给出同样的说明，再附带 `Diagnostics`。
 RuntimeEvent 诊断与公开业务文本是两个独立出口；还需要消费
 `execution.get_async_generator(type="delta")` 或调用
 `await execution.async_streaming_print()`，才能看到完整可读过程与最终结果。

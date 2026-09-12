@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from typing import Tuple, Callable, Sequence, Any, Awaitable, TYPE_CHECKING
+from typing import Tuple, Callable, Sequence, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agently.types.data import (

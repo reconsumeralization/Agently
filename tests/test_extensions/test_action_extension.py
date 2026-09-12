@@ -3,19 +3,19 @@ from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
 
-import json
-import os
-import asyncio
-import time
-import sys
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
-from agently import Agently
-from agently.core import PluginManager, RuntimeStageStallError
-from agently.types.data import AgentlyRequestData
-from agently.utils import Settings
+import json  # noqa: E402
+import os  # noqa: E402
+import asyncio  # noqa: E402
+import time  # noqa: E402
+import sys  # noqa: E402
+from collections.abc import AsyncGenerator  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from typing import Any, cast  # noqa: E402
+from agently import Agently  # noqa: E402
+from agently.core import PluginManager, RuntimeStageStallError  # noqa: E402
+from agently.types.data import AgentlyRequestData  # noqa: E402
+from agently.utils import Settings  # noqa: E402
 
 
 class MockActionExtensionRequester:
@@ -77,6 +77,62 @@ class MockActionExtensionRequester:
         yield "meta", {"provider": "mock-tool-extension"}
 
 
+class ScriptedActionResponseRequester:
+    name = "ScriptedActionResponseRequester"
+    DEFAULT_SETTINGS: dict[str, object] = {}
+    responses: list[str] = []
+    prompt_texts: list[str] = []
+    request_count = 0
+
+    def __init__(self, prompt, settings):
+        self.prompt = prompt
+        self.settings = settings
+
+    @classmethod
+    def reset(cls, responses: list[str]) -> None:
+        cls.responses = list(responses)
+        cls.prompt_texts = []
+        cls.request_count = 0
+
+    @staticmethod
+    def _on_register():
+        pass
+
+    @staticmethod
+    def _on_unregister():
+        pass
+
+    def generate_request_data(self):
+        request_index = type(self).request_count
+        type(self).request_count += 1
+        type(self).prompt_texts.append(self.prompt.to_text())
+        return AgentlyRequestData(
+            client_options={},
+            headers={},
+            data={"request_index": request_index},
+            request_options={"stream": True},
+            request_url="mock://scripted-action-response",
+        )
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        request_index = int(request_data.data["request_index"])
+        yield "message", type(self).responses[request_index]
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, object], None],
+    ):
+        response_text = ""
+        async for event, data in response_generator:
+            if event == "message":
+                response_text += str(data)
+        for index in range(0, len(response_text), 7):
+            yield "delta", response_text[index : index + 7]
+            await asyncio.sleep(0)
+        yield "done", response_text
+        yield "meta", {"provider": "scripted-action-response"}
+
+
 def _create_test_agent():
     settings = Settings(name="ActionExtensionTestSettings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name="ActionExtensionTestPluginManager")
@@ -85,6 +141,22 @@ def _create_test_agent():
         plugin_manager,
         parent_settings=settings,
         name="tool-extension-agent",
+    )
+
+
+def _create_scripted_action_agent(responses: list[str]):
+    ScriptedActionResponseRequester.reset(responses)
+    settings = Settings(name="ScriptedActionResponseSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="ScriptedActionResponsePluginManager",
+    )
+    plugin_manager.register("ModelRequester", ScriptedActionResponseRequester, activate=True)
+    return Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="scripted-action-response-agent",
     )
 
 
@@ -136,6 +208,288 @@ def test_action_extension():
         .start()
     )
     assert result["result"] == 86774754
+
+
+@pytest.mark.asyncio
+async def test_action_response_is_delivered_directly_without_third_model_request():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "execute",
+                    "execution_commands": [
+                        {
+                            "purpose": "Add the supplied values",
+                            "action_id": "add",
+                            "action_input": {"a": 2, "b": 3},
+                            "todo_suggestion": "Return the observed sum.",
+                        }
+                    ],
+                    "response": None,
+                }
+            ),
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": "The sum is 5.",
+                }
+            ),
+        ]
+    )
+    agent.settings.set("model_request.scheduler.max_concurrency", 1)
+
+    @agent.action_func
+    def add(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    execution = (
+        agent.input("Add 2 and 3 with the available Action.")
+        .info({"request_marker": "keep-info-in-every-action-round"})
+        .use_action(add)
+    )
+    response = execution.get_response()
+
+    async def collect_delta_text() -> str:
+        return "".join([chunk async for chunk in response.get_async_generator(type="delta")])
+
+    delta_text = await asyncio.wait_for(collect_delta_text(), timeout=2)
+
+    assert delta_text == "The sum is 5."
+    assert await response.async_get_text() == "The sum is 5."
+    assert ScriptedActionResponseRequester.request_count == 2
+    assert len(ScriptedActionResponseRequester.prompt_texts) == 2
+    assert all(
+        "keep-info-in-every-action-round" in prompt_text
+        for prompt_text in ScriptedActionResponseRequester.prompt_texts
+    )
+    assert "5" in ScriptedActionResponseRequester.prompt_texts[1]
+
+
+@pytest.mark.asyncio
+async def test_action_response_direct_delivery_uses_original_structured_output_contract():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": json.dumps({"answer": 5}),
+                }
+            )
+        ]
+    )
+
+    @agent.action_func
+    def unused_action(value: int) -> int:
+        """An available Action that is unnecessary for this request."""
+        return value
+
+    result = await (
+        agent.input("Return five without calling an Action.")
+        .use_action(unused_action)
+        .output({"answer": (int,)})
+        .async_start()
+    )
+
+    assert result == {"answer": 5}
+    assert ScriptedActionResponseRequester.request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_action_response_legacy_handler_falls_back_to_final_model_request():
+    agent = _create_scripted_action_agent(["Fallback response."])
+
+    @agent.action_func
+    def available_action(value: int) -> int:
+        """An available Action for the legacy planning contract."""
+        return value
+
+    async def legacy_plan_handler(context, request):
+        _ = (context, request)
+        return {
+            "next_action": "response",
+            "execution_commands": [],
+        }
+
+    agent.register_tool_plan_analysis_handler(legacy_plan_handler)
+    captured_events: list[Any] = []
+    hook_name = "test_action_response_legacy_handler_fallback"
+
+    async def capture(event):
+        captured_events.append(event)
+
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        result = await agent.input("Use the compatible fallback.").use_action(available_action).async_get_text()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert result == "Fallback response."
+    assert ScriptedActionResponseRequester.request_count == 1
+    fallback_events = [
+        event
+        for event in captured_events
+        if event.event_type == "request.completed"
+        and isinstance(event.payload, dict)
+        and event.payload.get("delivery") == "final_request_fallback"
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0].payload["reason"] == "terminal_response_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_action_response_legacy_action_flow_falls_back_without_new_handler_kwargs(monkeypatch):
+    agent = _create_scripted_action_agent(["Legacy ActionFlow fallback response."])
+
+    @agent.action_func
+    def available_action(value: int) -> int:
+        """An available Action for a legacy ActionFlow plugin."""
+        return value
+
+    async def legacy_async_run(**kwargs):
+        assert "response_stream_handler" not in kwargs
+        assert "terminal_response_handler" not in kwargs
+        return []
+
+    monkeypatch.setattr(agent.action.action_flow, "async_run", legacy_async_run)
+
+    result = await agent.input("Use the legacy ActionFlow fallback.").use_action(available_action).async_get_text()
+
+    assert result == "Legacy ActionFlow fallback response."
+    assert ScriptedActionResponseRequester.request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_action_response_direct_delivery_keeps_broadcast_suffix_lifecycle():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": "Direct response.",
+                }
+            )
+        ]
+    )
+    seen_done: list[str] = []
+
+    @agent.action_func
+    def available_action(value: int) -> int:
+        """An available but unnecessary Action."""
+        return value
+
+    async def capture_done(event, data, full_result_data, settings):
+        _ = (full_result_data, settings)
+        seen_done.append(f"{event}:{data}")
+
+    agent.extension_handlers.append("broadcast_suffixes", capture_done, event="done")
+    result = await agent.input("Answer directly.").use_action(available_action).async_get_text()
+
+    assert result == "Direct response."
+    assert seen_done == ["done:Direct response."]
+
+
+@pytest.mark.asyncio
+async def test_action_response_direct_delivery_finalizes_session_once():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": "One session reply.",
+                }
+            )
+        ]
+    )
+    agent.activate_session(session_id="action-response-direct-session")
+
+    @agent.action_func
+    def available_action(value: int) -> int:
+        """An available but unnecessary Action."""
+        return value
+
+    result = await agent.input("One session input.").use_action(available_action).async_get_text()
+
+    assert result == "One session reply."
+    assert agent.activated_session is not None
+    assert [message.role for message in agent.activated_session.full_context] == ["user", "assistant"]
+    assert "One session input." in agent.activated_session.full_context[0].content
+    assert agent.activated_session.full_context[1].content == "One session reply."
+
+
+@pytest.mark.asyncio
+async def test_action_response_validation_retry_resets_provisional_stream():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [{"action_id": "available_action"}],
+                    "response": "provisional",
+                }
+            ),
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": "accepted",
+                }
+            ),
+        ]
+    )
+
+    @agent.action_func
+    def available_action() -> str:
+        """An available but unnecessary Action."""
+        return "unused"
+
+    response = agent.input("Answer directly.").use_action(available_action).get_response()
+    delta_text = "".join([chunk async for chunk in response.get_async_generator(type="delta")])
+
+    assert "provisional" in delta_text
+    assert "<$retry>action_or_response_validation</$retry>" in delta_text
+    assert delta_text.endswith("accepted")
+    assert await response.async_get_text() == "accepted"
+    assert ScriptedActionResponseRequester.request_count == 2
+
+
+@pytest.mark.asyncio
+async def test_action_response_never_scrapes_schema_external_trailing_prose():
+    agent = _create_scripted_action_agent(
+        [
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                }
+            )
+            + "\nTHIS TRAILING TEXT IS NOT THE RESPONSE FIELD",
+            json.dumps(
+                {
+                    "next_action": "response",
+                    "execution_commands": [],
+                    "response": "Accepted field value.",
+                }
+            ),
+        ]
+    )
+
+    @agent.action_func
+    def available_action() -> str:
+        """An available but unnecessary Action."""
+        return "unused"
+
+    response = agent.input("Answer directly.").use_action(available_action).get_response()
+    delta_text = "".join([chunk async for chunk in response.get_async_generator(type="delta")])
+
+    assert "THIS TRAILING TEXT" not in delta_text
+    assert delta_text.endswith("Accepted field value.")
+    assert await response.async_get_text() == "Accepted field value."
+    assert ScriptedActionResponseRequester.request_count == 2
 
 
 def test_action_extension_set_tool_loop_config():
@@ -1129,12 +1483,43 @@ async def test_action_extension_request_prefix_injects_action_results(monkeypatc
 
     monkeypatch.setattr(agent.tool, "async_plan_and_execute", fake_loop)
 
-    await agent._ActionExtension__request_prefix(prompt, None)  # type: ignore
+    prepared_response = await agent._ActionExtension__request_prefix(prompt, None)  # type: ignore
+    assert prepared_response is not None
+    assert prepared_response.response_generator is not None
+    _ = [item async for item in prepared_response.response_generator]
+    assert prepared_response.handled is False
 
     action_results = prompt.get("action_results")
     assert isinstance(action_results, dict)
     assert action_results.get("fetch_dummy") == {"ok": 1}
     assert "extra_instruction" in prompt
+
+
+@pytest.mark.asyncio
+async def test_action_response_direct_delivery_defers_to_ensure_long_output(monkeypatch):
+    agent = Agently.create_agent()
+    request = agent.create_request()
+    prompt = request.prompt
+    prompt.set("input", "keep the independent long-output delivery path")
+    settings = Settings(name="ActionEnsureLongOutputSettings", parent=agent.settings)
+    settings.set("$agent_execution.ensure_long_output", True)
+
+    monkeypatch.setattr(
+        agent.action,
+        "get_action_list",
+        lambda tags=None: [{"name": "unused_action", "desc": "unused", "kwargs": {}}],
+    )
+
+    async def fail_if_action_loop_runs(**kwargs):
+        _ = kwargs
+        raise AssertionError("Action direct delivery must not run for ensure_long_output")
+
+    monkeypatch.setattr(agent.action, "async_plan_and_execute", fail_if_action_loop_runs)
+
+    prepared_response = await agent._ActionExtension__request_prefix(prompt, settings)  # type: ignore[attr-defined]
+
+    assert prepared_response is None
+    assert prompt.get("action_results", default=None) is None
 
 
 @pytest.mark.asyncio
@@ -1164,7 +1549,13 @@ async def test_action_extension_broadcast_prefix_keeps_action_and_tool_logs():
         },
     ]
 
-    events = [event async for event in agent._ActionExtension__broadcast_prefix(full_result_data, None)]  # type: ignore[attr-defined]
+    events = [
+        event
+        async for event in agent._ActionExtension__broadcast_prefix(  # type: ignore[attr-defined]
+            full_result_data,
+            None,
+        )
+    ]
     assert events[0][0] == "action"
     assert events[1][0] == "action"
     assert events[2][0] == "tool"
@@ -1448,7 +1839,13 @@ async def test_action_extension_request_prefix_reuses_stored_action_result(monke
     await agent._ActionExtension__request_prefix(prompt, None)  # type: ignore[attr-defined]
 
     full_result_data: dict[str, object] = {}
-    events = [event async for event in agent._ActionExtension__broadcast_prefix(full_result_data, None)]  # type: ignore[attr-defined]
+    events = [
+        event
+        async for event in agent._ActionExtension__broadcast_prefix(  # type: ignore[attr-defined]
+            full_result_data,
+            None,
+        )
+    ]
     assert events[0][0] == "action"
     assert full_result_data["extra"]["action_logs"][0]["result"] == "hello"  # type: ignore[index]
 

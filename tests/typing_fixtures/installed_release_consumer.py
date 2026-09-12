@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from typing_extensions import assert_type
+
+from agently import Agent, Agently, __version__
+from agently.types.data import (
+    AgentArtifactContext,
+    AgentExecutionControlCapabilities,
+    AgentReviewContext,
+)
+from agently.types.plugins import AgentExecution
+
+
+def lookup(value: str) -> str:
+    return value
+
+
+agent: Agent = Agently.create_agent("installed-typing-smoke")
+execution = agent.input("check").info("installed wheel").use_action(lookup)
+
+assert_type(__version__, str)
+assert_type(execution, AgentExecution)
+assert_type(agent.goal("Explain", turn_on_long_task=False), AgentExecution)
+assert_type(agent.goals(["Explain"], turn_on_long_task=False), AgentExecution)
+assert_type(execution.goal("Explain", ["Be precise"], turn_on_long_task=False), AgentExecution)
+assert_type(execution.goals("Explain", turn_on_long_task=False), AgentExecution)
+assert_type(execution.use_tool(lookup), AgentExecution)
+assert_type(execution.require_actions(lookup), AgentExecution)
+assert_type(execution.use_skills("writer"), AgentExecution)
+assert_type(agent.create_execution("plan"), AgentExecution)
+assert_type(execution.review(), AgentExecution)
+assert_type(execution.review(rules="Check the declared result contract.", on_fail="block"), AgentExecution)
+assert_type(execution.artifact("report.md"), AgentExecution)
+assert_type(execution.revision, int)
+assert_type(execution.control_capabilities, AgentExecutionControlCapabilities)
+assert_type(execution.get_result(revision=0).revision, int)
+
+
+if TYPE_CHECKING:
+    from agently.builtins.plugins.AgentExecution import (
+        AgentExecution as BundledExecution,
+    )
+
+    plugin_contract: AgentExecution = BundledExecution(agent)
+
+    async def check_controls(run: AgentExecution) -> None:
+        assert_type(await run.async_rework("Revise", max_reworks=2, allow_replay=False), object)
+        assert_type(await run.async_save(), dict[str, object])
+        assert_type(await run.async_load({}), AgentExecution)
+
+    def review_handler(_result: object, context: AgentReviewContext) -> bool:
+        assert_type(context.execution, AgentExecution)
+        return True
+
+    def artifact_handler(_result: object, context: AgentArtifactContext) -> str:
+        assert_type(context.execution, AgentExecution)
+        return "rendered"
+
+    assert_type(agent.use_actions(lookup, always=True), Agent)
+    assert_type(agent.require_skills("writer", always=True), Agent)
+    assert_type(execution.review(review_handler), AgentExecution)
+    assert_type(execution.artifact("report.md", artifact_handler), AgentExecution)

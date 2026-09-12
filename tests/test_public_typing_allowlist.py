@@ -5,7 +5,7 @@ import importlib
 import json
 import re
 from pathlib import Path
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, get_args, get_type_hints
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

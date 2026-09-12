@@ -73,7 +73,7 @@ facade 保留。其中标量 `syncify()` / `asyncify()` 委托给具有独立作
 生命周期的边界才请求 `managed=True`，避免兼容 helper 仅仅因为转换 sync/async
 形态就改变业务错误或取消语义。
 
-Agently 4.1.4.7 依赖 Agently-Stage 0.3.x 兼容线中的 0.3.8 或更高版本。Stage 负责在混合同步/
+Agently 4.1.4.8 依赖 Agently-Stage 0.3.x 兼容线中的 0.3.8 或更高版本。Stage 负责在混合同步/
 异步边界自动选择物理上安全的 carrier；TriggerFlow 仍负责 workflow 生命周期与公开
 state。复用安全 carrier 不会合并两个 Stage scope 的 settlement 清单，也不会把
 carrier 概念暴露为 Agently 的公开生命周期。

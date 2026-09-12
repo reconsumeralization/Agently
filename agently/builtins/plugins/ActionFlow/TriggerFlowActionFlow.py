@@ -17,10 +17,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from agently.core.application.AgentExecution import RuntimeStageStallError
-from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_agent_execution_context, resolve_parent_run_context
+from agently.core.runtime.RuntimeContext import (
+    bind_runtime_context,
+    get_current_agent_execution_context,
+    resolve_parent_run_context,
+)
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -164,9 +169,7 @@ class TriggerFlowActionFlow:
         previous = data.get_state("unchanged_evidence_page_state", {})
         previous = previous if isinstance(previous, dict) else {}
         occurrence_count = (
-            int(previous.get("occurrence_count", 0)) + 1
-            if previous.get("evidence_identities") == ordered
-            else 1
+            int(previous.get("occurrence_count", 0)) + 1 if previous.get("evidence_identities") == ordered else 1
         )
         await data.async_set_state(
             "unchanged_evidence_page_state",
@@ -197,6 +200,8 @@ class TriggerFlowActionFlow:
         timeout: float | None = None,
         planning_protocol: str | None = None,
         runtime_observation_handler: "ActionFlowObservationHandler | None" = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list["ActionResult"]:
         from agently.core.orchestration.TriggerFlow import TriggerFlow
         from agently.types.data import RunContext
@@ -302,11 +307,7 @@ class TriggerFlowActionFlow:
                         "run": action_loop_run if run is None else run,
                         "compat_event_family": compat_event_family,
                         "compat_message": compat_message,
-                        **(
-                            {"stream_projection": stream_projection}
-                            if stream_projection is not None
-                            else {}
-                        ),
+                        **({"stream_projection": stream_projection} if stream_projection is not None else {}),
                     }
                 )
             )
@@ -411,6 +412,8 @@ class TriggerFlowActionFlow:
                 action_list,
                 model_visible_last_round_records or model_visible_done_plans,
             )
+            # Preserve the Host projection before a replaceable planner runs.
+            await data.async_set_state("offered_actions", deepcopy(visible_action_list))
 
             decision = action._normalize_action_decision(
                 await resolved_planning_handler(
@@ -425,6 +428,7 @@ class TriggerFlowActionFlow:
                         "parent_run_context": parent_run_context,
                         "action": action,
                         "runtime": action.action_runtime,
+                        "response_stream_handler": response_stream_handler,
                     },
                     {
                         "action_list": visible_action_list,
@@ -439,6 +443,11 @@ class TriggerFlowActionFlow:
                 round_index=round_index,
                 max_rounds=max_rounds,
             )
+            scope_records = action._check_action_scope(
+                decision.get("action_calls", []), data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            ) if dispatch_confirmed else []
+            dispatch_confirmed = dispatch_confirmed and not scope_records
             await publish_runtime_observation(
                 "plan_ready",
                 message=f"Action plan ready for round { round_index }.",
@@ -492,10 +501,7 @@ class TriggerFlowActionFlow:
                 and len(action_calls) > 0
             )
             max_rounds_reached = (
-                wants_action
-                and isinstance(max_rounds, int)
-                and max_rounds >= 0
-                and round_index >= max_rounds
+                wants_action and isinstance(max_rounds, int) and max_rounds >= 0 and round_index >= max_rounds
             )
             if max_rounds_reached:
                 diagnostic_records.extend(
@@ -507,7 +513,11 @@ class TriggerFlowActionFlow:
             if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
-                await data.async_emit("DONE", [*done_plans, *diagnostic_records])
+                if not scope_records and terminal_response_handler is not None and decision.get("next_action") == "response":
+                    terminal_result = terminal_response_handler(decision)
+                    if inspect.isawaitable(terminal_result):
+                        await terminal_result
+                await data.async_emit("DONE", [*done_plans, *diagnostic_records, *scope_records])
             return decision
 
         async def execute_step(data):
@@ -521,6 +531,14 @@ class TriggerFlowActionFlow:
             last_round_records = data.get_state("last_round_records", [])
             if not isinstance(last_round_records, list):
                 last_round_records = []
+
+            scope_records = action._check_action_scope(
+                action_calls, data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            )
+            if scope_records:
+                await data.async_emit("DONE", [*done_plans, *scope_records])
+                return scope_records
 
             approval_decisions = data.get_state("policy_approval_decisions", {})
             if not isinstance(approval_decisions, dict):
@@ -593,6 +611,37 @@ class TriggerFlowActionFlow:
                 approval_key = f"{ round_index }:{ command_index }:{ action_id }"
                 if not approval_needed:
                     continue
+                if action_id == "run_action_program":
+                    message = (
+                        "Programmatic Action V1 cannot enter a durable approval wait. "
+                        "Approve the outer execution policy before planning a new program."
+                    )
+                    blocked_record = {
+                        "ok": False,
+                        "status": "blocked",
+                        "success": False,
+                        "purpose": str(command.get("purpose", f"Use { action_id }")),
+                        "action_id": action_id,
+                        "tool_name": str(command.get("tool_name", action_id)),
+                        "kwargs": command.get("action_input", {}),
+                        "result": None,
+                        "data": None,
+                        "error": message,
+                        "approval": {"required": True, "reason": "programmatic_transport"},
+                    }
+                    records = action._normalize_execution_records(
+                        [blocked_record],
+                        [command],
+                        artifact_scope=artifact_scope,
+                    )
+                    state_records = action._to_action_flow_return_records(records)
+                    done_plans.extend(state_records)
+                    await data.async_set_state("done_plans", done_plans)
+                    await data.async_set_state("last_round_records", state_records)
+                    await data.async_set_state("round_index", round_index + 1)
+                    action._release_programmatic_action_call_catalog(command)
+                    await data.async_emit("PLAN", None)
+                    return state_records
                 if approval_key in approval_decisions:
                     approved_override = dict(sanitized_policy_override)
                     approved_override["policy_approval_granted"] = True
@@ -730,6 +779,7 @@ class TriggerFlowActionFlow:
                         "concurrency": concurrency,
                         "timeout": timeout,
                         "trusted_policy_overrides": trusted_policy_overrides,
+                        "action_run_contexts": action_runs,
                     },
                 ),
                 action_calls,
@@ -762,9 +812,7 @@ class TriggerFlowActionFlow:
             ) = await self._update_unchanged_evidence_page_state(
                 data,
                 bounded_records,
-                max_consecutive_unchanged_evidence_rounds=(
-                    max_consecutive_unchanged_evidence_rounds
-                ),
+                max_consecutive_unchanged_evidence_rounds=(max_consecutive_unchanged_evidence_rounds),
             )
 
             for record_index, record in enumerate(bounded_records):
@@ -843,9 +891,7 @@ class TriggerFlowActionFlow:
                         "agent_name": agent_name,
                         "round_index": round_index,
                         "occurrence_count": unchanged_evidence_occurrence_count,
-                        "max_consecutive_unchanged_evidence_rounds": (
-                            max_consecutive_unchanged_evidence_rounds
-                        ),
+                        "max_consecutive_unchanged_evidence_rounds": (max_consecutive_unchanged_evidence_rounds),
                         "evidence_identities": unchanged_evidence_identities,
                     },
                 )
@@ -878,8 +924,14 @@ class TriggerFlowActionFlow:
         action_loop_completed = False
         standalone_scope_released = False
 
-        def release_standalone_artifact_scope_once() -> None:
+        def release_programmatic_scope() -> None:
+            release = getattr(action.action_runtime, "_release_programmatic_scope", None)
+            if callable(release):
+                release(action_loop_run.run_id)
+
+        def release_loop_resources() -> None:
             nonlocal standalone_scope_released
+            release_programmatic_scope()
             if not owns_artifact_scope or standalone_scope_released:
                 return
             standalone_scope_released = True
@@ -898,17 +950,19 @@ class TriggerFlowActionFlow:
                         interrupt_id=str(pending_interrupt.get("id", "")),
                         exchange_id=pending_envelope.get("exchange_id"),
                         on_resolved=finalize_live_exchange_execution,
-                        on_closed=release_standalone_artifact_scope_once,
+                        on_closed=release_loop_resources,
                     )
                 return
             await execution.async_close(reason="action_loop_exchange_resolved")
-            release_standalone_artifact_scope_once()
+            release_loop_resources()
+
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
+
                 async def build_exchange_paused_records():
                     """End the run with typed paused records instead of raising.
 
@@ -936,7 +990,7 @@ class TriggerFlowActionFlow:
                                 interrupt_id=str(pending_interrupt.get("id", "")),
                                 exchange_id=pending_envelope.get("exchange_id"),
                                 on_resolved=finalize_live_exchange_execution,
-                                on_closed=release_standalone_artifact_scope_once,
+                                on_closed=release_loop_resources,
                             )
                         )
                     pending_action = execution.get_state("pending_policy_approval_action", {})
@@ -963,7 +1017,11 @@ class TriggerFlowActionFlow:
                         "error": "Waiting for a human exchange response.",
                         "approval": {
                             "required": True,
-                            "decision": {"status": "pending", "approved": False, "reason": "Waiting for a human exchange response."},
+                            "decision": {
+                                "status": "pending",
+                                "approved": False,
+                                "reason": "Waiting for a human exchange response.",
+                            },
                         },
                         "meta": {"exchange": exchange_meta},
                     }
@@ -1104,7 +1162,9 @@ class TriggerFlowActionFlow:
                     paused_records = await resolve_exchange_waits()
                     if paused_records is not None:
                         exchange_paused = True
-                        self._record_agent_execution_progress("action_loop_paused", "exchange_pending", planning_protocol)
+                        self._record_agent_execution_progress(
+                            "action_loop_paused", "exchange_pending", planning_protocol
+                        )
                         return {"action_loop_result": paused_records}
                     self._record_agent_execution_progress("action_loop_close", "started", planning_protocol)
                     if timeout is None:
@@ -1147,21 +1207,19 @@ class TriggerFlowActionFlow:
                 )
             raise
         finally:
-            if (
-                owns_artifact_scope
-                and not exchange_paused
-                and not action_loop_completed
-            ):
-                release_standalone_artifact_scope_once()
+            if not exchange_paused:
+                release_programmatic_scope()
+            if owns_artifact_scope and not exchange_paused and not action_loop_completed:
+                release_loop_resources()
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             if owns_artifact_scope and not exchange_paused:
-                release_standalone_artifact_scope_once()
+                release_loop_resources()
             return []
         normalized = action._to_action_flow_return_records(result)
         if owns_artifact_scope and not exchange_paused:
-            release_standalone_artifact_scope_once()
+            release_loop_resources()
         if owns_artifact_scope and not exchange_paused:
             normalized = action._project_released_artifact_scope(normalized, artifact_scope)
             for state_key in ("done_plans", "last_round_records", "action_loop_result"):

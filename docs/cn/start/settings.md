@@ -140,10 +140,36 @@ settings.load("yaml_file", "settings.yaml", auto_load_env=True)
 Agently.set_settings("debug", True)
 ```
 
-打印精简的模型请求与结果日志。AgentTask 运行时，`"simple"` 还会打印 phase、
-progress、snapshot 等过程事件摘要，但不打印 token 级 delta。需要详细 observation
-诊断流和模型 delta 输出时，使用 `debug="detail"`。debug 不会自动替代面向用户的过程
-与最终答案输出；还需要同时消费公开 delta：
+`True` 与 `"simple"` 完全等价：打印可读 Prompt、provider/model 摘要、模型响应流、
+Action 目标与结果切片，以及关键过程/失败状态；不展开 provider 请求 JSON。AgentTask
+运行时，模型生成的 progress 消息会在同一个持续更新的控制台块中展示。直接模型响应
+使用顺序权威的规范化 ModelRequest stream；所有字符都会先于 Done 展示，稍后的
+AgentExecution 投影不会重复或在 Done 后重新打开流。
+当多个 ModelRequest 重叠时，最先产生 delta 的响应保持前台控制台流；后到响应继续正常
+执行，ConsoleSink 只提示一次后台生成并缓冲其展示内容。前台请求终止后，仍在运行的响应
+装载有界 buffer 并继续实时输出，已经完成的响应则直接打印最终物化结果。这个 FIFO
+规则只调度展示，绝不串行化、限流或改变 ModelRequest / AgentExecution 的真实调度。
+simple 模式始终为每个成功响应保留至少一个完整投影：正常实时流已经是完整正文，不会
+重复打印；没有实际展示流的响应会完整打印最终物化结果；并发后台响应若超过实时重放
+buffer，ConsoleSink 不会把残缺重放冒充完整输出，而是在生成完成时完整打印权威结果。
+只有诊断和预览允许按各自合同限长。
+只要某个响应占有前台流，ConsoleSink 就会优先保证正文阅读连续性：普通响应字符之间只会
+插入一条精简的后台响应提示。普通 Prompt、provider request、Process 和成功生命周期诊断
+会进入有界的控制台展示队列，在所有 FIFO 响应都展示完成后，统一列在
+`[Deferred diagnostics]` 下。Warning、failure、cancellation、blocked/unhealthy、interrupt
+与 approval-required 事件仍会即时显示。EventCenter 与 DevTools 仍按原始时刻收到原始
+事件；延后的只有给人看的控制台排版。
+对于 Action-or-Response loop，simple 模式隐藏正常的内部规划 Prompt/决策流，只展示
+一次已接受的外层 response；规划 validation 失败仍然可见。detail 模式可以把内部决策
+作为诊断证据展示。
+
+`debug="detail"` 是高信息密度诊断视图，不是“打印全部事件”。它额外展示完整的可读
+Prompt、脱敏后的 provider 请求 JSON、attempt/validation/telemetry、Action 参数与结果
+明细、路由/阶段元数据和最终物化结果。对于流式请求，较重的 Prompt/request/process
+明细会在响应展示完成后进入带标签的延后诊断区，而不是打断正文；同一 ModelRequest 的流式字符只展示一次，
+`runtime.progress.*` 与 AgentExecution 镜像不会重复打印。需要完整事件审计、存储或重放时，
+请使用 EventCenter hook 或 DevTools。debug 也不会替代完整的面向用户过程与最终答案输出；
+还需要同时消费公开 delta：
 
 ```python
 agent.set_settings("debug", "detail")
@@ -164,7 +190,7 @@ Agently.set_settings("runtime.show_trigger_flow_logs", True)
 Agently.set_settings("runtime.show_runtime_logs", "detail")
 ```
 
-这些开关都接受 `False` / `"off"`、`True` / `"simple"`、`"detail"`。`"simple"` 打印请求/结果摘要、AgentTask 过程摘要和 warning/error/critical 事件；`"detail"` 打印该 family 的详细 observation 事件，包括模型 delta 输出。Action loop 事件显示为 `ActionLoop`；具体 `action.*` 事件会显示 action 名称和 `action_type`。`runtime.show_tool_logs` 仍兼容旧代码；当没有显式设置 `runtime.show_action_logs` 时，它会启用同一组 Action Runtime 日志。开始事件显示 `Started`，正常结束显示 `Completed`，只有失败事件或显式失败 payload 才显示 `Failed`。
+这些开关都接受 `False` / `"off"`、`True` / `"simple"`、`"detail"`。`"simple"` 是可读业务执行摘要，`"detail"` 是经过筛选、去重和有界展示的深度诊断；两者都不是完整 RuntimeEvent dump。Action loop 事件显示为 `ActionLoop`；具体 `action.*` 事件会显示 action 名称和 `action_type`。`runtime.show_tool_logs` 仍兼容旧代码；当没有显式设置 `runtime.show_action_logs` 时，它会启用同一组 Action Runtime 日志。开始事件显示 `Started`，正常结束显示 `Completed`，只有失败事件或显式失败 payload 才显示 `Failed`。
 
 对于 ModelRequest 输出校验，`"simple"` 会显示 validator、失败原因、尝试次数摘要和
 重试迁移；`"detail"` 可额外显示有限长度的校验上下文或 validator traceback，但不会在

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Sequence
 from typing import Any, Callable, cast
 
 from agently.types.data import ActionResult, ActionSpec
@@ -31,6 +32,53 @@ _DEFAULT_VALIDATION_MARKERS = (
     "yarn test",
     "uv test",
 )
+
+
+def _scoped_action_list(
+    action: Any,
+    agent_name: str,
+    *,
+    execution_context: Any = None,
+    allowed_action_ids: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """Project Host visibility; step choices never grant additional Actions."""
+
+    from agently.core.runtime import get_current_agent_execution_context
+
+    context = execution_context or get_current_agent_execution_context()
+    recall_context = context
+    allowed: set[str] | None = None
+    visited: set[int] = set()
+    while context is not None and id(context) not in visited:
+        visited.add(id(context))
+        scoped_ids = getattr(context, "scoped_action_ids", None)
+        raw_ids = scoped_ids() if callable(scoped_ids) else None
+        if isinstance(raw_ids, (set, frozenset, list, tuple)) and raw_ids:
+            scope = {str(item).strip() for item in raw_ids if str(item).strip()}
+            allowed = scope if allowed is None else allowed & scope
+        context = getattr(context, "_parent_execution_context", None)
+
+    get_action_list = getattr(action, "get_action_list", None)
+    if not callable(get_action_list):
+        return []
+    visible = cast(list[dict[str, Any]], (
+        get_action_list(tags=[f"agent-{agent_name}"]) if allowed is None else get_action_list()
+    ))
+    step_ids = {str(item).strip() for item in allowed_action_ids if str(item).strip()}
+    scoped = [
+        item for item in visible
+        if isinstance(item, dict)
+        and item.get("expose_to_model", True) is True
+        and (allowed is None or str(item.get("action_id") or item.get("name") or "") in allowed)
+        and (not step_ids or str(item.get("action_id") or item.get("name") or "") in step_ids)
+    ]
+    # Recall is offered by the Host from actual scoped records after ordinary
+    # filtering, not by a special Action name supplied by the model.
+    recall = getattr(recall_context, "scoped_action_artifact_recall_records", None)
+    inject = getattr(action, "_with_action_artifact_recall_action", None)
+    if callable(recall) and callable(inject):
+        scoped = cast(list[dict[str, Any]], inject(scoped, recall()))
+    return scoped
 
 
 def _redact_env(value: Any) -> Any:
@@ -56,9 +104,36 @@ def _sanitize_metadata_value(value: Any, *, parent_key: str = "") -> Any:
 
 
 def sanitize_action_spec_for_metadata(spec: ActionSpec | dict[str, Any]) -> dict[str, Any]:
-    """Return a model/host-visible copy of an action spec without raw env values."""
+    """Preserve declared schemas while redacting runtime metadata env values."""
 
-    return _sanitize_metadata_value(deepcopy(dict(spec)))
+    return {
+        str(key): value if key in {"kwargs", "returns"} else _sanitize_metadata_value(value, parent_key=str(key))
+        for key, value in deepcopy(dict(spec)).items()
+    }
+
+
+def project_action_spec_for_planning(spec: ActionSpec | dict[str, Any]) -> dict[str, Any]:
+    """Return only metadata that can change model-owned action planning."""
+
+    source = sanitize_action_spec_for_metadata(spec)
+    action_id = str(source.get("name") or source.get("action_id") or "")
+    projected: dict[str, Any] = {
+        "action_id": action_id,
+        "desc": source.get("desc", ""),
+        "kwargs": source.get("kwargs", {}),
+    }
+    required_input_keys = source.get("required_input_keys")
+    if isinstance(required_input_keys, (list, tuple)) and required_input_keys:
+        projected["required_input_keys"] = list(required_input_keys)
+    if source.get("approval_required") is True:
+        projected["approval_required"] = True
+    side_effect_level = str(source.get("side_effect_level", "read"))
+    if side_effect_level and side_effect_level != "read":
+        projected["side_effect_level"] = side_effect_level
+    concurrency_mode = str(source.get("concurrency_mode", "exclusive"))
+    if concurrency_mode and concurrency_mode != "exclusive":
+        projected["concurrency_mode"] = concurrency_mode
+    return projected
 
 
 def _command_to_text(command: Any) -> str | None:

@@ -24,6 +24,8 @@ from agently.types.data import (
     ContextSourceDescriptorPage,
     ContextSourceRead,
     ContextRole,
+    RecordContentSegment,
+    RecordRef,
 )
 
 from .RecordStore import RecordStore
@@ -52,6 +54,9 @@ class RecordStoreContextSource:
         explicit = getattr(self.record_store, "source_revision", None)
         if explicit is not None:
             return str(explicit)
+        snapshot = self._local_snapshot()
+        if snapshot is not None:
+            return snapshot[0]
         digest = hashlib.sha256(self.record_store.record_store_id.encode("utf-8"))
         for path in self._local_state_paths():
             try:
@@ -62,6 +67,17 @@ class RecordStoreContextSource:
             digest.update(str(stat.st_size).encode("ascii"))
             digest.update(str(stat.st_mtime_ns).encode("ascii"))
         return f"record-store-revision:{digest.hexdigest()}"
+
+    def _local_snapshot(
+        self,
+        *,
+        page: tuple[int, int] | None = None,
+        exact: tuple[str, int, int] | None = None,
+        projection_limit: int = 2000,
+    ) -> tuple[str, tuple[RecordRef, ...], dict[str, RecordContentSegment]] | None:
+        if type(self.record_store) is not RecordStore or getattr(self.record_store, "source_revision", None) is not None:
+            return None
+        return self.record_store._context_snapshot(page=page, exact=exact, projection_limit=projection_limit)
 
     def _local_state_paths(self) -> tuple[Path, ...]:
         root = Path(self.record_store.root)
@@ -98,15 +114,20 @@ class RecordStoreContextSource:
         projection_max_chars = int(profile.get("projection_max_chars") or 2000)
         if projection_max_chars <= 0:
             raise ValueError("projection_max_chars must be positive.")
-        revision = self.source_revision
-        refs = tuple(await self.record_store.search(query=None))
+        snapshot = self._local_snapshot(page=(offset, page_size), projection_limit=projection_max_chars)
+        if snapshot is None:
+            revision = self.source_revision
+            refs = tuple(await self.record_store.search(query=None))
+            projections = None
+        else:
+            revision, refs, projections = snapshot
         page_refs = refs[offset : offset + page_size]
         descriptors: list[ContextSourceDescriptor] = []
         for ref in page_refs:
             record_id = str(ref.get("id") or "").strip()
             if not record_id:
                 raise ValueError("RecordStore search returned a record without id.")
-            projection = await self.record_store.read_bounded(
+            projection = projections[record_id] if projections is not None else await self.record_store.read_bounded(
                 record_id,
                 offset=0,
                 limit=projection_max_chars,
@@ -155,17 +176,19 @@ class RecordStoreContextSource:
         range_start: int = 0,
     ) -> ContextSourceRead:
         del representation
-        segment = await self.record_store.read_bounded(
-            source_ref,
-            offset=range_start,
-            limit=max_chars,
-        )
+        snapshot = self._local_snapshot(exact=(source_ref, range_start, max_chars))
+        if snapshot is None:
+            segment = await self.record_store.read_bounded(source_ref, offset=range_start, limit=max_chars)
+            revision = self.source_revision
+        else:
+            revision, _, projections = snapshot
+            segment = projections[source_ref]
         content = str(segment.get("content") or "")
         eof = bool(segment.get("eof"))
         size = int(segment.get("size") or len(content))
         return ContextSourceRead(
             source_id=self.source_id,
-            source_revision=self.source_revision,
+            source_revision=revision,
             source_ref=source_ref,
             content=content,
             completeness="complete" if eof else "truncated",

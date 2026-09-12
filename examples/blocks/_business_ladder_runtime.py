@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 
 MODEL_TIMEOUT_SECONDS = float(os.getenv("BLOCKS_COMPLEXITY_MODEL_TIMEOUT_SECONDS", "120"))

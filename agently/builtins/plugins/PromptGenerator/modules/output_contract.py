@@ -19,14 +19,54 @@ from __future__ import annotations
 import json
 import types
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
+from pydantic.fields import FieldInfo
 
 from agently.utils import DataPathBuilder
 
 
 PYDANTIC_CONTRACT_META_KEY = "__agently_pydantic_output_contract__"
+
+
+def _is_long_content_annotation(value: Any) -> bool:
+    if get_origin(value) is not Annotated:
+        return False
+    args = get_args(value)
+    return args[0] is str and any(
+        isinstance(meta, FieldInfo)
+        and isinstance(meta.json_schema_extra, Mapping)
+        and meta.json_schema_extra.get('long_content') is True
+        for meta in args[1:]
+    )
+
+
+def normalize_output_declaration(value: Any) -> Any:
+    """Resolve typed/string production tags without mutating caller schemas."""
+    if _is_long_content_annotation(value):
+        return (value, '', None, {'long_content': True})
+    if isinstance(value, tuple) and value:
+        declared = value[0]
+        marked = _is_long_content_annotation(declared) or (
+            isinstance(declared, str) and declared == 'long_content'
+        )
+        if marked:
+            from agently.types.data.output import LongContent
+            metadata = dict(value[3]) if len(value) > 3 and isinstance(value[3], Mapping) else {}
+            if metadata.get('long_content') is False:
+                raise ValueError('LongContent conflicts with long_content=False metadata.')
+            metadata['long_content'] = True
+            return (LongContent if isinstance(declared, str) else declared,
+                    value[1] if len(value) > 1 else '', value[2] if len(value) > 2 else None,
+                    metadata, *value[4:])
+        normalized = normalize_output_declaration(declared) if isinstance(declared, (Mapping, list)) else declared
+        return (normalized, *value[1:])
+    if isinstance(value, Mapping):
+        return {key: normalize_output_declaration(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [normalize_output_declaration(child) for child in value]
+    return value
 
 
 def _is_pydantic_model_type(value: Any) -> bool:
@@ -152,6 +192,13 @@ def output_schema_to_json_schema(
         if isinstance(value, tuple):
             declared = value[0] if value else Any
             projected = project(declared)
+            contract = _get_pydantic_contract(value)
+            if contract is not None:
+                constraints = contract.get("constraints")
+                if isinstance(constraints, Mapping):
+                    projected = {**projected, **constraints}
+                if contract.get("nullable") and not _json_schema_allows_null(projected):
+                    projected = {"anyOf": [projected, {"type": "null"}]}
             if len(value) >= 2 and value[1]:
                 projected = {
                     **projected,
@@ -185,7 +232,7 @@ def output_schema_to_json_schema(
             return {"description": value} if value else {}
         return _annotation_json_schema(value)
 
-    return project(output_schema)
+    return project(normalize_output_declaration(output_schema))
 
 
 def _pydantic_contract_meta(
@@ -218,7 +265,7 @@ def _pydantic_contract_meta(
         "format",
     )
     constraints = {key: effective_schema[key] for key in constraint_keys if key in effective_schema}
-    return {
+    metadata: dict[str, Any] = {
         PYDANTIC_CONTRACT_META_KEY: {
             "required": required,
             "nullable": _json_schema_allows_null(json_schema),
@@ -226,6 +273,9 @@ def _pydantic_contract_meta(
             "constraints": constraints,
         }
     }
+    if json_schema.get('long_content') is True:
+        metadata['long_content'] = True
+    return metadata
 
 
 def _annotation_to_output_schema(
@@ -267,7 +317,7 @@ def _annotation_to_output_schema(
         required=False,
     )
     contract = contract_meta[PYDANTIC_CONTRACT_META_KEY]
-    if contract["nullable"] or contract["constraints"]:
+    if contract["nullable"] or contract["constraints"] or contract_meta.get("long_content") is True:
         return (output_schema, "", None, contract_meta)
     return output_schema
 
@@ -276,7 +326,7 @@ def pydantic_model_to_output_schema(
     model_type: type[BaseModel],
     *,
     model_stack: frozenset[type[BaseModel]] = frozenset(),
-) -> dict[str, Any]:
+) -> dict[str, Any] | tuple[Any, ...]:
     next_stack = model_stack | {model_type}
     schema: dict[str, Any] = {}
     for field_name, field in model_type.model_fields.items():
@@ -291,12 +341,16 @@ def pydantic_model_to_output_schema(
             annotation,
             required=field.is_required(),
         )
+        if isinstance(field.json_schema_extra, Mapping) and "long_content" in field.json_schema_extra:
+            contract_meta["long_content"] = field.json_schema_extra["long_content"]
         schema[output_name] = (
             field_schema,
             description,
             True if field.is_required() else None,
             contract_meta,
         )
+    if getattr(model_type, "__pydantic_root_model__", False):
+        return schema["root"]
     return schema
 
 
@@ -394,6 +448,7 @@ def _field_requirement_parts(
     *,
     replace_slot_references: Callable[[Any, dict[str, str] | None], Any],
     title_mapping: dict[str, str] | None,
+    include_description_only: bool = False,
 ) -> list[str]:
     if not isinstance(field_spec, tuple):
         return []
@@ -404,7 +459,7 @@ def _field_requirement_parts(
     pydantic_contract = _get_pydantic_contract(field_spec)
     if pydantic_contract is not None:
         notes = _format_pydantic_constraint_notes(pydantic_contract)
-        return [description, *notes] if description and notes else notes
+        return [description, *notes] if description and (notes or include_description_only) else notes
 
     ensure_marker = field_spec[2] if len(field_spec) >= 3 else None
     ensure_policy = DataPathBuilder.get_ensure_policy(ensure_marker)
@@ -419,7 +474,7 @@ def _field_requirement_parts(
             "value must not be null, blank, or empty",
         ]
     else:
-        return []
+        return [description] if description and include_description_only else []
     return [description, *notes] if description else notes
 
 
@@ -428,30 +483,34 @@ def generate_output_requirement_lines(
     *,
     replace_slot_references: Callable[[Any, dict[str, str] | None], Any],
     title_mapping: dict[str, str] | None = None,
+    inline_descriptions: Literal["all", "top_level", "none"] = "all",
 ) -> list[str]:
     requirements: list[tuple[str, list[str]]] = []
 
-    def traverse(value: Any, path: str):
+    def traverse(value: Any, path: str, depth: int = 0):
         if isinstance(value, tuple):
             parts = _field_requirement_parts(
                 value,
                 replace_slot_references=replace_slot_references,
                 title_mapping=title_mapping,
+                include_description_only=(
+                    inline_descriptions == "none" or (inline_descriptions == "top_level" and depth > 1)
+                ),
             )
             if path and parts:
                 requirements.append((path, parts))
             if value:
-                traverse(value[0], path)
+                traverse(value[0], path, depth)
             return
         if isinstance(value, Mapping):
             for key, child in value.items():
                 child_path = f"{path}.{key}" if path else str(key)
-                traverse(child, child_path)
+                traverse(child, child_path, depth + 1)
             return
         if isinstance(value, (list, set)):
             for child in value:
                 child_path = f"{path}[*]" if path else "[*]"
-                traverse(child, child_path)
+                traverse(child, child_path, depth + 1)
 
     traverse(output, "")
     if not requirements:

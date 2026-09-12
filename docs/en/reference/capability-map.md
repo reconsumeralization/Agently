@@ -15,7 +15,7 @@ This is a navigation aid: figure out which layer your problem lives at, then jum
 | 1. One request | Can I get one structured answer from a model? | [Quickstart](../start/quickstart.md), [Requests Overview](../requests/overview.md) |
 | 2. Stable output | Do I get the fields I expect, every time? | [Schema as Prompt](../requests/schema-as-prompt.md), [Output Control](../requests/output-control.md) |
 | 3. Response, context, and memory | Can I reuse a response, assemble task information, continue a conversation, or persist records? | [Model Response](../requests/model-response.md), [Session Memory](../requests/session-memory.md), [Task context, files, and records](../requests/workspace.md) |
-| 4. Actions and execution resources | Should the model call functions, MCP servers, or sandboxed commands with managed execution resources? | [Actions Overview](../actions/overview.md), [Action Runtime](../actions/action-runtime.md), [ExecutionResource](../actions/execution-environment.md) |
+| 4. Actions and execution resources | Should the model call functions, MCP servers, or sandboxed commands, or program over dependent read calls? | [Actions Overview](../actions/overview.md), [Action Runtime](../actions/action-runtime.md), [Programmatic Action Calling](../actions/programmatic-action-calling.md), [ExecutionResource](../actions/execution-environment.md) |
 | 5. Knowledge and services | Do I need retrieval, HTTP, SSE, or WebSocket exposure? | [Knowledge Base](../knowledge/knowledge-base.md), [FastAPI Service Exposure](../services/fastapi.md) |
 | 6. Observability and development | Do I need observation events, DevTools, or coding-agent guidance? | [Observability Overview](../observability/overview.md), [Coding Agents](../development/coding-agents.md) |
 | 7. Agent auto-orchestration | Should one Agent turn choose among model response, Actions, or Skills? | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
@@ -37,6 +37,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Task needs files, durable records, or bounded multi-source context | [Task context, files, and records](../requests/workspace.md) |
 | Explicit workflow loop needs durable records, links, snapshots, and file deliverables | [TriggerFlow Overview](../triggerflow/overview.md) + [Task context, files, and records](../requests/workspace.md); see `examples/task_workspace/task_context_loop_foundation.py` |
 | Need the model to call tools / MCP servers | [Action Runtime](../actions/action-runtime.md) |
+| One Action round needs data-dependent read calls, local loops, or aggregation | [Programmatic Action Calling](../actions/programmatic-action-calling.md) |
 | Need common Python / shell / TaskWorkspace / Node.js / common-language code / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_task_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, or `agent.enable_sqlite(...)` |
 | Need web search or page browse | [Action Runtime](../actions/action-runtime.md), use `from agently.builtins.actions import Search, Browse` and `agent.use_actions(...)` |
 | Need managed MCP/sandbox/process/browser/SQLite lifecycle before execution | [ExecutionResource](../actions/execution-environment.md), usually for action/plugin authors |
@@ -45,6 +46,8 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Need to inspect observation events | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
 | Not sure whether to use ModelRequest, AgentExecution, TaskDAG, or TriggerFlow | [Execution Layer Selection](execution-layer-selection.md) |
 | Need one Agent turn to choose between model response, Actions, or Skills | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
+| Need a terminal plan with optional human clarification | [Built-in `plan` Pattern](../start/auto-orchestration.md#built-in-plan) |
+| Need a coherent long text assembled across model requests | [Built-in `long_content` Pattern](../start/auto-orchestration.md#built-in-long_content) |
 | Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-strategy), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
 | Need to inspect task-frame/Skill lowering, or the optional TaskDAG Blocks carrier | [Blocks Lifecycle](blocks-lifecycle.md) |
 | Model-generated or app-generated DAG that must be planned, validated, customized, and executed | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
@@ -65,6 +68,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
   [Blocks Lifecycle](blocks-lifecycle.md).
 - "Sync or async?" — Sync for scripts and demos. Async for services, streaming UI, and TriggerFlow. See [Async First](../start/async-first.md).
 - "Action or tool API?" — New code: `Agently.action` / `agent.use_actions(...)`, built-in packages from `agently.builtins.actions`, plus helpers such as `agent.enable_python(...)`, `agent.enable_shell(...)`, and `agent.enable_task_workspace_file_actions(...)`; see [Action Runtime](../actions/action-runtime.md).
+- "Programmatic Action calling or DAG?" — Use `planning_protocol="programmatic"` for bounded, ephemeral, data-dependent read calls inside one Action round. Keep TaskDAG/TriggerFlow for validated or durable business lifecycle, approval, wait/resume, compensation, and restart recovery; see [Programmatic Action Calling](../actions/programmatic-action-calling.md).
 - "Agent start or explicit API?" — Use `agent.start()` for candidate-driven model/Action auto-orchestration with optional Skill context, and `agent.create_execution()` when the caller needs route diagnostics or process streaming. Use TaskDAG / DynamicTask directly when the application or visual automation surface owns a submitted DAG.
 - "AgentTask or TriggerFlow?" — Use `agent.create_task(...)` when the model owns the task-level plan, verification, and replan loop for one business task; it returns a task-strategy `AgentExecution`, so read result/meta/stream/task refs through the AgentExecution result facade. Use TriggerFlow directly when the application owns the exact stages, branching, and wait/resume topology.
 - "Executor or ExecutionResource?" — Executors run one call. ExecutionResource prepares reusable or policy-bound dependencies before that call; see [ExecutionResource](../actions/execution-environment.md).

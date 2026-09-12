@@ -9,6 +9,8 @@ Expected key output:
     object_reply=attempt=1; input=first
     prompt_before_has_input=True
     prompt_after_has_input=True
+    fluent_info_same_execution=True
+    prompt_has_info=True
     lifecycle_fail_fast=True
     fresh_execution_reply=attempt=2; input=second
 """
@@ -22,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from examples.release_pinned_usage._local_requesters import (
+from examples.release_pinned_usage._local_requesters import (  # noqa: E402
     PinnedUsageStructuredRequester,
     create_structured_agent,
 )
@@ -33,7 +35,13 @@ def main() -> None:
     agent = create_structured_agent("release-pinned-agent-execution-result")
     agent.system("Reply with the requested structured field.", always=True)
 
-    execution = agent.input("first").output({"reply": (str,)}, format="json")
+    execution = (
+        (input_execution := agent.input("first"))
+        .info("Release-pinned supporting context.")
+        .instruct("Return the requested reply field.")
+        .output({"reply": (str,)}, format="json")
+    )
+    fluent_info_same_execution = execution is input_execution
     prompt_before = execution.get_prompt_text()
     result = execution.get_result()
     quick_data = result.get_data(ensure_keys=["reply"])
@@ -59,6 +67,8 @@ def main() -> None:
     print(f"object_reply={data_object.model_dump().get('reply') if data_object else None}")
     print(f"prompt_before_has_input={'first' in prompt_before}")
     print(f"prompt_after_has_input={'first' in prompt_after}")
+    print(f"fluent_info_same_execution={fluent_info_same_execution}")
+    print(f"prompt_has_info={'Release-pinned supporting context.' in prompt_before}")
     print(f"lifecycle_fail_fast={lifecycle_fail_fast}")
     print(f"fresh_execution_reply={fresh_data.get('reply')}")
 

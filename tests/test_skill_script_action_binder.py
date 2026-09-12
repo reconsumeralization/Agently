@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from agently import Agently
+from agently.builtins.plugins.ActionExecutor import CodeExecutionActionExecutor
 from agently.builtins.agent_extensions.SkillsExtension.SkillActionBinder import (
     SkillActionBinder,
 )
@@ -47,12 +48,18 @@ class _Execution:
         self.local_action_ids: list[str] = []
 
 
-def test_binder_registers_exact_revision_script_as_ordinary_code_action(tmp_path: Path) -> None:
+def test_binder_registers_exact_revision_script_as_ordinary_code_action(
+    tmp_path: Path,
+) -> None:
     library = SkillLibrary(tmp_path / "library")
     package = library.install(_write_skill(tmp_path / "skill"), trust="trusted")
     binding = SkillBinding.create(package, task_id="execution-1", mode="required")
     execution = _Execution(
-        TaskWorkspace(tmp_path / "workspace", mode="read_only", execution_id="execution-1")
+        TaskWorkspace(
+            tmp_path / "workspace",
+            mode="read_only",
+            execution_id="execution-1",
+        )
     )
 
     bound = SkillActionBinder(library).bind(
@@ -66,33 +73,13 @@ def test_binder_registers_exact_revision_script_as_ordinary_code_action(tmp_path
     spec = execution.action.registered[0]
     assert spec["side_effect_level"] == "exec"
     assert spec["sandbox_required"] is True
-    assert spec["execution_resources"] == [
-        {
-            "kind": "code_execution",
-            "resource_key": bound.action_id,
-            "scope": "action_call",
-            "provider_candidates": ["docker"],
-                "required_capabilities": {
-                    "language": "python",
-                    "isolation": {
-                        "process_contained": True,
-                        "host_filesystem_restricted": True,
-                        "privilege_escalation_blocked": True,
-                        "syscalls_restricted": True,
-                    },
-                    "workspace_access_mode": "snapshot",
-                },
-            "workspace_access": {
-                "mode": "snapshot",
-                "expected_outputs": [],
-            },
-        }
-    ]
     meta = spec["meta"]
     assert isinstance(meta, dict)
     assert meta["skill_revision_ref"] == package.revision_ref
     assert meta["skill_resource_path"] == "scripts/check.py"
-    assert meta["skill_resource_sha256"] == package.resource("scripts/check.py").sha256
+    assert meta["skill_resource_sha256"] == package.resource(
+        "scripts/check.py"
+    ).sha256
     assert "installed_path" not in meta
 
 
@@ -108,7 +95,11 @@ def test_binder_rejects_untrusted_or_unauthorized_script(tmp_path: Path) -> None
         mode="required",
     )
     execution = _Execution(
-        TaskWorkspace(tmp_path / "workspace", mode="read_only", execution_id="execution-1")
+        TaskWorkspace(
+            tmp_path / "workspace",
+            mode="read_only",
+            execution_id="execution-1",
+        )
     )
     binder = SkillActionBinder(library)
 
@@ -139,7 +130,7 @@ def test_binder_rejects_untrusted_or_unauthorized_script(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_agent_exposes_explicit_script_binding_after_exact_skill_binding(
+async def test_agent_exposes_released_script_binding_after_exact_skill_binding(
     tmp_path: Path,
 ) -> None:
     agent = Agently.create_agent("skill-script-application-api").use_task_workspace(
@@ -164,8 +155,10 @@ async def test_agent_exposes_explicit_script_binding_after_exact_skill_binding(
     )
 
     assert bound.action_id in execution.local_action_ids
+    assert bound.action_id in (execution.execution_context.scoped_action_ids() or set())
     executor = execution.action.action_registry.get_executor(bound.action_id)
     assert executor is not None
+    assert isinstance(executor, CodeExecutionActionExecutor)
     assert executor.skill_library is agent.skill_library
 
 

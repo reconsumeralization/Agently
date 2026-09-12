@@ -26,7 +26,10 @@ import re
 from typing import Any, AsyncGenerator, Mapping
 
 from agently.types.data.response import StreamingData
-from agently.core.model.StructuredOutputParser import extract_xml_field_target, parse_xml_field_output
+from agently.core.model.StructuredOutputParser import (
+    extract_xml_field_target as extract_xml_field_target,
+    parse_xml_field_output as parse_xml_field_output,
+)
 
 
 _TARGET_START_RE = re.compile(r"<agently_output\b[^>]*>", flags=re.IGNORECASE)

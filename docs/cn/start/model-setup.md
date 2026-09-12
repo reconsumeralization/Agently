@@ -232,6 +232,27 @@ agent = Agently.create_agent()
 agent.activate_model("reasoning")
 ```
 
+只要 `model_pool` 非空，显式传入的 `model_key` 就构成别名契约：该 key 必须存在于
+池中。未知 key 会在 Agently 构造或发送 provider 请求之前抛出 `ValueError`，因此拼写
+错误不会再落到继承配置或插件默认 endpoint。省略 `model_key` 时仍使用继承的模型配置；
+没有配置 model pool 时，旧的可选 stage key 也继续使用继承的单模型配置。
+
+发送请求前，可以用只读 resolver 校验某个已配置别名：
+
+```python
+from agently.utils import resolve_model_profile
+
+profile = resolve_model_profile("reasoning", agent.settings)
+assert profile["provider"] == "OpenAICompatible"
+assert profile["base_url"] == "https://api.deepseek.com/v1"
+assert profile["model"] == "deepseek-v4-flash"
+assert profile["auth_present"] is True
+```
+
+返回结果不包含 credential 值，也不会修改 settings 或推进 API key selection。它描述
+profile 层配置；requester 构造 wire request 后的最终 URL 和模型仍以
+`model.requesting` RuntimeEvent 为准。
+
 `selection` 控制一次新的独立请求开始前如何选 key，支持 `fixed`、`random`、
 `round_robin`、`least_used`；旧的顶层 `strategy` / `mode` 仍作为 selection 快捷写法。
 

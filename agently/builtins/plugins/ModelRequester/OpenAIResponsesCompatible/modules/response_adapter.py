@@ -304,6 +304,8 @@ class OpenAIResponsesCompatibleResponseAdapterMixin:
             meta["model"] = response_record["model"]
         if "status" in response_record:
             meta["status"] = response_record["status"]
+        if isinstance(response_record.get("incomplete_details"), dict):
+            meta["incomplete_details"] = response_record["incomplete_details"]
         if "usage" in response_record:
             meta["usage"] = response_record["usage"]
         meta["finish_reason"] = self._build_finish_reason(response_record)

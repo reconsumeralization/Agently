@@ -36,10 +36,7 @@ if TYPE_CHECKING:
         AgentlyOriginalResultPayload,
         AgentlySpecificResultMessage,
         InstantStreamingContentType,
-        OutputValidateContext,
         OutputValidateHandler,
-        OutputValidateResult,
-        OutputValidateResultDict,
         ResultContentType,
         RunContext,
         SpecificEvents,
@@ -130,16 +127,26 @@ class ModelRequestResult:
             return
 
         from agently.core.runtime.RuntimeEvents import async_emit_response_parser_observation
+        from agently.core.model.OutputObservationPolicy import (
+            OutputObservationPolicy,
+        )
 
         run = self.model_run_context or self.request_run_context
-        for observation in observations:
-            if isinstance(observation, Mapping):
-                await async_emit_response_parser_observation(
-                    dict(observation),
-                    agent_name=self.agent_name,
-                    response_id=self._response_id,
-                    run=run,
-                )
+        output_observation_policy = OutputObservationPolicy.from_settings(self.settings)
+        with bind_runtime_context(
+            parent_run_context=self.request_run_context,
+            request_run_context=self.request_run_context,
+            model_run_context=self.model_run_context,
+            settings=self.settings,
+        ):
+            for observation in observations:
+                if isinstance(observation, Mapping):
+                    await async_emit_response_parser_observation(
+                        output_observation_policy.project_parser_observation(observation),
+                        agent_name=self.agent_name,
+                        response_id=self._response_id,
+                        run=run,
+                    )
 
     async def _run_finally_handlers_once(self):
         if self._finally_handlers_ran:
@@ -466,6 +473,12 @@ class ModelRequestResult:
                 type = content
             else:
                 type = "delta"
+        if self._accepted_retry_result is not None:
+            yield from self._accepted_retry_result.get_generator(
+                type=type,
+                specific=specific,
+            )
+            return
         parsed_generator = self._response_parser.get_generator(type=type, specific=specific)
         completed = False
         try:
@@ -551,6 +564,13 @@ class ModelRequestResult:
                 type = content
             else:
                 type = "delta"
+        if self._accepted_retry_result is not None:
+            async for data in self._accepted_retry_result.get_async_generator(
+                type=type,
+                specific=specific,
+            ):
+                yield data
+            return
         parsed_generator = self._response_parser.get_async_generator(type=type, specific=specific)
         completed = False
         try:

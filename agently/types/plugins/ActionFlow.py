@@ -18,6 +18,8 @@ from .base import AgentlyPlugin
 from .ActionRuntime import ActionExecutionHandler, ActionPlanningHandler
 
 ActionFlowObservationHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
+ActionFlowResponseStreamHandler = Callable[[str, Any], Awaitable[None] | None]
+ActionFlowTerminalResponseHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -59,4 +61,6 @@ class ActionFlow(AgentlyPlugin, Protocol):
         timeout: float | None = None,
         planning_protocol: str | None = None,
         runtime_observation_handler: ActionFlowObservationHandler | None = None,
+        response_stream_handler: ActionFlowResponseStreamHandler | None = None,
+        terminal_response_handler: ActionFlowTerminalResponseHandler | None = None,
     ) -> list["ActionResult"]: ...

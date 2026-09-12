@@ -14,14 +14,66 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 from typing_extensions import NotRequired, TypedDict
 
 from .record_store import RecordRef
+from .agent_review import AgentReviewResult
 
 
-AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
+AgentExecutionName: TypeAlias = Literal["auto", "request", "long_task", "plan", "long_content"] | str
+
+
+AgentExecutionStatus: TypeAlias = Literal[
+    "created",
+    "running",
+    "success",
+    "completed",
+    "blocked",
+    "failed",
+    "error",
+    "stalled",
+    "timed_out",
+    "cancelled",
+] | str
+
+
+class AgentExecutionControlCapabilities(TypedDict):
+    """Supported semantic boundaries, independent from execution state."""
+
+    pause_boundaries: list[Literal["before_production", "candidate_ready"]]
+    snapshot_boundaries: list[Literal["before_production", "candidate_ready"]]
+    resume: Literal["explicit_pending_pause"]
+    rework: Literal["same_execution_revision", "unsupported"]
+    active_child_snapshot: Literal[False]
+
+
+class AgentExecutionControlResult(TypedDict):
+    """Control receipt; pause_requested alone does not establish suspension."""
+
+    execution_id: str
+    status: str
+    closed: bool
+    pause_requested: NotRequired[bool]
+    boundary: NotRequired[str | None]
+
 AgentExecutionRecordPurpose: TypeAlias = Literal["process", "deliverable", "recovery", "audit"]
+AgentExecutionStrategy: TypeAlias = Literal[
+    "auto",
+    "direct",
+    "task",
+    "task_loop",
+    "long_task",
+    "flat",
+    "taskboard",
+] | str
+AgentExecutionEffort: TypeAlias = (
+    Literal["minimal", "low", "fast", "medium", "normal", "high", "max"]
+    | str
+    | Mapping[str, object]
+    | None
+)
 
 
 class AgentExecutionLineage(TypedDict):
@@ -58,8 +110,12 @@ class AgentExecutionDiagnostics(TypedDict):
     last_progress: dict[str, Any]
     required_capabilities: list[dict[str, Any]]
     task_workspace_retention: NotRequired[dict[str, Any]]
+    action_scope: NotRequired[dict[str, Any]]
     action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
+    artifact: NotRequired[dict[str, Any]]
     long_output: NotRequired[dict[str, Any]]
+    review: NotRequired[dict[str, Any]]
+    execution_run: NotRequired[dict[str, object]]
 
 
 class ActionArtifactReleaseDiagnostic(TypedDict):
@@ -76,7 +132,13 @@ class ActionArtifactReleaseDiagnostics(TypedDict, total=False):
 
 
 class AgentExecutionRouteInfo(TypedDict):
-    selected_route: str
+    selected_route: Literal[
+        "model_request",
+        "agent_task",
+        "route_policy_blocked",
+        "plan",
+        "long_content",
+    ] | str
     selected_by: str | None
     options: dict[str, Any]
     reusable: bool
@@ -96,8 +158,9 @@ class AgentExecutionActionLog(TypedDict, total=False):
 
 class AgentExecutionMeta(TypedDict):
     execution_id: str
+    revision: NotRequired[int]
     status: AgentExecutionStatus
-    strategy: str | None
+    strategy: AgentExecutionStrategy | None
     goals: list[str]
     success_criteria: list[str]
     generated_success_criteria: list[str]
@@ -110,11 +173,14 @@ class AgentExecutionMeta(TypedDict):
     consumed_options: dict[str, Any]
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
+    plugin: str
+    control_capabilities: NotRequired[AgentExecutionControlCapabilities]
     close_snapshot: dict[str, Any]
     logs: dict[str, Any]
     diagnostics: AgentExecutionDiagnostics
     record_refs: AgentExecutionRecordRefs
     long_output: NotRequired[dict[str, Any]]
+    reviews: NotRequired[list[AgentReviewResult]]
 
 
 CapabilityKind: TypeAlias = Literal["action"]
@@ -184,6 +250,7 @@ class EvidenceRequirement(TypedDict, total=False):
 
 class AgentExecutionStreamMeta(TypedDict, total=False):
     execution_id: str
+    revision: int
     lineage: AgentExecutionLineage
 
 

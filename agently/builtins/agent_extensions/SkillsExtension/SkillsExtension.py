@@ -19,16 +19,24 @@ from agently_stage import default_stage_call_bridge
 import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from typing_extensions import Self
+from typing_extensions import Self, overload
 
+from agently.builtins.plugins.ActionExecutor import CodeExecutionActionExecutor
 from agently.core import BaseAgent
 from agently.core.application.SkillLibrary import SkillBinding, SkillPackageRevision
-from agently.types.data import SkillMode, SkillScriptAuthorization
-from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
+from agently.types.data import (
+    SkillMode,
+    SkillScriptAuthorization,
+    required_code_execution_isolation,
+)
+from agently.utils.DataGuardian import _copy_public, _ensure_list
 
 from .SkillActionBinder import BoundSkillAction, SkillActionBinder
+
+if TYPE_CHECKING:
+    from agently.types.plugins import AgentExecution
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,246 @@ class SkillsExtension(BaseAgent):
         self.__session_skill_selectors: list[dict[str, Any]] = []
         self.__session_skills_pack_selectors: list[dict[str, Any]] = []
 
+    def enable_skill_script_exec(
+        self,
+        execution: Any,
+        *,
+        authorization: SkillScriptAuthorization,
+        language: Literal["python", "nodejs", "go", "cpp"] = "python",
+    ) -> str:
+        execution_id = str(getattr(execution, "id", "")).strip()
+        if not execution_id:
+            raise TypeError("Skill script exec requires one AgentExecution.")
+        owner = getattr(execution, "agent", None)
+        expected_owner = getattr(self, "_agent", None) or self
+        if owner is not expected_owner:
+            raise PermissionError(
+                "Skill script exec must be enabled by the Agent owning this AgentExecution."
+            )
+        if bool(getattr(execution, "_started", False)):
+            raise RuntimeError(
+                "AgentExecution represents one independent run and has already started. "
+                "Create a fresh execution for the next user request."
+            )
+        if (
+            not isinstance(authorization, SkillScriptAuthorization)
+            or not authorization.auto_allow
+        ):
+            raise PermissionError(
+                "Skill script authorization requires explicit auto_allow=True."
+            )
+        if not bool(getattr(execution, "_task_context_prepared", False)):
+            raise RuntimeError(
+                "Prepare the AgentExecution TaskContext before enabling Skill script exec."
+            )
+        bindings = getattr(execution, "skill_bindings", None)
+        if not isinstance(bindings, list) or not bindings:
+            raise RuntimeError(
+                "Prepare the AgentExecution TaskContext before enabling Skill script exec."
+            )
+        exact_bindings: list[SkillBinding] = []
+        script_count = 0
+        for binding in bindings:
+            if not isinstance(binding, SkillBinding):
+                raise TypeError("AgentExecution.skill_bindings contains an invalid value.")
+            if binding.task_id != execution_id:
+                raise PermissionError("Skill binding belongs to another task execution.")
+            package = self.skill_library.resolve(binding.revision_ref)
+            if package.revision_ref != binding.revision_ref or package.trust != "trusted":
+                raise PermissionError(
+                    "Skill script execution requires trusted exact revisions."
+                )
+            exact_bindings.append(binding)
+            script_count += sum(
+                1
+                for resource in package.resources
+                if resource.kind == "script"
+                and resource.executable
+                and CodeExecutionActionExecutor.skill_script_language(
+                    resource.path,
+                    strict=False,
+                )
+                == language
+            )
+        if script_count == 0:
+            raise ValueError(
+                f"No executable {language!r} scripts exist in the current Skill bindings."
+            )
+
+        action_id = self._ensure_skill_script_exec_action(
+            execution=execution,
+            language=language,
+        )
+        execution.execution_context.set_skill_script_exec_authorization(
+            action_id=action_id,
+            language=language,
+            bindings=tuple(exact_bindings),
+            expected_outputs=tuple(authorization.expected_outputs),
+        )
+        enable_dependent_action = getattr(
+            execution,
+            "_enable_task_context_dependent_action",
+            None,
+        )
+        if not callable(enable_dependent_action):
+            execution.execution_context.clear_skill_script_exec_authorizations(
+                {action_id}
+            )
+            raise TypeError(
+                "AgentExecution does not support prepared context-dependent Actions."
+            )
+        try:
+            enable_dependent_action(action_id)
+        except BaseException:
+            execution.execution_context.clear_skill_script_exec_authorizations(
+                {action_id}
+            )
+            raise
+        return action_id
+
+    @staticmethod
+    def _skill_script_exec_action_id(language: str) -> str:
+        return f"exec_skill_{language}"
+
+    def _skill_script_exec_requirements_factory(
+        self,
+        *,
+        action_id: str,
+        language: str,
+    ):
+        def requirements_factory(*, spec: Any, settings: Any, policy: Any):
+            del spec, policy
+            from agently.core.runtime import get_current_agent_execution_context
+
+            context = get_current_agent_execution_context()
+            get_authorization = getattr(
+                context,
+                "get_skill_script_exec_authorization",
+                None,
+            )
+            authorization = (
+                get_authorization(action_id)
+                if callable(get_authorization)
+                else None
+            )
+            if not isinstance(authorization, Mapping):
+                raise PermissionError(
+                    "Skill script Action is not authorized for the current AgentExecution."
+                )
+            if (
+                str(authorization.get("execution_id") or "")
+                != str(getattr(context, "execution_id", ""))
+            ):
+                raise PermissionError(
+                    "Skill script authorization belongs to another AgentExecution."
+                )
+            if str(authorization.get("language") or "") != language:
+                raise PermissionError(
+                    "Skill script authorization does not match the Action language."
+                )
+            configured_providers = settings.get(
+                "code_execution.providers",
+                ["docker"],
+            )
+            if not isinstance(configured_providers, list) or not configured_providers:
+                raise ValueError(
+                    "code_execution.providers must be a non-empty ordered list."
+                )
+            return [
+                {
+                    "kind": "code_execution",
+                    "resource_key": action_id,
+                    "scope": "action_call",
+                    "provider_candidates": list(configured_providers),
+                    "required_capabilities": {
+                        "language": language,
+                        "isolation": required_code_execution_isolation(),
+                        "workspace_access_mode": "snapshot",
+                    },
+                    "workspace_access": {
+                        "mode": "snapshot",
+                        "expected_outputs": list(
+                            authorization.get("expected_outputs", ())
+                        ),
+                    },
+                }
+            ]
+
+        return requirements_factory
+
+    def _ensure_skill_script_exec_action(
+        self,
+        *,
+        execution: Any,
+        language: Literal["python", "nodejs", "go", "cpp"],
+    ) -> str:
+        action_id = self._skill_script_exec_action_id(language)
+        registry = execution.action.action_registry
+        existing_spec = registry.get_spec(action_id)
+        if existing_spec is not None:
+            existing_meta = existing_spec.get("meta", {})
+            existing_executor = registry.get_executor(action_id)
+            if (
+                not isinstance(existing_meta, Mapping)
+                or existing_meta.get("component") != "skill_script_exec"
+                or existing_meta.get("language") != language
+                or not isinstance(existing_executor, CodeExecutionActionExecutor)
+                or existing_executor.skill_library is not self.skill_library
+            ):
+                raise ValueError(
+                    f"Action id {action_id!r} is already registered by another owner."
+                )
+            return action_id
+
+        requirements_factory = self._skill_script_exec_requirements_factory(
+            action_id=action_id,
+            language=language,
+        )
+        execution.action.register_action(
+            action_id=action_id,
+            desc=(
+                "Execute one authorized script from the Skills bound to the "
+                "current AgentExecution. Use the relative path shown in its instructions."
+            ),
+            kwargs={
+                "script_path": (str, "Relative executable script path.", True),
+                "args": ("list[str]", "Optional bounded script arguments."),
+            },
+            executor=CodeExecutionActionExecutor(
+                language=language,
+                skill_library=self.skill_library,
+            ),
+            default_policy={"auto_allow": True},
+            side_effect_level="exec",
+            approval_required=False,
+            sandbox_required=True,
+            replay_safe=False,
+            expose_to_model=True,
+            execution_resources=[
+                {
+                    "kind": "code_execution",
+                    "resource_key": action_id,
+                    "scope": "action_call",
+                    "provider_candidates": ["docker"],
+                    "required_capabilities": {
+                        "language": language,
+                        "isolation": required_code_execution_isolation(),
+                        "workspace_access_mode": "snapshot",
+                    },
+                    "workspace_access": {
+                        "mode": "snapshot",
+                        "expected_outputs": [],
+                    },
+                }
+            ],
+            meta={
+                "component": "skill_script_exec",
+                "language": language,
+                "_execution_resource_requirements_factory": requirements_factory,
+            },
+        )
+        return action_id
+
     def bind_skill_script_action(
         self,
         execution: Any,
@@ -74,6 +322,8 @@ class SkillsExtension(BaseAgent):
         resource_path: str,
         authorization: SkillScriptAuthorization,
     ) -> BoundSkillAction:
+        """Bind one script Action through the released compatibility surface."""
+
         bindings = getattr(execution, "skill_bindings", None)
         if not isinstance(bindings, list) or not bindings:
             raise RuntimeError(
@@ -94,14 +344,39 @@ class SkillsExtension(BaseAgent):
             authorization=authorization,
         )
 
+    @overload
     def use_skills(
         self,
-        skills: Any,
+        skills: object,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_skills(
+        self,
+        skills: object,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_skills(
+        self,
+        skills: object,
         *,
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Select Skills for one execution, or for future runs with ``always=True``.
+
+        ``mode="model_decision"`` exposes eligible Skills for model selection;
+        ``mode="required"`` requires each selected Skill to resolve.
+        """
         if not always:
             return self.create_execution().use_skills(
                 skills,
@@ -111,13 +386,32 @@ class SkillsExtension(BaseAgent):
         self._add_skill_selectors(skills, mode=mode, auto_allow=auto_allow)
         return self
 
+    @overload
     def require_skills(
         self,
-        skills: Any,
+        skills: object,
+        *,
+        auto_allow: bool = False,
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def require_skills(
+        self,
+        skills: object,
+        *,
+        auto_allow: bool = False,
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def require_skills(
+        self,
+        skills: object,
         *,
         auto_allow: bool = False,
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Require Skills for one execution, or for future runs with ``always=True``."""
         return self.use_skills(
             skills,
             mode="required",
@@ -125,13 +419,32 @@ class SkillsExtension(BaseAgent):
             always=always,
         )
 
+    @overload
     def use_skills_packs(
         self,
-        skills_packs: Any,
+        skills_packs: object,
+        *,
+        mode: SkillMode = "model_decision",
+        always: Literal[True],
+    ) -> Self: ...
+
+    @overload
+    def use_skills_packs(
+        self,
+        skills_packs: object,
+        *,
+        mode: SkillMode = "model_decision",
+        always: Literal[False] = False,
+    ) -> "AgentExecution": ...
+
+    def use_skills_packs(
+        self,
+        skills_packs: object,
         *,
         mode: SkillMode = "model_decision",
         always: bool = False,
-    ) -> "Self | Any":
+    ) -> "Self | AgentExecution":
+        """Select Skill packs for one execution, or persist them with ``always=True``."""
         if not always:
             return self.create_execution().use_skills_packs(skills_packs, mode=mode)
         self._validate_mode(mode)
@@ -496,6 +809,15 @@ class SkillsExtension(BaseAgent):
             }.values()
             if package.revision_ref not in required_refs
         ]
+        execution.diagnostics["skill_scope"] = {
+            "status": "frozen",
+            "required_revision_refs": [
+                package.revision_ref for package in required_packages
+            ],
+            "model_decision_revision_refs": [
+                package.revision_ref for package in optional_packages
+            ],
+        }
         selected_optional = await self._async_select_optional_packages(
             task=execution.task_target(),
             packages=optional_packages,

@@ -1,6 +1,6 @@
 # Agent Auto-Orchestration
 
-Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
+Agently 4.1.4 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
 through ordinary model response, Actions, or SkillLibrary-backed Skills
 execution when those capabilities were explicitly injected.
@@ -39,6 +39,11 @@ results = await asyncio.gather(
 )
 ```
 
+Capability configuration chained after a quick prompt stays on that same
+unstarted execution. For example,
+`agent.input(...).info(...).use_action(...)` retains the input and info; it does
+not silently create a replacement execution.
+
 For multi-statement setup, capture the execution draft explicitly:
 
 ```python
@@ -59,19 +64,284 @@ Accepted development-line routing is candidate-driven and deterministic-first.
 Required Skills bind immutable guidance into `TaskContext`; concrete
 model-response consumption is recorded separately from executable capability
 evidence. Ordinary Actions run through the normal `model_request`
-AgentExecution action loop. Skills never create a route or planner capability.
+AgentExecution action loop. Its default rounds choose either Actions or a final
+response. A terminal response is delivered through that same AgentExecution;
+an extra final-generation request is used only for legacy/custom fallback or a
+separate delivery policy such as `auto_continue`. Skills never create a
+route or planner capability.
 
-The public Agent API stays in core, but route planning and execution are owned
-by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
-protocol. This keeps Skill context, the DAG substrate, and future route
-implementations replaceable without teaching core about builtin plugin
-internals.
+The public Agent API stays in core. Its factory directly constructs the selected
+AgentExecution plugin, which owns production and final policies. Skill Context
+and the DAG substrate remain replaceable components within that execution.
+
+## Human Interaction
+
+Use the standard `.interact(handler)` method when this AgentExecution should
+answer connected human-in-the-loop exchanges through a request-local callback:
+
+```python
+def handle_exchange(exchange):
+    if exchange["kind"] == "approval":
+        return {"status": "approved", "approved": True}
+    return {"audience": "framework developers"}
+
+result = (
+    agent.create_execution("plan")
+    .input("Plan the release.")
+    .interact(handle_exchange)
+    .start()
+)
+```
+
+The handler receives one normalized `ExecutionExchangeView` with stable fields
+such as `kind`, `subject`, `payload`, and `request`. It may be synchronous or
+asynchronous and returns the response payload expected by the exchange:
+approval handlers commonly return a Boolean or decision mapping, while
+clarification handlers may return text, a list, or a mapping.
+
+`.interact(...)` declares the response mechanism; it does not force an
+interaction. An ordinary request that opens no exchange never calls the
+handler. The declaration is isolated to that AgentExecution, selects connected
+interaction for its request, survives pre-start execution configuration, and
+does not register or replace a global provider. Calling it again before start
+replaces the previous handler.
+
+The existing owners remain unchanged. ExecutionExchange owns the normalized
+request/provider envelope, and TriggerFlow owns pause/resume. Use registered
+ExecutionExchange providers, routing handlers, and `interaction.*` settings for
+durable queues, webhooks, cross-process hosts, or application-wide routing;
+these advanced transport choices are intentionally not keyword arguments on
+`.interact(...)`.
+
+## Review And Final Validation
+
+Use `.review(handler=None, *, rules=None, on_fail="warn")` to assess the final
+result and its key artifacts. `rules` accepts one string or a sequence of strings.
+A sync/async handler receives `(result, context)` and replaces the whole evaluator;
+its context includes the rules, original contract, trusted artifact refs, and
+TaskWorkspace. Return a Boolean or a mapping with Boolean `passed`.
+
+```python
+result = (
+    agent.input(task).output(contract)
+    .review(rules=["Check that conclusions are supported by the supplied evidence."])
+    .start()
+)
+
+result = (
+    agent.input(task).output(contract)
+    .validate(release_check)  # (value, context) -> bool or {"ok": bool, ...}
+    .review(on_fail="block")
+    .start()
+)
+```
+
+`on_fail="warn"` records a failed verdict without changing the result or success
+status. `"block"` raises `AgentReviewError` and prevents terminal success. This is
+host behavior, not a stronger model rubric. Neither mode revises or retries;
+`"retry"` is unsupported. There is no public Agent/AgentExecution `verify()`.
+
+Without a handler, the reviewer reads complete trusted text artifacts through
+TaskWorkspace, verifies their content version, and makes one structured model
+request. Identical text candidate/artifact content is sent once. Non-text,
+unreadable, changed, or incomplete artifacts produce `not_assessable`, not a
+successful metadata-only review. Use a suitable custom handler for other formats.
+No progressive or segmented model review is implied; context overflow is an
+explicit request failure. Plans are judged as plans, including accepted
+clarifications, not as already-executed tasks. Missing goals are not invented.
+
+Reports contain `passed`, `quality_level` (`strong`, `adequate`, `weak`, or
+`not_assessable`), `summary`, one `checks[]` entry per supplied rule, structured
+`issues[]` (`criterion`, `finding`, `evidence`, `suggestions[]`), and
+`overall_suggestions[]`. Boolean handlers leave `quality_level=None`; they do not
+manufacture a rating. Numeric model scores are not used. Read reports from
+`(await execution.async_get_meta())["reviews"]`; events include `review.started`,
+`review.completed`, `review.warning`, and `review.blocked`.
+
+`validate(handler)` is the hard gate for the **final output of the current call**:
+a direct response, final plan, host-assembled document, AgentTask final output,
+or custom Execution's returned value. It never automatically checks intermediate
+producer/task outputs. Direct ModelRequest validation and `auto_continue`
+retain their existing controlled repair behavior. Other final checks run once
+without replaying internal steps or side effects. Their context uses
+`meta.scope="agent_execution_final"`, no provider response ID, and
+`max_retries=0`. Validation precedes declared artifact delivery and review;
+it does not undo side effects already performed by a task. Use explicit
+TriggerFlow orchestration for a safely designed repair loop.
+
+## Artifact Delivery
+
+Use `.artifact(path, handler=None)` when the accepted business result must also
+be delivered as a verified file:
+
+```python
+result = (
+    agent
+    .input("Prepare the launch report.")
+    .output(report_contract)
+    .artifact("reports/launch.json")
+    .review()
+    .start()
+)
+```
+
+The method remains useful for ordinary text or structured requests; it is not
+limited to workspace-oriented AgentTask runs. Its trust boundary is always the
+Agent's TaskWorkspace. Strings are written unchanged, while mappings, lists,
+tuples, and JSON primitives use readable JSON. A custom synchronous or
+asynchronous handler receives `(result, context)` and returns `str` or `bytes`:
+
+```python
+agent.input(task).artifact(
+    "exports/result.bin",
+    lambda result, context: encode_result(result),
+).start()
+```
+
+The handler only renders content. TaskWorkspace owns path containment, write
+permission, physical digest readback, trusted file identity, and terminal
+retention. In a read-only workspace, a new requested path is written to the
+execution's private fallback area; inspect the trusted ref's `path` for the
+actual location. In a read-write workspace, the requested path is used.
+
+Artifact delivery does not replace or wrap the business result. Trusted refs
+are exposed in `meta["logs"]["artifact_refs"]` and through
+`artifact.started` / `artifact.completed` stream events. Multiple calls create
+multiple independently verified files. Any declared delivery failure fails the
+run; artifact materialization completes before review.
+
+## Execution Plugins
+
+An Agent owns reusable configuration and capabilities. An AgentExecution plugin
+owns one isolated draft, production lifecycle, result, and final policies.
+`agent.create_execution(name)` returns an instance of the registered class.
+
+| Name | Production behavior | Explicit strategies |
+| --- | --- | --- |
+| `auto` (default) | Select the existing request/task/DAG route when execution starts | Existing route strategies |
+| `request` | One request, including request-local parsing and repair | `auto`, `direct` |
+| `long_task` | Retained multi-step goal work | `auto`, `task`, `task_loop`, `long_task`, `flat`, `taskboard` |
+| `plan` | Readiness, connected clarification when needed, then a final plan | `auto` |
+| `long_content` | Section planning, dependent writing, and host-ordered assembly | `auto` |
+
+Explicit selection takes precedence over the configured default. Incompatible
+strategy combinations fail before model or Action dispatch. A route policy
+cannot silently replace an explicitly selected plugin with another producer.
+The ordinary fluent API keeps deferred `auto` selection; registration alone
+does not add model calls, review, or planning.
+
+```python
+execution = (
+    agent.create_execution("plan")
+    .input("Plan a workshop using the supplied facts.")
+    .info(workshop_facts)
+    .interact(handle_exchange)
+    .output(plan_schema)
+    .validate(validate_plan)
+)
+plan = execution.start()
+meta = execution.get_meta()
+print(meta["plugin"], meta["route"]["selected_route"])
+```
+
+A caller's `validate(...)` hard-checks the producer's final returned value,
+not an intermediate readiness response, section plan, or task step. Direct
+request repair remains request-owned. Artifact materialization/readback and
+optional review follow final validation on the same execution.
+
+`plan` uses bounded readiness and planning requests. Readiness also receives
+the final `output(...)` field descriptions and constraints, while returning its
+own readiness judgment rather than filling the final plan. Final planning uses the
+original request and accepted clarification replies directly, without requiring
+a separate restatement of the goal and deliverable. A connected handler
+receives an `ExecutionExchangeView` when clarification is required.
+Missing/rejected answers and exhausted clarification attempts produce an
+explicit blocked outcome; they are not fabricated as accepted answers.
+This built-in connected flow does not yet promise durable plan restoration.
+Its settings are `plugins.AgentExecution.plan.max_clarification_rounds` (default 3) and
+`max_questions_per_round` (default 3).
+
+`long_content` plans sections, writes each body, and records one actual
+chapter-level summary only when a later chapter consumes it. The Host retains
+the complete heading directory and assembles bodies in order without model
+recopy. Configure `plugins.AgentExecution.long_content.max_sections` (default
+12). The whole-document Execution returns text and rejects structured
+`output(...)`. For a long-form field inside a structure, use
+`(LongContent, "writing requirements")` or the compatible
+`("long_content", "writing requirements")` on an ordinary request; the framework
+generates that body separately and fills the original structure. See
+[field-level declarations](../requests/output-control.md) for this distinct scope.
+Chapter requests use conditional continuation; normal completion adds no request.
+Root `.auto_continue()` does not request the assembled document again.
+Released `.ensure_long_output()` remains an alias to the same policy. Long-form
+production and request continuation are separate concerns; general in-structure
+long-string continuation still has open acceptance work.
+
+Custom implementations register in the same `AgentExecution` category.
+Subclass a bundled implementation to reuse its lifecycle and specialize the
+protected, typed production hook on the same instance:
+
+```python
+from agently.builtins.plugins.AgentExecution import RequestExecution, ProductionOptions
+
+class AuditedRequest(RequestExecution):
+    name = "audited_request"
+
+    async def _async_produce(self, options: ProductionOptions) -> tuple[str, object]:
+        route, value = await super()._async_produce(options)
+        self.logs["audit"] = {"produced": True}
+        return route, value
+
+agent.plugin_manager.register("AgentExecution", AuditedRequest, activate=False)
+execution = agent.create_execution("audited_request").input("Explain the migration.")
+result = execution.start()
+```
+
+Use `activate=True` only to change the configured default. A complete custom
+implementation can instead implement the public protocol. `run/async_run`
+and compatible `start/async_start` readers share once-only production;
+captured result readers do not dispatch a second execution.
+
+Metadata exposes `plugin`; multi-request producers emit
+`execution.stage.started/completed` and record stages under
+`diagnostics.execution_run`. Types are available from
+`agently.types.plugins` and `agently.types.data`, not added as root exports.
+The released AgentOrchestrator activation path is a compatibility adapter;
+the default no longer needs it. The unreleased `pattern()` selector and
+AgentPattern plugin category have been replaced, not kept as parallel APIs.
+
+Local Ollama Qwen examples:
+
+- [Plan with connected clarification](../../../examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py)
+- [Long content with artifact readback and review](../../../examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py)
 
 ## Goal Pursuit
 
-Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal
-needs a bounded plan, execution, evidence, verification, and replan loop.
-`agent.goals(...)` is only a plural alias for the same entrypoint.
+`agent.goal(goal_or_goals, success_criteria=None, *, turn_on_long_task=True)`
+declares semantic goals and criteria. The default also enables bounded long-task
+execution in the ordinary auto route. `turn_on_long_task=False` contributes the
+same Prompt declarations without enabling that convenience path; it does not
+disable an independently selected long_task plugin or strategy. Explicit
+`direct` strategy and explicit plugin selection remain authoritative.
+`agent.goals(...)` is a plural alias. Neither declaration automatically enables
+review. Repeating goal() before starting replaces its convenience switch.
+
+If an already selected long-task producer lacks goals or success criteria, it
+asks the model to interpret only the missing fields before constructing its
+task state. Explicit declarations and the original Prompt stay unchanged;
+metadata records model provenance. Derived criteria cannot authorize new work
+or invent business thresholds. Insufficient facts produce a blocked outcome.
+Interpretation includes the final output contract (field descriptions, format,
+and requiredness); no empty contract is added when output is undeclared.
+Preparation consumes the same execution's model-request and time budgets;
+constructing the task does not restart the deadline. A timeout before task
+creation raises `RuntimeStageStallError`; after creation, the task retains its
+`timed_out` result envelope and uses the remaining execution time.
+Complete/restored contracts skip this node. Ordinary requests and review do
+not gain a preflight call; plan/long-content keep their own planning stages.
+See [missing-goal preparation](../../../examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py)
+for a recorded 27B success and unsuccessful 9B outcomes; one run is not a
+stability guarantee.
 
 When task-specific options are assembled separately, attach them through the
 task strategy:
@@ -887,12 +1157,55 @@ to guess strict kwargs from that list. If an internal structured plan already
 carries validated `action_commands`, the host dispatches them with no additional
 planning request. Otherwise, one narrow structured request receives only the
 required Actions' authoritative schemas plus the bounded step context, returns
-the dependency-ordered command batch, and the host validates and dispatches it
-serially through ActionRuntime. This preserves write/read and other intra-step
-dependencies without reopening a planning loop. Unknown or unavailable required Actions fail closed before that
-request. Flat falls back to an open-ended ActionLoop only when the step does not
-fix the required Action ids and later Action choice genuinely depends on Action
-results.
+either a complete command batch or `requires_observation=true` with no commands.
+When all arguments are already grounded, the host validates and dispatches the
+batch serially through ActionRuntime. Ordering alone (such as writing then reading
+a known path) does not require another planning round. If later arguments need an
+earlier Action's new result, Flat uses the existing bounded child ActionLoop to
+observe that result before planning the next call, even when all Action ids are
+known. It never dispatches a partial batch before this handoff. Missing or
+contradictory readiness fields fail closed; unknown or unavailable required
+Actions fail before the narrow request. Explicit `action_commands` remain fixed
+kwargs, not a result-reference or substitution language. Child scope, policy,
+deadlines, and final verification remain unchanged. The handoff also binds all
+batch-required ids through the child's existing `require_actions` evidence gate;
+visibility alone is insufficient. This gate proves successful calls, not correct
+arguments or every required repetition. Handoff metadata records the
+one narrow request in `execution_meta.action_command_planning`.
+The adaptive handoff does not impose the ordinary child's implicit two-round
+cap: calls may need another round for final synthesis. Explicit task
+`action_loop_max_rounds`, task deadlines and request budgets still apply.
+
+When the step has completed `scoped_retrieval`, its argument request also receives
+the bounded read results and existing evidence ledger, preserving the original
+task, step and context without another read or model request. Failed, empty,
+ref-only and truncated states retain their meaning; unread content cannot ground
+arguments. Requests without a current-step read remain unchanged. Explicit
+preplanned commands keep fixed arguments, and a deferred child receives the same
+evidence.
+
+Task-wide `require_actions` is checked against the task's cumulative Action
+evidence, not repeated as an obligation on every child request. A child that
+only writes the final answer or an artifact need not repeat completed Actions.
+Explicit step-required Actions still use the child's gate; missing or failed
+task-required Actions still prevent acceptance. Agent default requirements are
+captured when the task is created and retained with its saved options.
+
+In Flat, a successful command batch that only produces an ordinary observation
+passes its evidence to the next step without treating unfinished task goals as
+a failed step. This applies only to known command results without an explicit
+terminal-readiness flag, actual candidate, artifact refs or active terminal
+repair. A planned `inline_final` format does not mean an answer already exists.
+Pending required obligations and exact Action results remain available; real
+failures, permissions, grounding and repair findings still apply. Final
+candidates still require terminal verification. Intermediate observations or
+budget exhaustion never establish acceptance. TaskBoard, artifact readback and
+outer `review` / `validate` retain their existing responsibilities.
+
+`examples/agent_task/action_result_dependency.py` runs a real-model ticket
+lookup/acknowledgement task with a revision generated only at Action execution.
+Configure its `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; optional
+`MODEL_REQUEST_OPTIONS` supplies a JSON object of provider options.
 
 AgentTask observation also publishes normalized action facts on the structured
 stream as `agent_task.action.started`, `agent_task.action.completed`, and
@@ -1314,15 +1627,137 @@ await task.async_streaming_print()
 result = await task.async_get_full_data()
 ```
 
-`debug=True` (the `simple` profile) prints concise model request/result and
-process summaries. `debug="detail"` prints the complete diagnostic RuntimeEvent
-flow, including model streaming deltas, ActionRuntime, TriggerFlow, and
-AgentExecution details. It does not replace or duplicate the business output:
-consume `type="delta"` or call `async_streaming_print()` to see the readable
-task stages and final result. Use both together for the complete development
-view. Remove debug settings from examples and production snippets once the
-problem is understood. An EventCenter hook remains available when code needs a
-custom diagnostic sink rather than the built-in console profile.
+`debug=True` (the `simple` profile) prints a readable Prompt, concise
+request/result facts, and meaningful process states. `debug="detail"` adds
+sanitized provider request JSON, attempt/validation/telemetry, Action detail,
+and route/stage metadata, while still filtering compatibility aliases, transport
+mirrors, and repeated progress. The console is not a complete RuntimeEvent flow
+and does not replace business output: consume `type="delta"` or call
+`async_streaming_print()` for readable task stages and the final result. Use an
+EventCenter hook or DevTools for complete audit, storage, or replay. Remove debug
+settings from examples and production snippets once the problem is understood.
+Concurrent model responses remain concurrent: ConsoleSink gives the first
+delta-producing response the foreground display, buffers later response display
+in FIFO order, and promotes it after the foreground terminal event. This affects
+presentation only and never blocks or reorders the underlying execution. While
+that foreground stream is active, ordinary Prompt/request/process/success
+diagnostics are bounded and deferred until every FIFO response display finishes;
+the console inserts only a compact background notice. Actionable warnings,
+failures, cancellation, interrupts, and approvals stay immediate, and EventCenter
+and DevTools event timing is unchanged.
+Simple mode preserves one complete projection of each successful model response:
+either its fully rendered live stream or its complete terminal result. If a
+background replay buffer fills, the partial replay is replaced by the complete
+authoritative result at completion rather than being presented as the whole
+response.
+
+### Execution controls
+
+`run()`/`async_run()` and result readers share one owned run. Concurrent readers
+cannot duplicate production. Inspect `execution.control_capabilities` before
+starting when the caller needs a supported control boundary.
+
+- `pause()`/`async_pause()` requests a safe boundary before production or after
+  the candidate is ready, before final validation/artifact/review policies.
+  A requested pause is not yet suspension; an in-flight provider finishes first.
+- At an actual pause, run/readers raise `AgentExecutionPaused` without turning
+  the candidate into a terminal result. `resume()`/`async_resume()` explicitly
+  continues the retained TriggerFlow. Ordinary reads never resume implicitly.
+- `interrupt(content, author=None)` supplies information for a future model
+  request through TaskContext. Its receipt distinguishes insertion, request
+  consumption and ignoring. It cannot change an already dispatched request;
+  information arriving after candidate production is ignored.
+- `cancel(reason=..., timeout=...)` cancels owned work and waits for cleanup.
+  A timeout is an unsettled outcome; repeat the call to join the same cleanup.
+  Cancellation does not roll back external effects.
+- `close(reason=..., timeout=..., pending="error")` drains and seals. Pending
+  waits fail by default; use `pending="cancel"` explicitly to abandon them.
+  Closing a draft prevents start; closing a completed result preserves readers.
+
+Every control has an `async_` counterpart. A snapshot is supported only at a
+settled safe pause:
+
+```python
+from agently.core.application.AgentExecution import AgentExecutionPaused
+
+execution = agent.create_execution("request").input("Summarize these supplied notes.")
+await execution.async_pause()
+try:
+    await execution.async_run()
+except AgentExecutionPaused:
+    snapshot = execution.save()
+
+restored = agent.create_execution("request").input("Summarize these supplied notes.")
+restored.load(snapshot)  # Validation and rebinding only; no model or Action dispatch.
+await execution.async_cancel()  # Retire the original paused handle before handing off.
+data = await restored.async_resume()
+await restored.async_close()
+```
+
+Configure the same original draft, limits, policy callbacks, Actions, Skills,
+TaskWorkspace, RecordStore and external ContextSources on the fresh handle.
+Snapshots contain JSON data and resource identities, never settings, credentials,
+clients or executable callbacks. Missing/changed bindings fail before readiness.
+The current format conservatively rejects any Skill catalog change. Model-call
+usage and elapsed time survive load, including time spent offline. A candidate
+pause resumes final policies without repeating production.
+
+After recovery, the first `get_data_object()` locally validates the saved
+candidate against the rebound original output schema and caches the typed
+object, including nested/root Pydantic types and `LongContent` declarations.
+Load does not run output-model validators. Typed reads do not repeat model
+requests or final validate/artifact/review policies; reconstruction errors raise.
+Historical revisions rebuild from their own candidate, never the latest cache.
+
+### Rework and retained revisions
+
+```python
+execution = agent.create_execution("request", limits={"max_model_requests": 3}).input(
+    "Summarize: staging passed; production awaits approval."
+)
+previous = execution.get_result()  # Captures revision 0.
+first = await execution.async_run()
+revised = await execution.async_rework("Lead with the pending approval.", max_reworks=2)
+assert execution.revision == 1  # Same object and execution ID.
+assert await previous.async_get_full_data() == first
+assert await execution.get_result(revision=0).async_get_full_data() == first
+```
+
+Rework produces a new candidate and returns its full result. New readers select
+its revision; captured readers retain their original result, metadata and stream.
+The original task and acceptance contract remain available alongside the feedback.
+Request producers revise the previous candidate; Plan keeps accepted clarification;
+LongContent reuses an unchanged prefix and rewrites affected dependent sections.
+LongTask asks the model to select retained work, then validates the IDs and
+invalidates dependants (the remaining serial suffix for Flat). Selecting the
+final candidate alone re-enters delivery without invalidating completed work. TaskBoard preserves
+unaffected card results and checks reused file content identities.
+
+Model-call usage, elapsed time, Flat iterations and TaskBoard ticks remain
+cumulative. Use `create_execution("long_task", limits=...)` for an overall model
+request cap; the legacy `create_task(limits=...)` request cap retains its per-step
+meaning, while its wall-clock limit spans rework. `max_reworks` bounds revisions and cannot raise an already established
+cap. A failed revision remains a failure while earlier candidates remain readable.
+Previously dispatched Actions, including uncertain failures, require declared
+`replay_safe` semantics or the host's explicit `allow_replay=True`; children cannot
+relax ancestor protection. Artifact callbacks also require that explicit choice.
+External effects are not rolled back and historical file references are not file
+backups. Custom producers must declare their own rework support.
+
+Safe-pause snapshots include revision history, producer state and replay protection.
+Rebind the original task ID when using `create_task(..., task_id=...)`. Settled task
+resources use the built-in task recovery contract; unsupported ContextSources fail
+explicitly. Historical snapshot readers restore data, metadata and stream records,
+not live provider result objects or original Python exception classes. A live
+ExecutionResource without a checkpoint contract prevents save; settle or release
+it first. Terminal cleanup releases this execution's owned execution scopes.
+
+This supports the outer execution boundaries only. In-flight provider state,
+active children, disconnected plan clarification and nested-budget restoration
+remain unsupported. Legacy task resume does not establish those capabilities.
+See `examples/agent_auto_orchestration/29_execution_controls_ollama.py` for a bounded
+real-model snapshot handoff and same-execution rework.
+
 
 ## Submitted DAG Input
 
@@ -1353,8 +1788,11 @@ itself mean the broader business goal is complete.
 ## Skills Semantics
 
 `agent.use_skills(...)` and `agent.use_skills_packs(...)` register binding
-intent on an AgentExecution. `mode="model_decision"` uses a structured semantic
-selector over installed revisions; `mode="required"` binds the selected
+intent on an Agent or AgentExecution using the same composition grammar as
+`use_actions(...)`; there is no separate public Skill collection API. Each execution
+resolves only those declarations into an exact-revision scope. It does not scan
+the global SkillLibrary. `mode="model_decision"` uses a structured semantic
+selector over that execution scope; `mode="required"` binds the selected
 SKILL.md guidance fail-closed. The ordinary `model_request` or explicit
 AgentTask strategy then consumes that guidance through TaskContext.
 

@@ -14,18 +14,33 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
-from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_checkable
+import os
+from pathlib import Path
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping, Sequence
+from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
+from typing_extensions import overload
+from agently.types.options import ExecutionOptions
 
 from agently.types.data import (
     AgentlySpecificResultMessage,
+    AgentArtifactHandler,
+    AgentArtifactResult,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
+    AgentExecutionEffort,
     AgentExecutionStreamData,
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
+    AgentExecutionStatus,
+    AgentExecutionControlResult,
+    AgentExecutionControlCapabilities,
+    AgentExecutionStrategy,
+    AgentInteractionHandler,
+    AgentReviewHandler,
+    AgentReviewResult,
     ContextBudget,
+    ContextConsumption,
     ContextPackage,
     ContextReadIntent,
     OutputValidateHandler,
@@ -36,39 +51,194 @@ from agently.types.data import (
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from agently.core.Agent import BaseAgent
+    from agently.core.extension import PluginManager
+    from agently.core.operation import Action
+    from agently.core.application.SkillLibrary import SkillBinding
+    from agently.utils import Settings
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentExecution import (
+        AgentExecutionContext,
+        AgentExecutionResult,
+        AgentExecutionStream,
+    )
     from agently.core.context import TaskContext
-    from agently.core.application.AgentExecution import AgentExecutionResult
+    from agently.core.model import ModelRequest, Prompt
+    from agently.core.TaskWorkspace import TaskWorkspace
 
 
 @runtime_checkable
 class AgentExecution(Protocol):
     """Response-style contract for one bounded Agent execution object."""
 
+    required_agent_capabilities: tuple[str, ...]
+
+    def require_agent_capability(self, name: str) -> object: ...
+
     id: str
+    revision: int
+    agent: BaseAgent
+    plugin_manager: PluginManager
+    settings: Settings
+    _review_contract: dict[str, object]
     lineage: AgentExecutionLineage
     limits: AgentExecutionLimits
     options: Any
     effective_options: dict[str, Any]
     consumed_options: dict[str, Any]
-    status: str
-    request: Any
-    request_prompt: Any
-    prompt: Any
-    stream: Any
-    execution_context: Any
-    task_context: Any
-    task_workspace: Any
+    status: AgentExecutionStatus
+    request: "ModelRequest"
+    request_prompt: "Prompt"
+    prompt: "Prompt"
+    stream: "AgentExecutionStream"
+    execution_context: "AgentExecutionContext"
+    task_context: "TaskContext"
+    task_workspace: "TaskWorkspace"
     record_store: Any
     task_refs: dict[str, Any]
-    task_record: Any
+    task_record: "AgentTask | None"
+    name: str
+    artifact_results: list[AgentArtifactResult]
+    review_results: list[AgentReviewResult]
+    result: object | None
+    generated_success_criteria: list[str]
+    strategy_name: str | None
+    skill_bindings: list[SkillBinding]
+    local_action_ids: list[str]
+    local_skill_selectors: list[dict[str, Any]]
+    task_options: dict[str, Any]
+    prompt_snapshot: dict[str, Any]
+    route_info: dict[str, Any]
+    logs: dict[str, Any]
+    diagnostics: dict[str, Any]
+    record_refs: dict[str, Any]
 
-    def __getattr__(self, name: str) -> Any: ...
+    @property
+    def action(self) -> Action: ...
+
+    @property
+    def goal_items(self) -> list[str]: ...
+
+    @goal_items.setter
+    def goal_items(self, value: list[str]) -> None: ...
+
+    @property
+    def success_criteria_items(self) -> list[str]: ...
+
+    @success_criteria_items.setter
+    def success_criteria_items(self, value: list[str]) -> None: ...
+
+    def system(self, prompt: object, *, mappings: dict[str, object] | None = None, always: bool = False) -> "AgentExecution": ...
+
+    def rule(self, prompt: object, *, mappings: dict[str, object] | None = None, always: bool = False) -> "AgentExecution": ...
+
+    def role(
+        self, prompt: object = ..., value: object = ..., *,
+        mappings: dict[str, object] | None = None, always: bool = False,
+        **kwargs: object,
+    ) -> "AgentExecution": ...
+
+    def user_info(
+        self, prompt: object = ..., value: object = ..., *,
+        mappings: dict[str, object] | None = None, always: bool = False,
+        **kwargs: object,
+    ) -> "AgentExecution": ...
+
+    def examples(
+        self, prompt: object = ..., value: object = ..., *,
+        mappings: dict[str, object] | None = None, always: bool = False,
+        **kwargs: object,
+    ) -> "AgentExecution": ...
+
+    def attachment(
+        self, prompt: list[dict[str, object]], *,
+        mappings: dict[str, object] | None = None, always: bool = False,
+    ) -> "AgentExecution": ...
+
+    def image(
+        self, *, question: str, file: str | os.PathLike[str] | None = None,
+        url: str | None = None,
+        files: list[str | os.PathLike[str]] | tuple[str | os.PathLike[str], ...] | None = None,
+        urls: list[str] | tuple[str, ...] | None = None,
+        detail: Literal["auto", "low", "high"] | None = None,
+        mappings: dict[str, object] | None = None, always: bool = False,
+    ) -> "AgentExecution": ...
+
+    def language(
+        self, language: object = "auto", *, output: object = None,
+        process: object = None, progress: object = None,
+        accept_language: object = None, always: bool = False,
+    ) -> "AgentExecution": ...
+
+    def set_prompt_options(self, options: dict[str, object], *, always: bool = False) -> "AgentExecution": ...
+
+    def configure_options(self, options: ExecutionOptions | Mapping[str, object] | None) -> "AgentExecution": ...
+
+    def route_policy(self, value: object) -> "AgentExecution": ...
+
+    def access_control_policy(self, value: object) -> "AgentExecution": ...
+
+    def required_skill_ids(self) -> list[str]: ...
+
+    def required_action_ids(self) -> list[str]: ...
+
+    def is_task_strategy(self) -> bool: ...
+
+    def task_strategy_options(self) -> dict[str, Any]: ...
+
+    def use_dynamic_task(self, *args: object, **kwargs: object) -> "AgentExecution": ...
+
+    def get_response(self) -> "AgentExecutionResult": ...
+
+    def get_prompt_text(self) -> str: ...
+
+    def get_json_prompt(self, save_to: str | Path | None = None, *, encoding: str | None = "utf-8") -> str: ...
+
+    def get_yaml_prompt(self, save_to: str | Path | None = None, *, encoding: str | None = "utf-8") -> str: ...
+
+    async def async_meta(self) -> dict[str, Any]: ...
+
+    def meta(self) -> Any: ...
+
+    async def async_add_guidance(
+        self, content: object, *, author: str | None = None,
+        target: object = "task", meta: dict[str, object] | None = None,
+    ) -> dict[str, object]: ...
+
+    def add_guidance(
+        self, content: object, *, author: str | None = None,
+        target: object = "task", meta: dict[str, object] | None = None,
+    ) -> dict[str, object]: ...
+
+    def record_context_consumption(self, package: ContextPackage, *, request_id: str) -> ContextConsumption: ...
+
+    async def bridge_agent_task_stream_item(self, item: object, *, route: str = "agent_task") -> None: ...
+
+    async def bridge_model_stream_item(
+        self, item: object, *, route: str, source: str = "model_request",
+        path_prefix: str | None = None, stage_id: str | None = None,
+        task_id: str | None = None, action_id: str | None = None,
+        graph_id: str | None = None, meta: dict[str, object] | None = None,
+    ) -> None: ...
 
     def input(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 
+    def info(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
+
     def output(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 
-    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution": ...
+    def auto_continue(self, enabled: bool = True) -> "AgentExecution":
+        """Continue unfinished model output when needed; configure before start.
+
+        Defaults off. Normal completion adds no continuation request. Does not
+        select long_content, expand short answers, resume a task, or replace
+        rework. Original output validation still applies to the final result.
+        """
+        ...
+
+    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution":
+        """Compatibility alias for auto_continue(); prefer the shorter name."""
+        ...
 
     def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution": ...
 
@@ -76,25 +246,172 @@ class AgentExecution(Protocol):
 
     def remove_execution_prompt(self, key: Any) -> "AgentExecution": ...
 
-    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        turn_on_long_task: bool = True,
+    ) -> "AgentExecution":
+        """Declare semantic goals; False leaves execution selection unchanged."""
+        ...
 
-    def goals(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+    def goals(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        *,
+        turn_on_long_task: bool = True,
+    ) -> "AgentExecution": ...
 
-    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution": ...
+    def interact(self, handler: AgentInteractionHandler) -> "AgentExecution":
+        """Bind one connected human-interaction handler to this execution."""
+        ...
 
-    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution": ...
+    def review(
+        self, handler: AgentReviewHandler | None = None, *,
+        rules: str | Sequence[str] | None = None,
+        on_fail: Literal["warn", "block"] = "warn",
+    ) -> "AgentExecution":
+        """Review final output and artifacts using rules or a replacement handler.
 
-    def create_execution(self, **kwargs: Any) -> "AgentExecution": ...
+        on_fail warns by default or blocks delivery with AgentReviewError.
+        It does not change the evaluator's rubric or replay execution steps.
+        """
+        ...
 
-    def get_result(self) -> "AgentExecutionResult": ...
+    def artifact(
+        self,
+        path: str | os.PathLike[str],
+        handler: AgentArtifactHandler | None = None,
+    ) -> "AgentExecution":
+        """Declare a TaskWorkspace-relative artifact to materialize after the run."""
+        ...
 
-    def validate(self, handler: OutputValidateHandler) -> "AgentExecution": ...
+    @overload
+    def effort(
+        self,
+        value: Literal["minimal", "low", "fast", "medium", "normal", "high", "max"] = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: Literal["auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"] | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def use_actions(self, actions: object) -> "AgentExecution":
+        """Attach Actions to this execution only."""
+        ...
+
+    def use_action(self, actions: object) -> "AgentExecution":
+        """Attach one Action to this execution only."""
+        ...
+
+    def require_actions(self, actions: object) -> "AgentExecution":
+        """Require Actions during this execution."""
+        ...
+
+    def use_tools(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_actions(...)``."""
+        ...
+
+    def use_tool(self, tools: object) -> "AgentExecution":
+        """Compatibility alias for ``use_action(...)``."""
+        ...
+
+    def create_execution(
+        self, *,
+        lineage: AgentExecutionLineage | dict[str, object] | None = None,
+        limits: AgentExecutionLimits | dict[str, object] | None = None,
+        options: ExecutionOptions | Mapping[str, object] | None = None,
+        parent_run_context: RunContext | None = None,
+    ) -> "AgentExecution": ...
+
+    def get_result(self, *, revision: int | None = None) -> "AgentExecutionResult": ...
+
+    @property
+    def control_capabilities(self) -> AgentExecutionControlCapabilities: ...
+
+    async def async_rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object: ...
+
+    def rework(self, feedback: str, *, max_reworks: int = 3, allow_replay: bool = False) -> object: ...
+
+    async def async_pause(self) -> AgentExecutionControlResult: ...
+
+    async def async_interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]: ...
+
+    def interrupt(self, content: str, *, author: str | None = None) -> dict[str, object]: ...
+
+    def pause(self) -> AgentExecutionControlResult: ...
+
+    async def async_resume(self) -> object: ...
+
+    def resume(self) -> object: ...
+
+    def save(self) -> dict[str, object]: ...
+
+    async def async_save(self) -> dict[str, object]: ...
+
+    def load(self, snapshot: Mapping[str, object]) -> "AgentExecution": ...
+
+    async def async_load(self, snapshot: Mapping[str, object]) -> "AgentExecution": ...
+
+    async def async_cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult: ...
+
+    def cancel(
+        self, *, reason: str = "cancelled", timeout: float | None = None,
+    ) -> AgentExecutionControlResult: ...
+
+    async def async_close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult: ...
+
+    def close(
+        self, *, reason: str = "closed", timeout: float | None = None,
+        pending: Literal["error", "cancel"] = "error",
+    ) -> AgentExecutionControlResult: ...
+
+    def validate(self, handler: OutputValidateHandler) -> "AgentExecution":
+        """Hard-check the final returned output; never intermediate producer steps."""
+        ...
 
     def create_dynamic_task(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def use_skills(
         self,
-        skills: Any,
+        skills: object,
         *,
         mode: SkillMode = "model_decision",
         auto_allow: bool = False,
@@ -102,14 +419,14 @@ class AgentExecution(Protocol):
 
     def require_skills(
         self,
-        skills: Any,
+        skills: object,
         *,
         auto_allow: bool = False,
     ) -> "AgentExecution": ...
 
     def use_skills_packs(
         self,
-        skills_packs: Any,
+        skills_packs: object,
         *,
         mode: SkillMode = "model_decision",
     ) -> "AgentExecution": ...
@@ -131,11 +448,42 @@ class AgentExecution(Protocol):
 
     async def select_route(self) -> tuple[str, dict[str, Any]]: ...
 
-    async def emit_stream(self, *args: Any, **kwargs: Any) -> AgentExecutionStreamData: ...
+    async def emit_stream(
+        self, path: str, value: object, *, route: str | None = None,
+        source: str | None = "agent_execution", stage_id: str | None = None,
+        task_id: str | None = None, action_id: str | None = None,
+        graph_id: str | None = None, is_complete: bool | None = None,
+        event_type: Literal["delta", "done"] = "done", delta: str | None = None,
+        meta: dict[str, object] | None = None,
+    ) -> AgentExecutionStreamData: ...
 
     async def close_streams(self) -> None: ...
 
-    def start(self, **kwargs: Any) -> Any: ...
+    def start(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> Any: ...
+
+    def run(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> Any: ...
 
     async def async_start(
         self,
@@ -147,7 +495,20 @@ class AgentExecution(Protocol):
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
-        parent_run_context: Any = None,
+        parent_run_context: RunContext | None = None,
+    ) -> Any: ...
+
+    async def async_run(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
     ) -> Any: ...
 
     async def async_get_data(
@@ -160,7 +521,7 @@ class AgentExecution(Protocol):
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
-        parent_run_context: Any = None,
+        parent_run_context: RunContext | None = None,
     ) -> Any: ...
 
     async def async_get_full_data(
@@ -173,7 +534,7 @@ class AgentExecution(Protocol):
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
         raise_ensure_failure: bool = True,
-        parent_run_context: Any = None,
+        parent_run_context: RunContext | None = None,
     ) -> Any: ...
 
     async def async_get_text(self, **kwargs: Any) -> str: ...
@@ -236,9 +597,31 @@ class AgentExecution(Protocol):
 
     def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]: ...
 
-    def get_data(self, **kwargs: Any) -> Any: ...
+    def get_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> Any: ...
 
-    def get_full_data(self, **kwargs: Any) -> Any: ...
+    def get_full_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> Any: ...
 
     @overload
     def get_data_object(self) -> "BaseModel | None": ...
@@ -295,7 +678,22 @@ class AgentExecution(Protocol):
 
     def streaming_print(self) -> None: ...
 
-    def record_data(self, **kwargs: Any) -> AgentExecutionRecordWrite: ...
+    def record_data(
+        self,
+        *,
+        purpose: AgentExecutionRecordPurpose = "process",
+        collection: str = "observations",
+        kind: str | None = "agent_execution_observation",
+        content: Any = None,
+        summary: str | None = None,
+        scope: dict[str, Any] | None = None,
+        source: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+        checkpoint: bool = False,
+        checkpoint_state: dict[str, Any] | None = None,
+        checkpoint_step_id: str | None = None,
+        profile: str = "fast",
+    ) -> AgentExecutionRecordWrite: ...
 
     @overload
     def get_generator(
@@ -338,7 +736,7 @@ class AgentExecution(Protocol):
 
     def get_key_result(self, key: str, *, must_in_prompt: bool = False) -> object | None: ...
 
-    async def async_wait_keys(
+    def async_wait_keys(
         self,
         keys: list[str],
         *,

@@ -12,6 +12,7 @@
       "path": "examples/release_pinned_usage/01_agent_execution_result_lifecycle.py",
       "protected_usage": [
         "agent.input(...).output(...).get_result()",
+        "agent.input(...).info(...).instruct(...).output(...).get_result() preserves one AgentExecution",
         "AgentExecutionResult.get_data(...)",
         "AgentExecutionResult.get_full_data(...)",
         "AgentExecutionResult.get_data_object(...)",
@@ -49,6 +50,63 @@
       "model_dependency": "none; SkillLibrary installation and required AgentExecution binding probe",
       "requires_human_confirmation_for_edits": true,
       "release_gate_reason": "4.1.4.2 keeps management-shaped compatibility installation thin over SkillLibrary while AgentExecution owns task-scoped exact-revision binding."
+    },
+    {
+      "path": "examples/release_pinned_usage/04_debug_console_profiles.py",
+      "protected_usage": [
+        "debug=True remains the readable simple console profile",
+        "streaming response characters finish before ModelRequest Done and delayed AgentExecution copies stay hidden",
+        "debug=detail exposes readable Prompt, provider request JSON, streaming output, and final materialized result",
+        "agent-scoped debug settings preserve AgentExecution start and terminal lifecycle display",
+        "ConsoleSink suppresses duplicate AgentExecution model projections and runtime.progress mirrors",
+        "EventCenter hooks retain the complete underlying RuntimeEvent stream",
+        "ExecutionResource self-check and actionable failure use human-readable labels while repeated image-layer progress stays visible as compact lines",
+        "structured Action planning excludes host-only execution_resources metadata",
+        "concurrent ModelRequests keep execution concurrency while ConsoleSink displays first-delta FIFO with bounded background buffers and final-result promotion",
+        "during foreground model streaming ConsoleSink shows one readable background notice, defers bounded Prompt/request/process/success diagnostics until all FIFO response displays finish, labels the deferred section, and keeps warnings, failures, cancellation, and approval-required events immediate",
+        "simple mode preserves at least one complete successful response projection: a complete live stream, a complete non-streamed result, or a complete terminal-result fallback after concurrent replay-buffer overflow"
+      ],
+      "model_dependency": "none; local multi-chunk ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "RuntimeEvent/EventCenter debug presentation is a Foundation behavior and must remain readable without weakening complete event dispatch."
+    },
+    {
+      "path": "examples/release_pinned_usage/05_action_response_delivery.py",
+      "protected_usage": [
+        "agent.input(...).info(...).use_action(...) preserves one AgentExecution",
+        "one successful Action followed by response uses two ModelRequests rather than a redundant third response request",
+        "the terminal ActionDecision response is delivered through the existing AgentExecution result",
+        "the original request-local info remains visible in every Action planning round",
+        "the next Action planning round receives the observed Action result",
+        "debug=True hides internal Action decision streams and displays the final response once"
+      ],
+      "model_dependency": "none; local scripted Action-or-Response ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "ActionLoop response delivery and execution-local fluent chaining are Foundation behavior and must not regress between releases."
+    },
+    {
+      "path": "examples/release_pinned_usage/06_validate_retry_accepted_stream.py",
+      "protected_usage": [
+        "ModelRequestResult reopened instant stream replays the accepted validation retry attempt",
+        "AgentExecution instant stream appends rejected and accepted attempt projections in order",
+        "accepted replacement stream items expose response attempt_index metadata",
+        "final structured data remains the authority after provisional instant updates"
+      ],
+      "model_dependency": "none; local scripted validation-retry ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "4.1.4.8 restores accepted retry attempt visibility for reopened ModelRequest and AgentExecution instant streams."
+    },
+    {
+      "path": "examples/release_pinned_usage/07_skill_execution_scope.py",
+      "protected_usage": [
+        "agent.require_skills(..., always=True) supplies Agent defaults",
+        "AgentExecution freezes only its declared exact-revision Skill scope",
+        "a fresh AgentExecution sees later Agent-default Skill declarations",
+        "empty execution declarations do not scan the global SkillLibrary"
+      ],
+      "model_dependency": "none; local SkillLibrary and execution-scope probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "4.1.4.8 makes Skill composition execution-scoped without exposing undeclared library entries."
     }
   ],
   "model_backed_release_examples": [
@@ -66,6 +124,101 @@
       "path": "examples/skills_executor/08_architecture_diagram_skill.py",
       "reason": "Real-model Skills task compatibility facade and artifact-producing skill usage.",
       "provider": "Explicitly configured online model"
+    },
+    {
+      "path": "examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py",
+      "reason": "Real DeepSeek comparison of structured_plan and concurrent programmatic ActionLoop behavior, bounded result handoff, Action evidence, and observed peak business-Action concurrency; defaults to deepseek-v4-flash with thinking disabled, and Docker is required for programmatic execution.",
+      "provider": "Explicitly configured online model"
+    },
+    {
+      "path": "examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py",
+      "reason": "Real local Qwen AgentExecution result generation followed by TaskWorkspace artifact readback, model-backed review rules, and handler-backed review blocking.",
+      "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
+    },
+    {
+      "path": "examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py",
+      "reason": "Real local Qwen plan Execution readiness, one connected clarification exchange, structured final plan validation, and verified TaskWorkspace delivery.",
+      "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
+    },
+    {
+      "path": "examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py",
+      "reason": "Real local Qwen long-content Execution section planning and writing, host-ordered assembly, verified TaskWorkspace delivery, and model-backed advisory review.",
+      "provider": "Local Ollama Qwen through an explicitly configured OpenAI-compatible endpoint"
+    }
+  ],
+  "development_line_4_1_4_8_coverage": [
+    {
+      "work": "validated retry instant-stream visibility",
+      "examples": ["examples/release_pinned_usage/06_validate_retry_accepted_stream.py"]
+    },
+    {
+      "work": "fail-closed configured model keys and non-secret model-profile preflight",
+      "examples": ["examples/model_configures/typed_settings_and_model_profiles.py"]
+    },
+    {
+      "work": "Playwright MCP local and model-driven E2E lifecycle",
+      "examples": [
+        "examples/action_runtime/2_3_mcp_playwright_e2e_local.py",
+        "examples/action_runtime/2_4_mcp_playwright_agent_qwen.py"
+      ]
+    },
+    {
+      "work": "programmatic and concurrent Action calling",
+      "examples": ["examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py"]
+    },
+    {
+      "work": "debug console profiles, concurrent FIFO display, and Action terminal response delivery",
+      "examples": [
+        "examples/release_pinned_usage/04_debug_console_profiles.py",
+        "examples/release_pinned_usage/05_action_response_delivery.py"
+      ]
+    },
+    {
+      "work": "per-execution Skill scope",
+      "examples": [
+        "examples/release_pinned_usage/03_skill_library_agent_binding.py",
+        "examples/release_pinned_usage/07_skill_execution_scope.py"
+      ]
+    },
+    {
+      "work": "stable AgentExecution artifact, review rules and failure actions, final-output validation, and optional handler typing",
+      "examples": ["examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py"]
+    },
+    {
+      "work": "beta plan Execution and request-local connected interaction",
+      "examples": ["examples/agent_auto_orchestration/26_plan_execution_interaction_ollama.py"]
+    },
+    {
+      "work": "beta long-content Execution, host-ordered assembly, artifact delivery, and review",
+      "examples": ["examples/agent_auto_orchestration/27_long_content_execution_artifact_ollama.py"]
+    },
+    {
+      "work": "conditional request continuation and explicit structured LongContent fields",
+      "examples": ["examples/basic/auto_continue.py", "examples/agent_auto_orchestration/29_field_long_content_ollama.py"]
+    },
+    {
+      "work": "safe Execution controls, snapshots, revision rework and conditional goal preparation",
+      "examples": ["examples/agent_auto_orchestration/29_execution_controls_ollama.py", "examples/agent_auto_orchestration/28_missing_goal_preparation_ollama.py"]
+    },
+    {
+      "work": "independent audio requests, explicit Agent audio binding and composed streams",
+      "examples": ["examples/audio/tts_stt_roundtrip.py", "examples/audio/continuous_audio.py"]
+    },
+    {
+      "work": "general Shell environments and approval with retained Cmd lifecycle compatibility",
+      "examples": ["examples/action_runtime/3_8_general_shell_model.py", "examples/builtin_actions/04_cmd_async_lifecycle_local.py"]
+    },
+    {
+      "work": "Flat dependent Action arguments consume actual prior observations",
+      "examples": ["examples/agent_task/action_result_dependency.py"]
+    },
+    {
+      "work": "Skill root guidance delivery, conditional resource reads and explicit script authorization",
+      "examples": ["examples/skills_executor/11_conditional_resource_read.py", "examples/skills_executor/09_skill_script_exec.py"]
+    },
+    {
+      "work": "original structured output contracts and RecordStore versus TaskWorkspace ownership",
+      "examples": ["examples/basic/pydantic_root_output.py", "examples/agent_auto_orchestration/22_unified_agent_execution_result.py"]
     }
   ]
 }

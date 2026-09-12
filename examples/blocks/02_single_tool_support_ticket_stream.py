@@ -19,7 +19,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parent
 if str(EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_DIR))
 
-from _business_ladder_runtime import BusinessCase, all_outputs, compile_case, emit, run_business_cases
+from _business_ladder_runtime import BusinessCase, all_outputs, compile_case, emit, run_business_cases  # noqa: E402
 
 
 async def support_ticket_lookup(context: Mapping[str, Any]) -> dict[str, Any]:

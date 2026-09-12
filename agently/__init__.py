@@ -14,6 +14,14 @@
 
 from .base import print_, async_print, AgentlyMain, Agent
 from ._version import __version__
+from .core.model.AudioModelRequest import AudioModelRequest
+from .types.data.audio import (
+    AudioCapabilityError, AudioConnection, AudioFormat, AudioInput, AudioOperation, AudioProtocolError,
+    PCMFormat, SpeechOptions, SpeechRequest, SpeechResult, TranscriptEvent, TranscriptResult,
+    PCMStream, TextSource, TextSegmentOptions, TranscriptionStreamOptions, TranscriptBlock, TranscriptSegment,
+    TranscriptionOptions, TranscriptionRequest,
+)
+from .types.plugins.AudioModelRequester import AudioCapability, AudioModelRequester, TextSegmenter
 from .core import (
     AgentTask,
     TaskContext,
@@ -22,6 +30,7 @@ from .core import (
     TriggerFlowBlueprint,
 )
 from .types.data import (
+    LongContent,
     AgentExecutionStreamData,
     AgentExecutionStreamHandler,
     AgentlyModelResultEvent,
@@ -54,6 +63,7 @@ from .types.trigger_flow import (
 Agently = AgentlyMain()
 
 __all__ = [
+    "LongContent",
     "Agently",
     "__version__",
     "Agent",
@@ -89,4 +99,28 @@ __all__ = [
     "ObservationEventHook",
     "print_",
     "async_print",
+    "AudioModelRequest",
+    "AudioModelRequester",
+    "AudioCapability",
+    "AudioCapabilityError",
+    "AudioConnection",
+    "AudioFormat",
+    "AudioInput",
+    "AudioOperation",
+    "AudioProtocolError",
+    "PCMFormat",
+    "PCMStream",
+    "TextSource",
+    "TextSegmentOptions",
+    "TextSegmenter",
+    "TranscriptionStreamOptions",
+    "TranscriptBlock",
+    "TranscriptSegment",
+    "SpeechOptions",
+    "SpeechRequest",
+    "SpeechResult",
+    "TranscriptEvent",
+    "TranscriptResult",
+    "TranscriptionOptions",
+    "TranscriptionRequest",
 ]

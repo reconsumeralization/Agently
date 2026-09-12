@@ -139,12 +139,49 @@ A typical layout for a project that uses files is in [Project Framework](project
 Agently.set_settings("debug", True)
 ```
 
-Prints concise model request and result logs to the console. For AgentTask runs,
-`"simple"` also prints process event summaries such as phases, progress, and
-snapshots without token-level deltas. Use `debug="detail"` when you need the
-detailed diagnostic RuntimeEvent stream, including model delta output. Debug output
-does not automatically print the user-facing process and final answer. Consume
-the public delta stream as well:
+`True` is exactly equivalent to `"simple"`: it prints a readable Prompt,
+provider/model summary, model response stream, Action target and result preview,
+and meaningful process or failure states without expanding provider request JSON.
+For AgentTask runs, model-generated progress messages update one continuous block.
+Direct responses use the order-authoritative normalized ModelRequest stream: all
+characters appear before Done, and later AgentExecution projections neither
+repeat nor reopen the stream after completion.
+When ModelRequests overlap, the first response that emits a delta keeps the
+foreground console stream. Later responses continue executing normally while
+ConsoleSink shows one background notice and buffers only their presentation;
+after the foreground terminal event, a still-running response loads its bounded
+buffer and continues live, while an already completed response prints its final
+materialized result. This FIFO display policy never serializes, throttles, or
+otherwise changes ModelRequest or AgentExecution scheduling.
+Simple mode always keeps at least one complete successful response projection.
+A normal live stream is already complete and is not repeated. A response with
+no rendered stream prints its complete materialized result. If a concurrent
+background response exceeds the live replay buffer, ConsoleSink stops treating
+that replay as complete and prints the authoritative result in full when
+generation finishes; only diagnostics and previews remain length-bounded.
+Once a response owns the foreground stream, ConsoleSink preserves reading focus:
+it prints only the compact background-response notice between normal response
+characters. Ordinary Prompt, provider request, process, and successful lifecycle
+diagnostics are kept in a bounded console-only queue and printed afterward under
+`[Deferred diagnostics]`, once every FIFO response display has finished. Warning,
+failure, cancellation, blocked/unhealthy, interrupt, and approval-required events
+remain immediate. EventCenter and DevTools still receive the original events at
+their original time; only the human console presentation is deferred.
+For an Action-or-Response loop, simple mode hides the normal internal planning
+Prompt/decision stream and displays the accepted outer response once; planning
+validation failures remain visible. Detail mode may show the internal decision
+as diagnostic evidence.
+
+`debug="detail"` is a high-information diagnostic view, not an "everything"
+event dump. It additionally shows the full readable Prompt, sanitized provider
+request JSON, attempt/validation/telemetry facts, Action arguments and results,
+route/stage metadata, and the final materialized result. For a streaming request,
+the heavier Prompt/request/process detail appears in the labeled deferred section
+after the response display instead of interrupting it. A ModelRequest character
+stream is displayed once; `runtime.progress.*` and AgentExecution mirrors do not
+repeat it. Use an EventCenter hook or DevTools for complete event audit, storage,
+or replay. Debug output also does not replace the complete user-facing process and
+final answer. Consume the public delta stream as well:
 
 ```python
 agent.set_settings("debug", "detail")
@@ -165,7 +202,7 @@ Agently.set_settings("runtime.show_trigger_flow_logs", True)
 Agently.set_settings("runtime.show_runtime_logs", "detail")
 ```
 
-Each switch accepts `False` / `"off"`, `True` / `"simple"`, or `"detail"`. `"simple"` prints request/result summaries, AgentTask process summaries, and warning/error/critical events; `"detail"` prints the detailed observation event stream for that family, including model delta output. Action loop events render as `ActionLoop`; concrete `action.*` events render with the action name and `action_type`. `runtime.show_tool_logs` remains accepted for existing code and enables the same Action Runtime log family when `runtime.show_action_logs` is not set. Start events render as `Started`, normal completion renders as `Completed`, and only failure events or explicit failure payloads render as `Failed`.
+Each switch accepts `False` / `"off"`, `True` / `"simple"`, or `"detail"`. `"simple"` is the readable execution summary; `"detail"` is a selected, deduplicated, and bounded deep diagnostic. Neither is a complete RuntimeEvent dump. Action loop events render as `ActionLoop`; concrete `action.*` events render with the action name and `action_type`. `runtime.show_tool_logs` remains accepted for existing code and enables the same Action Runtime log family when `runtime.show_action_logs` is not set. Start events render as `Started`, normal completion renders as `Completed`, and only failure events or explicit failure payloads render as `Failed`.
 
 For ModelRequest output validation, `"simple"` shows the validator, failure
 reason, attempt summary, and retry transition. `"detail"` may additionally

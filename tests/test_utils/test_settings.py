@@ -1,9 +1,11 @@
 import pytest
 import yaml
 from typing import Any, cast
+from typing_extensions import assert_type
 
+from agently.types.data import ModelProfileResolution
 from agently.types.settings import OpenAICompatibleSettings
-from agently.utils import Settings, SettingsNamespace
+from agently.utils import Settings, SettingsNamespace, resolve_model_profile
 from agently.utils.ModelPool import resolve_api_key_failover, resolve_model_pool_settings
 
 
@@ -153,6 +155,131 @@ def test_model_pool_unmapped_key_keeps_inherited_model():
     resolve_model_pool_settings("reason", settings)
 
     assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "deepseek-chat"
+
+
+def test_model_pool_unknown_key_fails_when_alias_pool_is_configured():
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("plugins.ModelRequester.OpenAICompatible.model", "inherited-model")
+    settings.set("model_pool", {"known-model": "configured-model"})
+
+    with pytest.raises(ValueError, match="Unknown model_key 'unknown-model'"):
+        resolve_model_pool_settings("unknown-model", settings)
+    with pytest.raises(ValueError, match="Unknown model_key 'unknown-model'"):
+        resolve_model_profile("unknown-model", settings)
+
+    assert settings.get("plugins.ModelRequester.activate") == "OpenAICompatible"
+    assert settings.get("plugins.ModelRequester.OpenAICompatible.model") == "inherited-model"
+
+
+def test_resolve_model_profile_is_read_only_and_redacts_auth(monkeypatch):
+    monkeypatch.setenv("PROFILE_KEY", "profile-secret")
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("model_pool", {"reasoning": "reasoning-profile"})
+    settings.set(
+        "model_profiles",
+        {
+            "reasoning-profile": {
+                "provider": "OpenAICompatible",
+                "model": "reasoning-model",
+                "base_url": "https://provider.example/v1",
+                "api_key_pool": "reasoning-keys",
+            }
+        },
+    )
+    settings.set(
+        "api_key_pools",
+        {
+            "reasoning-keys": {
+                "selection": {"strategy": "round_robin"},
+                "keys": [{"id": "primary", "value": "${ENV.PROFILE_KEY}"}],
+            }
+        },
+    )
+    before = settings.get()
+
+    resolved = resolve_model_profile("reasoning", settings)
+
+    assert_type(resolved, ModelProfileResolution)
+    assert resolved == {
+        "model_key": "reasoning",
+        "provider": "OpenAICompatible",
+        "model": "reasoning-model",
+        "base_url": "https://provider.example/v1",
+        "full_url": None,
+        "auth_present": True,
+    }
+    assert settings.get() == before
+    assert "profile-secret" not in repr(resolved)
+
+
+def test_resolve_model_profile_reports_inherited_single_model_settings():
+    settings = Settings()
+    settings.set("plugins.ModelRequester.activate", "OpenAICompatible")
+    settings.set("plugins.ModelRequester.OpenAICompatible.model", "inherited-model")
+    settings.set("plugins.ModelRequester.OpenAICompatible.base_url", "https://provider.example/v1")
+    settings.set("plugins.ModelRequester.OpenAICompatible.api_key", "secret")
+
+    resolved = resolve_model_profile("optional-stage-key", settings)
+
+    assert resolved == {
+        "model_key": "optional-stage-key",
+        "provider": "OpenAICompatible",
+        "model": "inherited-model",
+        "base_url": "https://provider.example/v1",
+        "full_url": None,
+        "auth_present": True,
+    }
+
+
+def test_resolve_model_profile_reports_missing_env_auth(monkeypatch):
+    monkeypatch.delenv("MISSING_PROFILE_KEY", raising=False)
+    settings = Settings()
+    settings.set("plugins.ModelRequester.OpenAICompatible.api_key", "inherited-secret")
+    settings.set(
+        "model_pool",
+        {
+            "reasoning": {
+                "provider": "OpenAICompatible",
+                "model": "reasoning-model",
+                "api_key": "${ENV.MISSING_PROFILE_KEY}",
+            }
+        },
+    )
+
+    resolved = resolve_model_profile("reasoning", settings)
+
+    assert resolved["auth_present"] is False
+
+
+def test_resolve_model_profile_reports_missing_env_key_pool_auth(monkeypatch):
+    monkeypatch.delenv("MISSING_POOL_KEY", raising=False)
+    settings = Settings()
+    settings.set("plugins.ModelRequester.OpenAICompatible.api_key", "inherited-secret")
+    settings.set(
+        "model_pool",
+        {
+            "reasoning": {
+                "provider": "OpenAICompatible",
+                "model": "reasoning-model",
+                "api_key_pool": "reasoning-keys",
+            }
+        },
+    )
+    settings.set(
+        "api_key_pools",
+        {
+            "reasoning-keys": {
+                "selection": {"strategy": "fixed"},
+                "keys": [{"id": "primary", "value": "${ENV.MISSING_POOL_KEY}"}],
+            }
+        },
+    )
+
+    resolved = resolve_model_profile("reasoning", settings)
+
+    assert resolved["auth_present"] is False
 
 
 def test_model_pool_mapped_key_updates_model():

@@ -103,6 +103,14 @@ class ActionFlowController:
         runtime = cast(Any, self._action.action_runtime)
         return await runtime._default_native_tool_call_planning_handler(context, request)
 
+    async def default_programmatic_planning_handler(
+        self,
+        context: ActionRunContext,
+        request: ActionPlanningRequest,
+    ):
+        runtime = cast(Any, self._action.action_runtime)
+        return await runtime._default_programmatic_planning_handler(context, request)
+
     async def default_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
         runtime = cast(Any, self._action.action_runtime)
         return await runtime._default_planning_handler(context, request)
@@ -207,11 +215,7 @@ class ActionFlowController:
             run_kind="action",
             parent=parent_run_context,
             agent_name=agent_name,
-            session_id=(
-                str(settings.get("runtime.session_id"))
-                if settings.get("runtime.session_id", None)
-                else None
-            ),
+            session_id=(str(settings.get("runtime.session_id")) if settings.get("runtime.session_id", None) else None),
             meta={
                 "action_count": len(normalized_calls),
                 "action_type": "action_calls",
@@ -309,6 +313,7 @@ class ActionFlowController:
                             "concurrency": concurrency,
                             "timeout": timeout,
                             "trusted_policy_overrides": {},
+                            "action_run_contexts": action_runs,
                         },
                     )
                 except BaseException as error:
@@ -392,9 +397,7 @@ class ActionFlowController:
                 bounded_records,
                 artifact_scope,
             )
-        return action.to_model_visible_records(
-            action._to_action_flow_return_records(bounded_records)
-        )
+        return action.to_model_visible_records(action._to_action_flow_return_records(bounded_records))
 
     async def async_plan_and_execute(
         self,
@@ -413,9 +416,13 @@ class ActionFlowController:
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list[ActionResult]:
         action = self._action
-        resolved_action_list = action_list if isinstance(action_list, list) else tool_list if isinstance(tool_list, list) else []
+        resolved_action_list = (
+            action_list if isinstance(action_list, list) else tool_list if isinstance(tool_list, list) else []
+        )
         if len(resolved_action_list) == 0:
             return []
 
@@ -446,5 +453,15 @@ class ActionFlowController:
             accepts_runtime_observation_handler = False
         if accepts_runtime_observation_handler:
             run_kwargs["runtime_observation_handler"] = self.async_emit_action_flow_observation
+
+        try:
+            action_flow_parameters = inspect.signature(action.action_flow.async_run).parameters
+        except (TypeError, ValueError):
+            action_flow_parameters = {}
+        accepts_terminal_response_handler = "terminal_response_handler" in action_flow_parameters
+        if accepts_terminal_response_handler:
+            run_kwargs["terminal_response_handler"] = terminal_response_handler
+            if "response_stream_handler" in action_flow_parameters:
+                run_kwargs["response_stream_handler"] = response_stream_handler
 
         return await action.action_flow.async_run(**run_kwargs)

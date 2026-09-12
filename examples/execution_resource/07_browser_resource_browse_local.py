@@ -5,6 +5,7 @@ import http.server
 import socketserver
 import tempfile
 import threading
+from functools import partial
 from pathlib import Path
 from pprint import pprint
 
@@ -19,7 +20,7 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 @contextlib.contextmanager
 def serve_directory(root: Path):
-    handler = lambda *args, **kwargs: QuietHandler(*args, directory=str(root), **kwargs)
+    handler = partial(QuietHandler, directory=str(root))
     with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()

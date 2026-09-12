@@ -33,6 +33,9 @@ class ActionRegistry:
         self._funcs: dict[str, Callable[..., Any]] = {}
         self._tag_mappings: dict[str, set[str]] = {}
         self._action_tags: dict[str, set[str]] = {}
+        self._reserved_action_ids: set[str] = set()
+        self._registration_versions: dict[str, int] = {}
+        self._registration_sequence = 0
 
     def register(
         self,
@@ -41,11 +44,40 @@ class ActionRegistry:
         *,
         func: Callable[..., Any] | None = None,
     ):
+        return self._register(spec, executor, func=func, reserved=False)
+
+    def _register(
+        self,
+        spec: ActionSpec,
+        executor: ActionExecutor,
+        *,
+        func: Callable[..., Any] | None = None,
+        reserved: bool,
+    ):
         action_id = str(spec.get("action_id", ""))
+        if not action_id:
+            raise ValueError("ActionSpec.action_id is required.")
+        if action_id in self._reserved_action_ids:
+            raise ValueError(f"Action id '{action_id}' is already reserved.")
+        if reserved and action_id in self._specs:
+            raise ValueError(f"Cannot reserve Action id '{action_id}' because it is already registered.")
+        if reserved:
+            self._reserved_action_ids.add(action_id)
+        previous_tags = self._action_tags.get(action_id, set())
+        for tag in previous_tags:
+            members = self._tag_mappings.get(tag)
+            if members is not None:
+                members.discard(action_id)
+                if not members:
+                    self._tag_mappings.pop(tag, None)
+        self._registration_sequence += 1
+        self._registration_versions[action_id] = self._registration_sequence
         self._specs[action_id] = spec
         self._executors[action_id] = executor
         if func is not None:
             self._funcs[action_id] = func
+        else:
+            self._funcs.pop(action_id, None)
         tags = spec.get("tags", [])
         if not isinstance(tags, list):
             tags = list(tags) if isinstance(tags, (tuple, set)) else []
@@ -53,6 +85,22 @@ class ActionRegistry:
         for tag in self._action_tags[action_id]:
             self._tag_mappings.setdefault(tag, set()).add(action_id)
         return self
+
+    def _register_reserved(
+        self,
+        spec: ActionSpec,
+        executor: ActionExecutor,
+    ):
+        """Register one framework-owned transport Action.
+
+        Reserved Actions use the ordinary registry/dispatcher path but cannot
+        be replaced or removed through application registration APIs.
+        """
+
+        action_id = str(spec.get("action_id", ""))
+        if action_id in self._reserved_action_ids:
+            raise ValueError(f"Action id '{action_id}' is already reserved.")
+        return self._register(spec, executor, reserved=True)
 
     def tag(self, action_ids: str | list[str], tags: str | list[str]):
         if isinstance(action_ids, str):
@@ -76,6 +124,8 @@ class ActionRegistry:
         Returns True when an action was removed. Used to reverse scoped
         capability mounts so a one-time mount does not persist on the host.
         """
+        if action_id in self._reserved_action_ids:
+            return False
         if action_id not in self._specs:
             return False
         self._specs.pop(action_id, None)
@@ -88,10 +138,18 @@ class ActionRegistry:
                 members.discard(action_id)
                 if not members:
                     self._tag_mappings.pop(tag, None)
+        self._registration_sequence += 1
+        self._registration_versions[action_id] = self._registration_sequence
         return True
 
     def has(self, action_id: str):
         return action_id in self._specs
+
+    def _is_reserved(self, action_id: str) -> bool:
+        return action_id in self._reserved_action_ids
+
+    def _registration_version(self, action_id: str) -> int | None:
+        return self._registration_versions.get(action_id)
 
     def get_spec(self, action_id: str):
         return self._specs.get(action_id)

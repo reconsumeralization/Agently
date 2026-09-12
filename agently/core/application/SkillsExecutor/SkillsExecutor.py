@@ -491,6 +491,7 @@ class SkillsExecutor:
         include_examples: Any,
         include_references: Any,
         include_assets: Any,
+        include_script_candidates: bool,
     ) -> tuple[str, ...]:
         included_kinds: set[str] = set()
         if include_examples is True:
@@ -499,6 +500,8 @@ class SkillsExecutor:
             included_kinds.add("reference")
         if include_assets is True:
             included_kinds.add("asset")
+        if include_script_candidates:
+            included_kinds.add("script")
         return tuple(
             f"{package.revision_ref}/{resource.path}"
             for package in packages
@@ -541,6 +544,20 @@ class SkillsExecutor:
                 continue
             if path == "resource-index" or not path:
                 continue
+            if (
+                block.role == "capability"
+                and block.metadata.get("resource_kind") == "script"
+            ):
+                target["selected_resources"].append(
+                    {
+                        "path": path,
+                        "kind": "script",
+                        "content": block.content,
+                        "completeness": block.completeness,
+                        "source_ref": block.source_ref,
+                    }
+                )
+                continue
             target["selected_resources"].append(
                 {
                     "path": path,
@@ -552,11 +569,20 @@ class SkillsExecutor:
             )
         diagnostics = [diagnostic.to_dict() for diagnostic in package.diagnostics]
         if actionize_scripts:
+            script_count = sum(
+                1
+                for item in projected.values()
+                for resource in item["selected_resources"]
+                if resource.get("kind") == "script"
+            )
             diagnostics.append(
                 {
                     "code": "skills.compat.actionize_scripts_ignored",
-                    "message": "Skill scripts remain capability descriptors; this facade cannot execute them.",
-                    "details": {},
+                    "message": (
+                        "Skill scripts remain capability descriptors; this facade cannot "
+                        "execute them."
+                    ),
+                    "details": {"script_count": script_count},
                 }
             )
         if include_public_lookup:
@@ -624,6 +650,7 @@ class SkillsExecutor:
             include_examples=include_examples,
             include_references=include_references,
             include_assets=include_assets,
+            include_script_candidates=actionize_scripts,
         )
         reader = task_context.reader(
             consumer="skills_executor.compatibility",

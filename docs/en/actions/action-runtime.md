@@ -128,6 +128,65 @@ agent-scoped actions, MCP tools mounted through `agent.use_mcp(...)`, and
 narrow subset. Managed execution environment metadata redacts raw `env` values
 in this visible schema while preserving key names; providers still receive the
 raw env only through the execution path.
+Declared `kwargs` / `returns` are call schemas, not runtime environment values:
+business fields named `env` retain their nested types and descriptions. Do not
+put secrets into model-facing schema descriptions.
+
+The Host owns model Action visibility. Without an explicit Execution scope,
+Agent-default Actions are used; a Host may explicitly select other registered,
+model-exposed Actions on an Execution. Non-empty nested scopes intersect their
+ancestors, and a step scope can only narrow that set. `execution.use_actions([])`
+clears the local restriction, not ancestor restrictions; an empty intersection
+means no Actions, never an unrestricted fallback. Model-selected required ids
+or planner capability lists do not grant access or register/tag extra child Actions.
+
+Built-in ActionFlows check the whole batch against that round's Host-offered
+Action set before approval, dispatch, or a third-party `execution_handler`. A
+rejected batch returns `action.scope.not_offered` and preserves prior completed
+records. Host-injected `read_action_artifact` remains available for real retained
+refs, subject to its existing selection-key and artifact-scope checks. Programmatic
+transport requires a real, fresh retained catalog whose entries all remain
+offered; a name, protocol label, or revision string alone is not authorization.
+Existing Host-retained catalogs and custom planners need no new correlation
+arguments. Unconsumed default-planner leases are settled on completion, error,
+or cancellation without consuming other Host leases; live pauses retain waiting
+resources. Direct Host Action calls do not gain this model-call ACL; their
+existing approval, resource, and execution policies remain in force.
+
+The default structured planner receives a smaller projection than this public
+inspection API: `action_id`, description, callable kwargs, required inputs, and
+only non-default approval/side-effect/concurrency constraints. Host-only
+`execution_resources`, provider configuration, executor metadata, and empty
+defaults stay behind the Action boundary and are resolved from the canonical
+registry after selection. Empty round state is omitted, and the latest Action
+result is not duplicated in both history and last-round input.
+Repairable argument/code/runtime failures are replanned as corrected calls;
+provider/environment unavailability instead produces another eligible route or
+an explicit blocker/remedy, never a claimed execution result.
+
+The default loop is an Action-or-Response loop. Each planning round derives
+from the complete execution-local Prompt, so `.input(...)`, `.info(...)`,
+instructions, Session history, language policy, attachments, and the original
+output contract remain available while compact Action state is appended. A
+round returns exactly one branch:
+
+- `execute`: one or more Action calls and no final response; or
+- `response`: no Action calls and the complete final response carrier.
+
+When `response` is selected, that field continues through the existing outer
+Request/AgentExecution stream, parser, validators, result readers, and Session
+finalizer. The decision JSON is not shown as business output and Agently does
+not issue a second request just to regenerate the same answer. A task with one
+Action therefore normally uses two model requests: select/execute, then respond.
+A task that needs no Action after entering the action-enabled path normally uses
+one. Structured `.output(...)` remains authoritative: the response field carries
+the JSON or other configured carrier and the outer Request parses and validates
+it against the original contract.
+
+Older custom planning handlers or ActionFlow plugins that return only
+`next_action="response"` without a response value keep the compatible final
+ModelRequest fallback. `auto_continue` also keeps its independent delivery
+path for now. These are fallback paths, not the default ActionLoop topology.
 
 For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
@@ -289,10 +348,35 @@ constraints. Use `desc_mode="override"` when you intentionally want to replace
 the default description, or `desc_mode="default"` to ignore the supplied
 description and keep only the built-in one.
 
+## Planning protocols
+
+Choose how ActionRuntime plans one Action round with `set_action_loop(...)`:
+
+```python
+agent.set_action_loop(planning_protocol="programmatic")
+```
+
+| Value | Use it for |
+|---|---|
+| `structured_plan` | Default provider-neutral structured Action calls |
+| `native_tool_calls` | Provider-native Action/tool calling |
+| `programmatic` | One bounded Python program that branches, loops, or aggregates over eligible read-only Actions |
+
+An explicit `planning_protocol=...` passed to `get_action_result(...)` or
+`async_get_action_result(...)` overrides the Agent setting for that call.
+Programmatic mode requires read-only, replay-safe Actions with explicit return
+contracts and uses a binding-capable isolated code ExecutionResource. Nested
+Actions default to exclusive execution; only host-declared
+`concurrency_mode="parallel"` Actions overlap under a bounded scheduler. It does
+not replace durable TriggerFlow or TaskDAG
+orchestration. See [Programmatic Action Calling](programmatic-action-calling.md)
+for the eligibility, safety, context, and recovery boundaries.
+
 ## Model-sourced input safety
 
 Action commands produced by model planning are treated as untrusted input at the
-Action boundary. For `structured_plan` and `native_tool_calls` commands,
+Action boundary. For `structured_plan`, `native_tool_calls`, and nested
+`programmatic` commands,
 `ActionDispatcher` filters `action_input` to the keys declared in the registered
 `ActionSpec.kwargs` before the executor is called. Direct host calls keep their
 existing behavior and are not filtered this way.
@@ -503,7 +587,7 @@ agent.set_settings("model_profiles", {
 agent.set_settings("action.planning_model_key", "task-main")
 ```
 
-This applies to the default structured-plan and native tool-call planning
+This applies to structured-plan, native tool-call, and programmatic planning
 paths. It is especially important when a higher-level runtime such as
 AgentExecution Skill binding or AgentTask delegates a bounded action round to
 ActionRuntime.
@@ -515,7 +599,8 @@ parsed structured response so normal request/model completion, metadata, and
 usage can settle before the bounded Action step closes.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,
-including structured planning and native tool-call selection. If the loop
+including structured planning, native tool-call selection, and programmatic
+execution. If the loop
 cannot finish before the deadline, Agently raises `RuntimeStageStallError` with
 `stage="action_loop_close"`.
 

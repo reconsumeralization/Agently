@@ -5,40 +5,79 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4.7"
-CURRENT_RELEASE_TRAIN = "2026-08-4.1.4.7"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.8"
+CURRENT_RELEASE_TRAIN = "2026-09-4.1.4.8"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
-SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
+SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v3"
 SKILLS_DEVTOOLS_GUIDANCE_PROTOCOL = "agently-skills.devtools-guidance.v1"
-DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
+DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v2"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4.7',
- 'release_train': '2026-08-4.1.4.7',
- 'released_at': '2026-08-18',
- 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.7: requires Agently-Stage >=0.3.8,<0.4.0. '
-          'Stage 0.3.7 supplies physically safe carrier routing across mixed sync/async boundaries and excludes every '
-          'upstream carrier in a transitive synchronous wait chain; 0.3.8 preserves that contract while forwarding '
-          'Python 3.14 task-factory keyword arguments. A synchronous TriggerFlow chunk may call a provider-owned sync '
-          "wrapper that uses with Stage() for an async tool and may then re-enter TriggerFlow's synchronous state "
-          'facade without knowing that the framework already uses Stage. The deprecated syncify/asyncify adapters '
-          'retain their compatibility names and warnings but now delegate to Stage.as_sync/as_async; internal '
-          'lightweight default_stage_call_bridge usage remains unchanged. Stage is the required-runtime companion and '
-          'remains a private Agently mechanism dependency: TriggerFlowExecution remains the semantic lifecycle owner, '
-          'and Stage types or carrier state do not enter public execution state. Built-in inactive gvisor, seatbelt, '
-          'and landlock candidates use the existing provider-neutral code_execution contract and probe external '
-          'mechanisms only when explicitly selected; they add no third-party Python dependency and fail closed without '
-          'implicit fallback. Provider reasoning and explicit reasoning-token usage remain observation-only facts, and '
-          'validation console output exposes bounded failure/retry diagnostics without changing validation authority. '
-          'The 4.1.4.6 contracts remain intact: agently.__version__ and Agently.__version__ are the standard package '
-          'version surfaces, provider reasoning and compatible SSE retry boundaries remain normalized, and live '
-          'TriggerFlow sub-flow resources preserve identity. The 4.1.4.5 runtime line also remains intact: '
-          'AgentExecution ensure_long_output() uses TriggerFlow-visible continuation and TaskWorkspace owns staged '
-          'file truth. The 4.1.4.2 owner split remains intact: TaskContext owns bounded disclosure, TaskWorkspace owns '
-          'files and artifacts, RecordStore owns durable runtime state including opt-in record_store_recovery, and '
-          'SkillLibrary owns immutable Skill revisions.',
+ 'framework_version': '4.1.4.8',
+ 'release_train': '2026-09-4.1.4.8',
+ 'released_at': None,
+ 'notes': 'Release candidate for Agently 4.1.4.8; not yet published. 4.1.4.8 development target; default ContextReader '
+          'resource selection receives current-read instruction content and completeness without preloading optional '
+          'bodies or changing selector signatures, budgets, Skill scope or permissions; complete resource roots also '
+          'suppress already-read child delivery independent of selection order, without refunding read budgets; '
+          'Cmd-backed local commands use non-blocking async subprocess waiting and settle owned processes on '
+          'timeout/cancellation (POSIX process groups, Windows Job Objects), preserving argv, policy, result '
+          'envelopes and full output artifacts; committed DeepSeek examples standardize their fallback on '
+          'deepseek-v4-flash with thinking explicitly disabled, while environment overrides and intentional '
+          'thinking-stream demonstrations remain supported; explicit model keys fail before provider dispatch when a '
+          'configured non-empty model_pool does not contain the alias, while pool-free single-model inheritance '
+          'remains compatible; resolve_model_profile provides a non-secret read-only preflight. It carries forward the '
+          '4.1.4.7 contract requiring Agently-Stage >=0.3.8,<0.4.0. Stage 0.3.7 supplies physically safe carrier '
+          'routing across mixed sync/async boundaries and excludes every upstream carrier in a transitive synchronous '
+          'wait chain; 0.3.8 preserves that contract while forwarding Python 3.14 task-factory keyword arguments. A '
+          'synchronous TriggerFlow chunk may call a provider-owned sync wrapper that uses with Stage() for an async '
+          "tool and may then re-enter TriggerFlow's synchronous state facade without knowing that the framework "
+          'already uses Stage. The deprecated syncify/asyncify adapters retain their compatibility names and warnings '
+          'but now delegate to Stage.as_sync/as_async; internal lightweight default_stage_call_bridge usage remains '
+          'unchanged. Stage is the required-runtime companion and remains a private Agently mechanism dependency: '
+          'TriggerFlowExecution remains the semantic lifecycle owner, and Stage types or carrier state do not enter '
+          'public execution state. Built-in inactive gvisor, seatbelt, and landlock candidates use the existing '
+          'provider-neutral code_execution contract and probe external mechanisms only when explicitly selected; they '
+          'add no third-party Python dependency and fail closed without implicit fallback. Provider reasoning and '
+          'explicit reasoning-token usage remain observation-only facts, and validation console output exposes bounded '
+          'failure/retry diagnostics without changing validation authority. The 4.1.4.6 contracts remain intact: '
+          'agently.__version__ and Agently.__version__ are the standard package version surfaces, provider reasoning '
+          'and compatible SSE retry boundaries remain normalized, and live TriggerFlow sub-flow resources preserve '
+          'identity. The 4.1.4.5 runtime line also remains intact: AgentExecution ensure_long_output() uses '
+          'TriggerFlow-visible continuation and TaskWorkspace owns staged file truth. The 4.1.4.2 owner split remains '
+          'intact: TaskContext owns bounded disclosure, TaskWorkspace owns files and artifacts, RecordStore owns '
+          'durable runtime state including opt-in record_store_recovery, and SkillLibrary owns immutable Skill '
+          'revisions.',
+ 'shell_capability': {
+     'status': 'in_development',
+     'entry': 'Agent.enable_shell',
+     'language': ['bash', 'powershell'],
+     'environment': ['offline', 'online', 'host'],
+     'approval': ['all', 'write', 'delete', 'none'],
+     'defaults': {'environment': 'offline', 'approval': 'all', 'action_id': 'run_shell'},
+     'resource': 'shell / ShellResource',
+     'legacy': 'Explicit commands or sandbox retain argv semantics; Cmd delegates to Shell, for removal in 4.2.',
+     'soft_risk': 'Isolated ModelRequest or Host risk_handler; unknown/failed analysis requires approval. Not a security proof.',
+     'windows_evidence': 'CrossOver with Windows Python 3.14.7 and PowerShell 7.6.6; native Windows users should test and report issues.',
+     'native_windows_isolation': 'Windows Sandbox CLI backend; native VM isolation unverified, CrossOver controller tested. Missing capability fails closed without host fallback.'},
+ 'audio_capability': {'status': 'in_development',
+                      'owner': 'AudioModelRequest',
+                      'driver_protocol': 'AudioModelRequester',
+                      'agent_binding': 'explicit use_audio',
+                      'text_prompt_pipeline': False,
+                      'builtin_drivers': ['OpenAICompatible', 'OMLX'],
+                      'builtin_realtime_stt_input': False,
+                      'composed_continuous_input': 'text to speech; PCM to transcript via bounded base requests',
+                      'output_modes': ['continuous_pcm',
+                                       'independent_speech_segments',
+                                       'transcript_blocks',
+                                       'punctuation_segments'],
+                      'native_stream_access': 'AudioModelRequest.driver; no native realtime input adapter in builtins',
+                      'extra_agent_dependencies': 'required_agent_capabilities; bound references; snapshots '
+                                                  'unsupported',
+                      'observation_protocol_changed': False},
  'runtime_support': {'agently_stage': {'repository': 'Agently-Stage',
                                        'package': 'agently-stage',
                                        'role': 'required_runtime_dependency',
@@ -76,33 +115,256 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                           'projections are bounded observation facts '
                                                                           'only and never drive route selection, '
                                                                           'verification, or task acceptance.',
-                                                 'model_request_telemetry_contract': (
-                                                     'Existing model RuntimeEvents may carry '
-                                                     'payload.model_request_telemetry observation facts. '
-                                                     'usage_summary.provider may add nullable reasoning_tokens only '
-                                                     'when provider usage explicitly reports reasoning/thinking token '
-                                                     'detail; completion/output/total values retain provider semantics '
-                                                     'and reasoning_tokens is not added again. Telemetry remains '
-                                                     'observation-only.'
-                                                 ),
-                                                 'model_reasoning_observation_contract': (
-                                                     'Provider-supplied reasoning is preserved in ModelRequestResult '
-                                                     'type=all as reasoning_delta plus nullable reasoning, and '
-                                                     'projected through high-frequency model.reasoning.delta plus '
-                                                     'terminal model.reasoning.completed RuntimeEvents. Missing content '
-                                                     'and usage remain unknown/null; the framework does not infer '
-                                                     'hidden chain-of-thought or estimate reasoning tokens from text.'
-                                                 ),
-                                                 'model_validation_diagnostics_contract': (
-                                                     'model.validation_failed and model.validation_error retain '
-                                                     'validator, reason, attempt, bounded validation context, and '
-                                                     'structured error facts; model.retrying records the retry '
-                                                     'transition. Simple console projection shows the concise failure '
-                                                     'and transition, detail may add bounded context and traceback '
-                                                     'tails, and adjacent events do not repeat the model response or '
-                                                     'validation reason. These facts remain observation-only and do '
-                                                     'not change deterministic validation or retry authority.'
-                                                 ),
+                                                 'model_request_telemetry_contract': 'Existing model RuntimeEvents may '
+                                                                                     'carry '
+                                                                                     'payload.model_request_telemetry '
+                                                                                     'observation facts. '
+                                                                                     'usage_summary.provider may add '
+                                                                                     'nullable reasoning_tokens only '
+                                                                                     'when provider usage explicitly '
+                                                                                     'reports reasoning/thinking token '
+                                                                                     'detail; completion/output/total '
+                                                                                     'values retain provider semantics '
+                                                                                     'and reasoning_tokens is not '
+                                                                                     'added again. Telemetry remains '
+                                                                                     'observation-only.',
+                                                 'model_reasoning_observation_contract': 'Provider-supplied reasoning '
+                                                                                         'is preserved in '
+                                                                                         'ModelRequestResult type=all '
+                                                                                         'as reasoning_delta plus '
+                                                                                         'nullable reasoning, and '
+                                                                                         'projected through '
+                                                                                         'high-frequency '
+                                                                                         'model.reasoning.delta plus '
+                                                                                         'terminal '
+                                                                                         'model.reasoning.completed '
+                                                                                         'RuntimeEvents. Missing '
+                                                                                         'content and usage remain '
+                                                                                         'unknown/null; the framework '
+                                                                                         'does not infer hidden '
+                                                                                         'chain-of-thought or estimate '
+                                                                                         'reasoning tokens from text.',
+                                                 'model_validation_diagnostics_contract': 'model.validation_failed and '
+                                                                                          'model.validation_error '
+                                                                                          'retain validator, reason, '
+                                                                                          'attempt, bounded validation '
+                                                                                          'context, and structured '
+                                                                                          'error facts; model.retrying '
+                                                                                          'records the retry '
+                                                                                          'transition. Simple console '
+                                                                                          'projection shows the '
+                                                                                          'concise failure and '
+                                                                                          'transition, detail may add '
+                                                                                          'bounded context and '
+                                                                                          'traceback tails, and '
+                                                                                          'adjacent events do not '
+                                                                                          'repeat the model response '
+                                                                                          'or validation reason. These '
+                                                                                          'facts remain '
+                                                                                          'observation-only and do not '
+                                                                                          'change deterministic '
+                                                                                          'validation or retry '
+                                                                                          'authority.',
+                                                 'local_console_streaming_contract': 'debug=True is exactly the simple '
+                                                                                     'human-readable console profile: '
+                                                                                     'readable Prompt, compact '
+                                                                                     'provider/model request summary, '
+                                                                                     'one response stream, Action '
+                                                                                     'target/result preview, '
+                                                                                     'ExecutionResource environment '
+                                                                                     'self-check/preparation progress, '
+                                                                                     'and meaningful process or '
+                                                                                     'failure states. Simple '
+                                                                                     'ExecutionResource milestones use '
+                                                                                     'product-language labels rather '
+                                                                                     'than provider=/phase= field '
+                                                                                     'dumps, and repeated Docker '
+                                                                                     'image-layer progress uses '
+                                                                                     'compact translated lines while '
+                                                                                     'start/completion/failure/readiness '
+                                                                                     'retain stage blocks. '
+                                                                                     'debug=detail is a selected '
+                                                                                     'high-information diagnostic '
+                                                                                     'profile, not an all-events dump: '
+                                                                                     'it leads with the same readable '
+                                                                                     'explanation, then adds labeled '
+                                                                                     'sanitized provider request JSON, '
+                                                                                     'attempt/validation/telemetry, '
+                                                                                     'Action arguments/results, '
+                                                                                     'bounded ExecutionResource '
+                                                                                     'probe/preparation payloads, '
+                                                                                     'route/stage metadata, and final '
+                                                                                     'materialization while '
+                                                                                     'suppressing compatibility '
+                                                                                     'aliases, runtime.progress '
+                                                                                     'mirrors, and duplicate '
+                                                                                     'AgentExecution model '
+                                                                                     'projections. EventCenter and '
+                                                                                     'DevTools remain the complete '
+                                                                                     'audit/storage/replay surfaces. '
+                                                                                     'RuntimeConsoleSink consumes '
+                                                                                     'ordered raw delivery; '
+                                                                                     'ModelRequestResult rebinds '
+                                                                                     'immutable settings and run '
+                                                                                     'contexts while emitting parser '
+                                                                                     'observations. In both profiles, '
+                                                                                     'native normalized '
+                                                                                     'model.streaming owns direct '
+                                                                                     'response characters, all '
+                                                                                     'characters render before '
+                                                                                     'model.completed, and later '
+                                                                                     'AgentExecution projections with '
+                                                                                     'source=model_request are hidden '
+                                                                                     'only from the duplicate console '
+                                                                                     'display; null-delta controls '
+                                                                                     'remain Process notifications. In '
+                                                                                     'simple, AgentTask progress uses '
+                                                                                     'the xml_field projection so '
+                                                                                     'progress_delta updates one '
+                                                                                     'streaming block and its matching '
+                                                                                     'completed progress record is not '
+                                                                                     'printed again.',
+                                                 'local_console_concurrent_stream_display_contract': 'Concurrent '
+                                                                                                     'ModelRequests '
+                                                                                                     'keep their '
+                                                                                                     'original '
+                                                                                                     'execution '
+                                                                                                     'scheduling and '
+                                                                                                     'EventCenter '
+                                                                                                     'order. '
+                                                                                                     'ConsoleSink '
+                                                                                                     'alone assigns '
+                                                                                                     'foreground '
+                                                                                                     'display '
+                                                                                                     'ownership to the '
+                                                                                                     'first response '
+                                                                                                     'that emits a '
+                                                                                                     'delta, emits one '
+                                                                                                     'human-readable '
+                                                                                                     'notice for each '
+                                                                                                     'later background '
+                                                                                                     'stream, keeps '
+                                                                                                     'bounded '
+                                                                                                     'response-local '
+                                                                                                     'and diagnostic '
+                                                                                                     'presentation '
+                                                                                                     'buffers, and '
+                                                                                                     'promotes waiting '
+                                                                                                     'responses in '
+                                                                                                     'first-delta FIFO '
+                                                                                                     'order after the '
+                                                                                                     'foreground '
+                                                                                                     'terminal event. '
+                                                                                                     'While a '
+                                                                                                     'foreground '
+                                                                                                     'response owns '
+                                                                                                     'the console, '
+                                                                                                     'ordinary Prompt, '
+                                                                                                     'provider '
+                                                                                                     'request, '
+                                                                                                     'process, and '
+                                                                                                     'successful '
+                                                                                                     'lifecycle '
+                                                                                                     'diagnostics are '
+                                                                                                     'retained for a '
+                                                                                                     'labeled deferred '
+                                                                                                     'section after '
+                                                                                                     'every FIFO '
+                                                                                                     'response display '
+                                                                                                     'finishes; '
+                                                                                                     'warning, '
+                                                                                                     'failure, '
+                                                                                                     'cancellation, '
+                                                                                                     'blocked, '
+                                                                                                     'unhealthy, '
+                                                                                                     'interrupt, and '
+                                                                                                     'approval-required '
+                                                                                                     'facts remain '
+                                                                                                     'immediately '
+                                                                                                     'visible. Simple '
+                                                                                                     'mode preserves '
+                                                                                                     'at least one '
+                                                                                                     'complete '
+                                                                                                     'successful '
+                                                                                                     'response '
+                                                                                                     'projection: a '
+                                                                                                     'fully rendered '
+                                                                                                     'live stream, a '
+                                                                                                     'complete result '
+                                                                                                     'when no stream '
+                                                                                                     'was rendered, or '
+                                                                                                     'a complete '
+                                                                                                     'authoritative '
+                                                                                                     'terminal-result '
+                                                                                                     'fallback when a '
+                                                                                                     'concurrent '
+                                                                                                     'replay buffer '
+                                                                                                     'overflows. A '
+                                                                                                     'queued response '
+                                                                                                     'that already '
+                                                                                                     'completed '
+                                                                                                     'renders its '
+                                                                                                     'authoritative '
+                                                                                                     'final '
+                                                                                                     'materialized '
+                                                                                                     'result. Display '
+                                                                                                     'buffering never '
+                                                                                                     'blocks, '
+                                                                                                     'throttles, '
+                                                                                                     'cancels, '
+                                                                                                     'retries, '
+                                                                                                     'serializes, or '
+                                                                                                     'otherwise '
+                                                                                                     'changes '
+                                                                                                     'ModelRequest, '
+                                                                                                     'AgentExecution, '
+                                                                                                     'EventCenter, or '
+                                                                                                     'DevTools facts.',
+                                                 'action_planning_console_projection_contract': 'Default '
+                                                                                                'Action-or-Response '
+                                                                                                'ModelRequests add '
+                                                                                                'run.meta.model_request_role=action_planning '
+                                                                                                'as an '
+                                                                                                'observation-only '
+                                                                                                'role. Simple console '
+                                                                                                'suppresses normal '
+                                                                                                'Prompt/request/stream/completion '
+                                                                                                'rendering for that '
+                                                                                                'internal role so the '
+                                                                                                'accepted outer '
+                                                                                                'response is displayed '
+                                                                                                'once, while warnings '
+                                                                                                'remain visible; '
+                                                                                                'detail and '
+                                                                                                'EventCenter retain '
+                                                                                                'the internal planning '
+                                                                                                'evidence. This '
+                                                                                                'additive run metadata '
+                                                                                                'does not change the '
+                                                                                                'agently-devtools.observation-runtime.v1 '
+                                                                                                'envelope.',
+                                                 'action_planning_projection_contract': 'The default structured Action '
+                                                                                        'planner receives a compact '
+                                                                                        'model-visible projection '
+                                                                                        'containing action_id, '
+                                                                                        'description, callable kwargs, '
+                                                                                        'required inputs, and '
+                                                                                        'non-default planning '
+                                                                                        'constraints. Host-only '
+                                                                                        'execution_resources, '
+                                                                                        'provider/executor mechanics, '
+                                                                                        'empty round defaults, and '
+                                                                                        'duplicate latest-round '
+                                                                                        'records stay outside the '
+                                                                                        'Prompt. Repairable '
+                                                                                        'argument/code/runtime '
+                                                                                        'failures request a corrected '
+                                                                                        'call; provider/environment '
+                                                                                        'unavailability may choose '
+                                                                                        'another eligible Action or '
+                                                                                        'return an explicit '
+                                                                                        'blocker/remedy but never a '
+                                                                                        'fabricated execution result.',
                                                  'model_request_result_stream_status_contract': 'ModelRequestResult '
                                                                                                 'reserves $status for '
                                                                                                 'completed, failed, '
@@ -145,24 +407,56 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                   'summary_marker': 'meta.coalesced'}},
                              'recommended_version_specifier': '>=0.1.11,<0.2.0'},
                 'skills': {'repository': 'Agently-Skills',
-                           'authoring_protocol': 'agently-skills.authoring.v2',
+                           'authoring_protocol': 'agently-skills.authoring.v3',
                            'authoring_format': 'standard SKILL.md only',
                            'runtime_contract': {'installed_truth_owner': 'SkillLibrary immutable content-addressed '
                                                                          'revisions',
                                                 'selection_and_binding_owner': 'AgentExecution structured semantic '
                                                                                'selection with host-issued keys and '
                                                                                'fail-closed validation',
+                                                'composition_contract': 'Skills use the same agent.use_*(..., '
+                                                                        'always=True) default plus '
+                                                                        'execution.use_*(...) one-run composition '
+                                                                        'grammar as Actions; no second public Skill '
+                                                                        'collection manager is introduced',
+                                                'execution_scope_contract': 'Agent defaults plus current '
+                                                                            'AgentExecution declarations resolve to '
+                                                                            'one frozen exact-revision scope; each '
+                                                                            'later user request creates a fresh '
+                                                                            'execution and re-evaluates the current '
+                                                                            'task while Session carries only '
+                                                                            'conversation/memory; empty declarations '
+                                                                            'do not expose the global SkillLibrary; '
+                                                                            'unchanged preparation is idempotent',
                                                 'disclosure_owner': 'TaskContext plus SkillContextSource plus '
                                                                     'consumer-bound ContextReader',
+                                                'root_disclosure_contract': 'A complete SKILL.md root suppresses '
+                                                                            'duplicate selection and delivery of its '
+                                                                            'indexed child sections; child sections '
+                                                                            'remain eligible only for lossy-parent or '
+                                                                            'later bounded reads',
                                                 'compatibility_facade': 'Agently.skills_executor supports local '
-                                                                        'configure/install/list/inspect/read/context-pack/TaskDAG '
-                                                                        'helpers only',
+                                                                        'configure/install/list/inspect/read/context-pack '
+                                                                        'projection. Its legacy TaskDAG skill resolver '
+                                                                        'helper is not executor-ready until host code '
+                                                                        'adapts the real TaskDAGContext into the helper\'s '
+                                                                        'mapping input.',
                                                 'execution_policy': 'No Skills route, Skill-local strategy, stage '
-                                                                    'engine, implicit script actionization, capability '
-                                                                    'inference, or capability mounting; trusted '
-                                                                    'exact-revision scripts require explicit host '
-                                                                    'authorization and bind as ordinary '
-                                                                    'Workspace-backed code_execution Actions',
+                                                                    'engine, implicit script actionization, per-script '
+                                                                    'Action discovery, capability inference, or '
+                                                                    'capability mounting; actionize_scripts is a '
+                                                                    'compatibility-only ignored projection flag and '
+                                                                    'scripts remain resource descriptors; after '
+                                                                    'explicit host authorization, '
+                                                                    'enable_skill_script_exec reuses one stable '
+                                                                    'ordinary Workspace-backed code_execution Action '
+                                                                    'definition per Agent/language, binds permission '
+                                                                    'only in the current execution, preserves the '
+                                                                    'prepared Skill selection, and resolves a unique '
+                                                                    "script_path against that execution's frozen "
+                                                                    'exact-revision Skill bindings; the released '
+                                                                    'explicit binder remains compatible for exact-path '
+                                                                    'binding',
                                                 'revision_binding_event': 'skills.revisions.bound records exact '
                                                                           'revision availability without claiming '
                                                                           'activation',
@@ -178,16 +472,16 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                         'default to untrusted and selected subpaths '
                                                                         'reject symlink escape'},
                            'devtools_guidance_protocol': 'agently-skills.devtools-guidance.v1',
-                           'catalog_generation': 'v2',
+                           'catalog_generation': 'v3',
                            'recommended_bundle': 'app',
                            'recommended_ref': 'main',
-                           'runtime_dependency_guidance': {
-                               'agently_stage': {
-                                   'skill': 'agently-stage',
-                                   'version_specifier': '>=0.3.8,<0.4.0',
-                               }
-                           },
-                           'archived_catalog_generations': [{'generation': 'v1',
+                           'runtime_dependency_guidance': {'agently_stage': {'skill': 'agently-stage',
+                                                                             'version_specifier': '>=0.3.8,<0.4.0'}},
+                           'archived_catalog_generations': [{'generation': 'v2',
+                                                             'branch': 'update/archive-v2-catalog',
+                                                             'last_supported_framework_version': '4.1.4.7',
+                                                             'status': 'frozen'},
+                                                            {'generation': 'v1',
                                                              'branch': 'update/archive-legacy-v1-catalog',
                                                              'last_supported_framework_version': '4.1.1',
                                                              'status': 'frozen'}]},
@@ -200,7 +494,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                            'task_dag_contract': 'TaskDAGExecutor validates submitted DAG data before direct '
                                                 'TriggerFlow execution; compile_blocks and async_run_blocks are '
                                                 'explicit opt-in carriers.'},
-                'docs': {'repository': 'docs', 'public_surface_protocol': 'agently-docs.public-surface.v1'},
+                'docs': {'repository': 'docs', 'public_surface_protocol': 'agently-docs.public-surface.v2'},
                 'action_runtime': {'task_workspace_contract': 'TaskWorkspace Actions own bounded file '
                                                               'read/search/write/edit/patch/export operations. A '
                                                               'TaskWorkspace-bound shell resolves relative workdir '
@@ -210,6 +504,144 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                               'closed.',
                                    'record_store_contract': 'Action persistence is explicit and does not follow from a '
                                                             'TaskWorkspace binding.',
+                                   'response_delivery_contract': 'Default ActionLoop planning is an Action-or-Response '
+                                                                 'contract derived from the complete request-local '
+                                                                 'Prompt. execute carries non-empty Action calls and '
+                                                                 'no response; response carries no Action calls and a '
+                                                                 'non-empty final carrier. An accepted response is '
+                                                                 'projected through the existing outer Request parser, '
+                                                                 'validation, stream, AgentExecution result, and '
+                                                                 'Session finalization without another provider '
+                                                                 'request. Legacy/custom handlers or ActionFlow '
+                                                                 'plugins without terminal response delivery and '
+                                                                 'ensure_long_output retain the independent '
+                                                                 'final-request fallback.',
+                                   'fluent_capability_chain_contract': 'Calling an Agent method with an always '
+                                                                       'configuration switch through an unstarted '
+                                                                       'AgentExecution keeps the same execution-local '
+                                                                       'fluent chain; '
+                                                                       'input(...).info(...).use_action(...) cannot '
+                                                                       'silently replace the execution or discard its '
+                                                                       'Prompt.',
+                                   'programmatic_action_calling': {'surface': ['Agent.set_action_loop(planning_protocol=programmatic)',
+                                                                               'Agent.get_action_result(planning_protocol=programmatic)',
+                                                                               'Agent.async_get_action_result(planning_protocol=programmatic)',
+                                                                               'Agent.release_programmatic_action_calls',
+                                                                               'Agent.register_action(concurrency_mode=parallel|exclusive)'],
+                                                                   'default_protocol': 'structured_plan remains the '
+                                                                                       'default Action planning '
+                                                                                       'protocol',
+                                                                   'scope_contract': 'programmatic may replace one '
+                                                                                     'bounded ephemeral read-only '
+                                                                                     'Action micro-DAG; stable '
+                                                                                     'business stages, approval, '
+                                                                                     'external waits, irreversible '
+                                                                                     'effects, compensation, '
+                                                                                     'persistence, restart recovery, '
+                                                                                     'and submitted DAG data remain '
+                                                                                     'TriggerFlow or TaskDAG concerns',
+                                                                   'eligibility_contract': 'Only scoped model-visible '
+                                                                                           'Actions with '
+                                                                                           'side_effect_level=read, '
+                                                                                           'replay_safe=true, no '
+                                                                                           'static approval '
+                                                                                           'requirement, and an '
+                                                                                           'explicit lossless-JSON '
+                                                                                           'returns contract enter the '
+                                                                                           'generated SDK; unknown ids '
+                                                                                           'and stale registration '
+                                                                                           'generations fail closed',
+                                                                   'execution_contract': 'The framework-reserved '
+                                                                                         'run_action_program transport '
+                                                                                         'requires an isolated '
+                                                                                         'code_execution provider with '
+                                                                                         'observed host_async_bindings '
+                                                                                         'support; generated programs '
+                                                                                         'have no direct network or '
+                                                                                         'host environment access; '
+                                                                                         'nested Actions default to '
+                                                                                         'exclusive execution, '
+                                                                                         'explicitly declared '
+                                                                                         'concurrency_mode=parallel '
+                                                                                         'Actions overlap up to '
+                                                                                         'action.programmatic.max_parallel_subcalls, '
+                                                                                         'exclusive Actions form '
+                                                                                         'ordering barriers, and every '
+                                                                                         'nested call re-enters '
+                                                                                         'ActionDispatcher policy, '
+                                                                                         'resource, validation, '
+                                                                                         'artifact, and evidence '
+                                                                                         'boundaries',
+                                                                   'catalog_lifecycle_contract': 'Each model decision '
+                                                                                                 'receives host-owned '
+                                                                                                 'semantic lineage '
+                                                                                                 'plus an exact '
+                                                                                                 'catalog revision and '
+                                                                                                 'lease; execution, '
+                                                                                                 'approval rejection, '
+                                                                                                 'and ActionFlow '
+                                                                                                 'settlement release '
+                                                                                                 'automatically, while '
+                                                                                                 'callers that discard '
+                                                                                                 'low-level generated '
+                                                                                                 'calls use '
+                                                                                                 'Agent.release_programmatic_action_calls',
+                                                                   'observation_contract': 'Program source, streamed '
+                                                                                           'source fragments, and '
+                                                                                           'validation-failure source '
+                                                                                           'text are sensitive model '
+                                                                                           'output: model '
+                                                                                           'RuntimeEvents retain '
+                                                                                           'bounded redaction '
+                                                                                           'digest/byte facts and '
+                                                                                           'non-sensitive decision '
+                                                                                           'fields, while exact '
+                                                                                           'source, SDK, catalog, '
+                                                                                           'subcall records, and '
+                                                                                           'provider logs remain cold '
+                                                                                           'artifacts. '
+                                                                                           'action.plan_ready '
+                                                                                           'decision.planning_observation '
+                                                                                           'exposes primitive-only '
+                                                                                           'renderer/action-count/sdk_bytes/contract_bytes/program_bytes '
+                                                                                           'facts; settled Action '
+                                                                                           'result '
+                                                                                           'meta.programmatic_observation '
+                                                                                           'adds wrapper and observed '
+                                                                                           'binding-call/peak_active_binding_calls '
+                                                                                           'facts when reported, while '
+                                                                                           'unavailable facts remain '
+                                                                                           'absent rather than '
+                                                                                           'inferred as zero. These '
+                                                                                           'accounting fields are '
+                                                                                           'observation-only, stay out '
+                                                                                           'of model-hot Action '
+                                                                                           'records, and remain '
+                                                                                           'fail-open for DevTools '
+                                                                                           'consumers; additive nested '
+                                                                                           'Action lineage also '
+                                                                                           'remains fail-open.',
+                                                                   'performance_contract': 'Model-round reduction, '
+                                                                                           'input/output tokens, '
+                                                                                           'Action calls, and elapsed '
+                                                                                           'time are independent '
+                                                                                           'observed effects. SDK '
+                                                                                           'renderer v3 keeps one '
+                                                                                           'canonical exact JSON '
+                                                                                           'contract per Action, '
+                                                                                           'removes the duplicate '
+                                                                                           'expanded input TypedDict '
+                                                                                           'projection, and retains '
+                                                                                           'callable/return typing; '
+                                                                                           'deterministic byte '
+                                                                                           'reduction is not '
+                                                                                           'model-quality evidence. '
+                                                                                           'programmatic is a '
+                                                                                           'runtime-control and '
+                                                                                           'intermediate-value '
+                                                                                           'boundary and does not '
+                                                                                           'promise universal cost or '
+                                                                                           'latency improvement'},
                                    'code_execution_contract': 'TaskWorkspace grant -> ordered provider '
                                                               'selection/binding -> immutable CodeExecutionBundle '
                                                               'materialization -> adapter-owned argv execution -> '
@@ -241,34 +673,27 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                    'unsafe_fallback_contract': 'trusted_local is explicit unsafe host execution, '
                                                                'requires allow_unsafe_local authorization and snapshot '
                                                                'access, and cannot satisfy isolation=required',
-                                   'builtin_provider_contract': (
-                                       'Built-in gVisor, macOS Seatbelt, and Linux Landlock candidates use the '
-                                       'existing provider-neutral code_execution selection contract, declare '
-                                       'concrete isolation-axis capabilities, consume only host-authorized '
-                                       'TaskWorkspace grants and provider-owned configuration, expose observed '
-                                       'selection facts in handle/result metadata, and fail closed without implicit '
-                                       'fallback to Docker or trusted_local.'
-                                   ),
-                                   'builtin_provider_candidates': [
-                                       {
-                                           'provider_id': 'gvisor',
-                                           'platform': 'linux_docker_runsc',
-                                           'isolation_policy': 'required',
-                                           'fallback': 'fail_closed',
-                                       },
-                                       {
-                                           'provider_id': 'seatbelt',
-                                           'platform': 'macos',
-                                           'isolation_policy': 'preferred',
-                                           'fallback': 'fail_closed',
-                                       },
-                                       {
-                                           'provider_id': 'landlock',
-                                           'platform': 'linux',
-                                           'isolation_policy': 'preferred',
-                                           'fallback': 'fail_closed',
-                                       },
-                                   ]},
+                                   'builtin_provider_contract': 'Built-in gVisor, macOS Seatbelt, and Linux Landlock '
+                                                                'candidates use the existing provider-neutral '
+                                                                'code_execution selection contract, declare concrete '
+                                                                'isolation-axis capabilities, consume only '
+                                                                'host-authorized TaskWorkspace grants and '
+                                                                'provider-owned configuration, expose observed '
+                                                                'selection facts in handle/result metadata, and fail '
+                                                                'closed without implicit fallback to Docker or '
+                                                                'trusted_local.',
+                                   'builtin_provider_candidates': [{'provider_id': 'gvisor',
+                                                                    'platform': 'linux_docker_runsc',
+                                                                    'isolation_policy': 'required',
+                                                                    'fallback': 'fail_closed'},
+                                                                   {'provider_id': 'seatbelt',
+                                                                    'platform': 'macos',
+                                                                    'isolation_policy': 'preferred',
+                                                                    'fallback': 'fail_closed'},
+                                                                   {'provider_id': 'landlock',
+                                                                    'platform': 'linux',
+                                                                    'isolation_policy': 'preferred',
+                                                                    'fallback': 'fail_closed'}]},
                 'triggerflow': {'record_store_resource': 'flow.create_execution(record_store=...); record_store=False '
                                                          'opts out',
                                 'task_workspace_contract': 'TriggerFlow does not create or infer a TaskWorkspace.',
@@ -379,22 +804,445 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                    'strategy_owner': 'SessionMemory plugin',
                                    'recall_owner': 'TaskContext via AgentlyMemoryContextSource',
                                    'task_file_dependency': False}},
- 'request_input': {'structured_output': {'surface': ['ModelRequest.output',
+ 'request_input': {'agent_execution_plugins_and_terminal_policies': {'surface': ['Agent.create_execution',
+                                                                                 'Agent.goal',
+                                                                                 'Agent.interact',
+                                                                                 'Agent.review',
+                                                                                 'Agent.artifact',
+                                                                                 'AgentExecution.run',
+                                                                                 'AgentExecution.async_run',
+                                                                                 'AgentExecution.goal',
+                                                                                 'AgentExecution.interact',
+                                                                                 'AgentExecution.review',
+                                                                                 'AgentExecution.artifact',
+                                                                                 'AgentExecution.validate',
+                                                                                 'AgentExecution',
+                                                                                 'RequestExecution',
+                                                                                 'LongTaskExecution',
+                                                                                 'PlanExecution',
+                                                                                 'LongContentExecution'],
+                                                                     'standard_methods_stability': 'interact, review, '
+                                                                                                   'and artifact are '
+                                                                                                   'stable '
+                                                                                                   'AgentExecution '
+                                                                                                   'methods; explicit '
+                                                                                                   'create_execution(name) '
+                                                                                                   'selects the actual '
+                                                                                                   'registered '
+                                                                                                   'AgentExecution '
+                                                                                                   'plugin instance',
+                                                                     'builtin_plugins': ['auto',
+                                                                                         'request',
+                                                                                         'long_task',
+                                                                                         'plan',
+                                                                                         'long_content'],
+                                                                     'creation_contract': 'Agent owns reusable '
+                                                                                          'defaults and capabilities; '
+                                                                                          'its factory directly '
+                                                                                          'constructs the selected '
+                                                                                          'registered execution class. '
+                                                                                          'That same instance owns '
+                                                                                          'draft, production, terminal '
+                                                                                          'policies and readers. '
+                                                                                          'Explicit name overrides '
+                                                                                          'AgentExecution.activate; '
+                                                                                          'absent selection uses auto. '
+                                                                                          'Only absent selection with '
+                                                                                          'auto retains released '
+                                                                                          'non-default '
+                                                                                          'AgentOrchestrator '
+                                                                                          'activation. Released '
+                                                                                          'AgentTask imports delegate '
+                                                                                          'to execution-owned '
+                                                                                          'long_task components. '
+                                                                                          'Unreleased AgentPattern and '
+                                                                                          'pattern() are replaced, not '
+                                                                                          'parallel owners.',
+                                                                     'goal_contract': 'goal(..., '
+                                                                                      'turn_on_long_task=True) '
+                                                                                      'declares semantic goals and '
+                                                                                      'criteria and enables the auto '
+                                                                                      "producer's long-task "
+                                                                                      'convenience path. False '
+                                                                                      'contributes the same Prompt '
+                                                                                      'fields without enabling that '
+                                                                                      'switch or vetoing an '
+                                                                                      'independently selected '
+                                                                                      'producer/strategy. If an '
+                                                                                      'already selected long_task '
+                                                                                      'producer lacks goals or '
+                                                                                      'criteria, one budgeted model '
+                                                                                      'preparation fills only missing '
+                                                                                      'fields from the original '
+                                                                                      'request before task '
+                                                                                      'construction. Explicit and '
+                                                                                      'restored fields remain '
+                                                                                      'unchanged; provenance is '
+                                                                                      'retained for production/review. '
+                                                                                      'Missing facts block; inferred '
+                                                                                      'criteria cannot invent '
+                                                                                      'thresholds or authorize work. '
+                                                                                      'Ordinary request, review, plan '
+                                                                                      'and long_content do not gain a '
+                                                                                      'global goal preflight.',
+                                                                     'interaction_contract': 'Agent.interact(handler) '
+                                                                                             'and '
+                                                                                             'AgentExecution.interact(handler) '
+                                                                                             'bind one synchronous or '
+                                                                                             'asynchronous connected '
+                                                                                             'response handler to one '
+                                                                                             'execution without '
+                                                                                             'forcing HITL or mutating '
+                                                                                             'the global '
+                                                                                             'ExecutionExchange '
+                                                                                             'registry. The handler '
+                                                                                             'receives a complete '
+                                                                                             'normalized '
+                                                                                             'ExecutionExchangeView '
+                                                                                             'and returns the response '
+                                                                                             'payload interpreted by '
+                                                                                             'the existing exchange '
+                                                                                             'consumer. TriggerFlow '
+                                                                                             'remains the only '
+                                                                                             'pause/resume owner for '
+                                                                                             'connected plan '
+                                                                                             'clarification; '
+                                                                                             'registered '
+                                                                                             'ExecutionExchange '
+                                                                                             'providers and routing '
+                                                                                             'settings remain advanced '
+                                                                                             'durable integration '
+                                                                                             'surfaces.',
+                                                                     'contract': 'One execution owns the business '
+                                                                                 'result and lifecycle. validate '
+                                                                                 'hard-checks only the final business '
+                                                                                 'output, including the agent_task '
+                                                                                 'final_result projection rather than '
+                                                                                 'its lifecycle envelope; '
+                                                                                 'get_full_data/run/start retain the '
+                                                                                 'released full envelope. Direct '
+                                                                                 'ModelRequest and ensure_long_output '
+                                                                                 'retain request-owned repair; '
+                                                                                 'assembled/custom producer final '
+                                                                                 'checks do not replay production. '
+                                                                                 'artifact materializes that business '
+                                                                                 'value through TaskWorkspace '
+                                                                                 'containment, physical digest '
+                                                                                 'readback and trusted identity. '
+                                                                                 'review accepts rules and a '
+                                                                                 'replacement handler with host-only '
+                                                                                 'on_fail=warn or block and no '
+                                                                                 'implicit retry or separate verify '
+                                                                                 'method. The default evaluator reads '
+                                                                                 'complete trusted text artifacts and '
+                                                                                 'evaluates original requirements and '
+                                                                                 'content with descriptive quality '
+                                                                                 'levels, per-rule checks, issue-local '
+                                                                                 'suggestions and overall suggestions; '
+                                                                                 'absent/non-text evidence is '
+                                                                                 'not_assessable.',
+                                                                     'producer_contract': 'Built-ins share the '
+                                                                                          'once-only run lifecycle and '
+                                                                                          'specialize a typed '
+                                                                                          'production hook on the '
+                                                                                          'returned instance. request '
+                                                                                          'preserves direct request '
+                                                                                          'behavior; long_task owns '
+                                                                                          'existing task '
+                                                                                          'planning/evidence/execution; '
+                                                                                          'plan performs readiness, '
+                                                                                          'connected clarification and '
+                                                                                          'terminal plan generation; '
+                                                                                          'long_content plans ordered '
+                                                                                          'sections, writes '
+                                                                                          'sequentially with bounded '
+                                                                                          'continuity and '
+                                                                                          'host-assembles text without '
+                                                                                          'final model recopy. '
+                                                                                          'Incompatible explicit '
+                                                                                          'producer/strategy/policy or '
+                                                                                          'delivery combinations fail '
+                                                                                          'before dispatch. Plan '
+                                                                                          'rejects auto_continue '
+                                                                                          'mixing. Long_content uses '
+                                                                                          'request-local conditional '
+                                                                                          'continuation for chapter '
+                                                                                          'bodies and does not '
+                                                                                          're-request the assembled '
+                                                                                          'root; the explicit '
+                                                                                          'whole-document plugin '
+                                                                                          'rejects a structured root '
+                                                                                          'contract, while the direct '
+                                                                                          'producer supports '
+                                                                                          'LongContent-marked string '
+                                                                                          'fields through the same '
+                                                                                          'long-form producer. '
+                                                                                          'Disconnected plan '
+                                                                                          'clarification fails closed.',
+                                                                     'typing_contract': 'Ordinary fluent calls retain '
+                                                                                        'AgentExecution without type '
+                                                                                        'imports. create_execution, '
+                                                                                        'effort and strategy expose '
+                                                                                        'built-in Literal choices '
+                                                                                        'while registered plugin names '
+                                                                                        'remain open strings. Public '
+                                                                                        'protocol methods have '
+                                                                                        'explicit readable signatures '
+                                                                                        'rather than __getattr__ -> '
+                                                                                        'Any. Specialized handlers and '
+                                                                                        'production option types '
+                                                                                        'remain available in their '
+                                                                                        'owning namespaces.',
+                                                                     'flat_action_argument_readiness_contract': 'Known '
+                                                                                                                'required '
+                                                                                                                'Action '
+                                                                                                                'ids '
+                                                                                                                'do '
+                                                                                                                'not '
+                                                                                                                'imply '
+                                                                                                                'ready '
+                                                                                                                'arguments. '
+                                                                                                                'The '
+                                                                                                                'existing '
+                                                                                                                'narrow '
+                                                                                                                'Flat '
+                                                                                                                'command '
+                                                                                                                'request '
+                                                                                                                'returns '
+                                                                                                                'a '
+                                                                                                                'mandatory '
+                                                                                                                'boolean '
+                                                                                                                'requires_observation '
+                                                                                                                'plus '
+                                                                                                                'action_commands. '
+                                                                                                                'Ready '
+                                                                                                                'batches '
+                                                                                                                'retain '
+                                                                                                                'validated '
+                                                                                                                'serial '
+                                                                                                                'dispatch; '
+                                                                                                                'new-result '
+                                                                                                                'dependencies '
+                                                                                                                'return '
+                                                                                                                'an '
+                                                                                                                'empty '
+                                                                                                                'batch '
+                                                                                                                'and '
+                                                                                                                'use '
+                                                                                                                'the '
+                                                                                                                'existing '
+                                                                                                                'bounded '
+                                                                                                                'child '
+                                                                                                                'ActionLoop '
+                                                                                                                'before '
+                                                                                                                'planning '
+                                                                                                                'later '
+                                                                                                                'inputs. '
+                                                                                                                'Invalid '
+                                                                                                                'or '
+                                                                                                                'contradictory '
+                                                                                                                'readiness '
+                                                                                                                'fails '
+                                                                                                                'before '
+                                                                                                                'Action '
+                                                                                                                'dispatch. '
+                                                                                                                'Explicit '
+                                                                                                                'preplanned '
+                                                                                                                'commands '
+                                                                                                                'remain '
+                                                                                                                'fixed '
+                                                                                                                'kwargs, '
+                                                                                                                'not '
+                                                                                                                'result '
+                                                                                                                'substitution. '
+                                                                                                                'Handoff '
+                                                                                                                'preserves '
+                                                                                                                'child '
+                                                                                                                'scope, '
+                                                                                                                'policy, '
+                                                                                                                'deadlines '
+                                                                                                                'and '
+                                                                                                                'terminal '
+                                                                                                                'verification, '
+                                                                                                                'binds '
+                                                                                                                'batch-required '
+                                                                                                                'ids '
+                                                                                                                'through '
+                                                                                                                'child '
+                                                                                                                'require_actions '
+                                                                                                                'rather '
+                                                                                                                'than '
+                                                                                                                'visibility '
+                                                                                                                'alone, '
+                                                                                                                'and '
+                                                                                                                'records '
+                                                                                                                'its '
+                                                                                                                'one '
+                                                                                                                'narrow '
+                                                                                                                'request '
+                                                                                                                'under '
+                                                                                                                'execution_meta.action_command_planning. '
+                                                                                                                'Only '
+                                                                                                                'this '
+                                                                                                                'adaptive '
+                                                                                                                'handoff '
+                                                                                                                'removes '
+                                                                                                                'the '
+                                                                                                                'generic '
+                                                                                                                'implicit '
+                                                                                                                'two-round '
+                                                                                                                'cap; '
+                                                                                                                'explicit '
+                                                                                                                'task '
+                                                                                                                'round '
+                                                                                                                'limits '
+                                                                                                                'and '
+                                                                                                                'parent '
+                                                                                                                'budgets '
+                                                                                                                'remain '
+                                                                                                                'effective. '
+                                                                                                                'Successful-call '
+                                                                                                                'evidence '
+                                                                                                                'does '
+                                                                                                                'not '
+                                                                                                                'prove '
+                                                                                                                'argument '
+                                                                                                                'semantics '
+                                                                                                                'or '
+                                                                                                                'repetition '
+                                                                                                                'counts.',
+                                                                     'control_contract': 'Explicit sync/async cancel '
+                                                                                         'and close settle owned work; '
+                                                                                         'timeout never proves '
+                                                                                         'cleanup. Pause/resume use '
+                                                                                         'TriggerFlow at '
+                                                                                         'before_production or '
+                                                                                         'candidate_ready boundaries, '
+                                                                                         'with AgentExecutionPaused '
+                                                                                         'for nonterminal readers. '
+                                                                                         'interrupt supplies future '
+                                                                                         'TaskContext information and '
+                                                                                         'reports consumption '
+                                                                                         'separately. JSON save/load '
+                                                                                         'at settled safe pauses '
+                                                                                         'requires matching draft, '
+                                                                                         'policy and resource '
+                                                                                         'rebinding, preserves '
+                                                                                         'model-call and elapsed '
+                                                                                         'budgets, and never '
+                                                                                         'dispatches on load. '
+                                                                                         'control_capabilities reports '
+                                                                                         'supported boundaries. Rework '
+                                                                                         'advances the same execution '
+                                                                                         'revision and preserves '
+                                                                                         'captured readers; Request, '
+                                                                                         'Plan, LongContent and '
+                                                                                         'LongTask own producer '
+                                                                                         're-entry. Revision caps, '
+                                                                                         'model/time and task '
+                                                                                         'iteration/tick budgets '
+                                                                                         'remain cumulative. '
+                                                                                         'Dispatcher protection blocks '
+                                                                                         'unauthorized Action replay '
+                                                                                         'including uncertain effects '
+                                                                                         'and ancestor restrictions. '
+                                                                                         'Safe-pause snapshots retain '
+                                                                                         'revision history, settled '
+                                                                                         'producer resources and '
+                                                                                         'replay protection. Restored '
+                                                                                         'typed readers lazily '
+                                                                                         'validate each saved '
+                                                                                         'candidate against its '
+                                                                                         'rebound original schema, '
+                                                                                         'cache the result, and never '
+                                                                                         'rerun production or final '
+                                                                                         'policies. Annotated output '
+                                                                                         'declarations use JSON-schema '
+                                                                                         'fingerprints; load does not '
+                                                                                         'run output-model validators.',
+                                                                     'pending_control_contract': 'Active child or '
+                                                                                                 'inner-task '
+                                                                                                 'snapshots, '
+                                                                                                 'disconnected plan '
+                                                                                                 'clarification, and '
+                                                                                                 'nested parent-budget '
+                                                                                                 'restoration remain '
+                                                                                                 'unsupported. Method '
+                                                                                                 'presence or legacy '
+                                                                                                 'task resume must not '
+                                                                                                 'be advertised as '
+                                                                                                 'these capabilities.'},
+                   'structured_output': {'surface': ['ModelRequest.output',
                                                      'AgentExecution.output',
                                                      'ModelRequestResult.get_data_object'],
                                          'contract': 'Pydantic v2 BaseModel classes are recursively projected into '
                                                      'prompt schemas; required, nullability, length, count, numeric '
                                                      'range, pattern, enum, and format constraints are rendered as '
-                                                     'output requirements. Final Pydantic validation failures feed '
-                                                     'bounded correction feedback into retries, and accepted typed '
-                                                     'results remain reusable through object, data, and text readers.'},
-                   'agent_execution_request_scope': {'surface': ['AgentExecution',
+                                                     'output requirements. RootModel retains its JSON root shape '
+                                                     'instead of an artificial root object wrapper; root strings are '
+                                                     'parsed as complete JSON scalar values. Missing or invalid '
+                                                     'Pydantic result objects enter the existing bounded failure/retry '
+                                                     'path, and accepted typed results remain reusable through object, '
+                                                     'data, and text readers.'},
+                   'agent_execution_request_scope': {'preferred_continuation_surface': 'AgentExecution.auto_continue',
+                                                     'continuation_naming_contract': 'auto_continue(enabled=True) is '
+                                                                                     'the preferred 4.1.4.8 spelling; '
+                                                                                     'released ensure_long_output '
+                                                                                     'delegates to the same '
+                                                                                     'implementation without a new '
+                                                                                     'warning. Both share one '
+                                                                                     'default-off draft policy and '
+                                                                                     'preserve lifecycle guards, '
+                                                                                     'snapshot fingerprints, '
+                                                                                     'long_output metadata/events and '
+                                                                                     'the historical '
+                                                                                     'selected_by=ensure_long_output '
+                                                                                     'route marker. This controls '
+                                                                                     'conditional request '
+                                                                                     'continuation, not long_content '
+                                                                                     'production, task resume, '
+                                                                                     'semantic expansion or rework. '
+                                                                                     'LongContent is an Annotated[str] '
+                                                                                     'output production declaration, '
+                                                                                     'with exact string compatibility '
+                                                                                     'in the declaration type '
+                                                                                     'position; it does not select a '
+                                                                                     'carrier format or replace '
+                                                                                     'auto_continue.',
+                                                     'complete_carrier_contract': 'auto_continue requires one complete '
+                                                                                  'raw JSON carrier on normal '
+                                                                                  'completion and on accepted '
+                                                                                  'validation replacements. Multiple '
+                                                                                  'roots, duplicate keys, trailing '
+                                                                                  'material and unfinished JSON fail '
+                                                                                  'explicitly rather than discarding '
+                                                                                  'content or triggering forced '
+                                                                                  'continuation. Ordinary dict parsing '
+                                                                                  'without this policy remains '
+                                                                                  'unchanged.',
+                                                     'continuation_scope': "Continuation retains the current request's "
+                                                                           'model settings and completes only that '
+                                                                           'request, not later workflow stages. '
+                                                                           'Original instructions are '
+                                                                           'deliverable-reference context; plain-text '
+                                                                           'continuation uses exact JSON-carried '
+                                                                           'context and bounded append-only blocks '
+                                                                           'without a minimum or fixed target length. '
+                                                                           'Structured slots retain list-level '
+                                                                           'descriptions and item schemas. Explicit '
+                                                                           'failed, cancelled, filtered, unknown or '
+                                                                           'conflicting terminal facts fail closed; '
+                                                                           'Responses metadata preserves '
+                                                                           'incomplete_details. Planned long-content '
+                                                                           'production remains a separate owner.',
+                                                     'surface': ['AgentExecution',
                                                                  'AgentExecutionResult',
+                                                                 'AgentExecution.auto_continue',
                                                                  'AgentExecution.ensure_long_output'],
                                                      'contract': 'Each call owns an isolated AgentExecution draft. '
                                                                  'Completed executions are immutable run records; '
                                                                  'prompt/config mutation after start fails fast. '
-                                                                 'ensure_long_output(enabled=True) is a per-draft '
+                                                                 'auto_continue(enabled=True) is a per-draft '
                                                                  'direct-delivery policy: the first request keeps its '
                                                                  'original contract, observed length termination '
                                                                  'enters TriggerFlow continuation with private '
@@ -406,13 +1254,26 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                  'text are retained without synthesizing missing '
                                                                  'paths, and successful completion requires final '
                                                                  'manifest replay plus the original validation '
-                                                                 'contracts. Continuation closes the '
+                                                                 'contracts. Initially open JSON strings retain '
+                                                                 'decoded prefixes, pending escapes and nested '
+                                                                 'positions through Host-correlated field increments. '
+                                                                 'Plaintext and legacy-slot continuation close the '
                                                                  'base_revision/base_digest/anchor control header '
                                                                  'before business updates; a length terminal before '
                                                                  'header closure is observable bounded no progress '
                                                                  'that leaves the manifest unchanged, and three '
-                                                                 'consecutive no-progress continuations terminate. '
-                                                                 'Continuation finality is accepted only after '
+                                                                 'consecutive no-progress continuations terminate. A '
+                                                                 'full unique correlated packet with '
+                                                                 'completion=complete may enter original replay and '
+                                                                 'validation without filler or prior continuation '
+                                                                 'units, including missing/length terminal metadata; '
+                                                                 'partial or malformed packets cannot authorize '
+                                                                 'finality. completion=incomplete continues under '
+                                                                 'existing bounds; undetermined stops explicitly '
+                                                                 'without blind retry. Missing initial metadata uses '
+                                                                 'complete raw JSON evidence or one combined '
+                                                                 'tail-check/continuation request, never a separate '
+                                                                 'judge. Continuation finality is accepted only after '
                                                                  'declared ensure paths have manifest facts; this '
                                                                  "delivery barrier does not consume the caller's "
                                                                  'final-validation retry allowance. A valid contiguous '
@@ -422,9 +1283,10 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                  'validation-retry allowance for missing or additional '
                                                                  'units. It currently supports plain text and JSON, '
                                                                  'does not inherit Actions/tools into continuation '
-                                                                 'requests, fails closed on unknown terminals, invalid '
-                                                                 'assembly, or integrity mismatches, and cannot be '
-                                                                 'combined with an explicit AgentTask strategy.'},
+                                                                 'requests, fails closed on unsafe or unsupported '
+                                                                 'nonempty terminal facts, invalid assembly, or '
+                                                                 'integrity mismatches, and cannot be combined with an '
+                                                                 'explicit AgentTask strategy.'},
                    'agent_execution_task_loop': {'surface': ['Agent.goal',
                                                              'Agent.goals',
                                                              'Agent.create_task',
@@ -477,10 +1339,15 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                           'AgentExecution.use_skills_packs',
                                           'AgentExecution.async_prepare_task_context',
                                           'AgentExecution.async_read_task_context',
+                                          'Agent.enable_skill_script_exec',
+                                          'Agent.bind_skill_script_action',
                                           'Agent.run_skills_task',
                                           'Agently.skills_executor'],
-                              'contract': 'Direct AgentExecution binding is canonical; async_read_task_context binds '
-                                          'consumer/phase and accepts an optional string or ContextReadIntent '
+                              'contract': 'Skills mirror Actions composition: agent.use_skills(..., always=True) '
+                                          'declares defaults and AgentExecution.use_skills(...) declares one-run '
+                                          'additions. AgentExecution freezes only that exact-revision scope, with '
+                                          'empty declarations exposing no global catalog. async_read_task_context '
+                                          'binds consumer/phase and accepts an optional string or ContextReadIntent '
                                           'override; run_skills_task is a result-shaped adapter and '
                                           'Agently.skills_executor is management/context compatibility only.'}},
  'public_typing': {'status': 'required',

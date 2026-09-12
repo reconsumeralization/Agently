@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Callable, Mapping
 
 import json5
@@ -35,7 +36,23 @@ def parse_json_output(
     output_schema: Any,
     build_result_object: Callable[[Any], BaseModel | None],
 ) -> tuple[str | None, Any, BaseModel | None, bool]:
-    cleaned_json = DataLocator.locate_output_json(text, output_schema)
+    declaration = output_schema[0] if isinstance(output_schema, tuple) and output_schema else output_schema
+    if declaration in (str, int, float, bool):
+        # A scalar JSON root has no object/list boundary to locate. Do not
+        # mistake brackets inside a string for a second structured result.
+        scalar_text = text.strip()
+        if scalar_text.startswith("```"):
+            lines = scalar_text.splitlines()
+            if len(lines) < 3 or lines[0].lower() not in {"```", "```json"} or lines[-1] != "```":
+                return None, None, None, False
+            scalar_text = "\n".join(lines[1:-1])
+        try:
+            parsed = json.loads(scalar_text)
+        except (ValueError, TypeError):
+            return None, None, None, False
+        return scalar_text, parsed, build_result_object(parsed), False
+    schema_for_location = declaration if isinstance(declaration, (Mapping, list)) else {}
+    cleaned_json = DataLocator.locate_output_json(text, schema_for_location)
     if cleaned_json is None:
         return None, None, None, False
 

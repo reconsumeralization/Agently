@@ -54,15 +54,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
-from examples.dynamic_task._shared import configure_model
+from agently import Agently  # noqa: E402
+from examples.dynamic_task._shared import configure_model  # noqa: E402
 
-from rich.console import Group, RenderableType
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
-from rich.spinner import Spinner
-from rich.text import Text
+from rich.console import Group, RenderableType  # noqa: E402
+from rich.layout import Layout  # noqa: E402
+from rich.live import Live  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.text import Text  # noqa: E402
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Mock launch context
@@ -370,7 +369,7 @@ def build_graph() -> dict[str, Any]:
 
 
 async def main() -> None:
-    provider = configure_model(temperature=0.2)
+    configure_model(temperature=0.2)
     task = Agently.create_dynamic_task(
         target="Assess launch readiness for Real-time Collaborative Editing v3.0.",
         plan=build_graph(),

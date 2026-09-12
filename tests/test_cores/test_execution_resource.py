@@ -325,6 +325,19 @@ async def test_docker_runtime_developer_profile_pulls_missing_image(monkeypatch)
     monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
     monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
 
+    async def fake_async_pull(self, image, *, timeout=None):
+        _ = self, timeout
+        nonlocal pulled
+        pulled = True
+        calls.append(["docker", "pull", image])
+        return {"ok": True, "image": image, "returncode": 0, "stdout": f"pulled {image}\n", "stderr": ""}
+
+    monkeypatch.setattr(
+        docker_module.DockerExecutionResource,
+        "async_pull_image",
+        fake_async_pull,
+    )
+
     manager = _create_manager()
     handle = await manager.async_ensure(
         cast(ExecutionResourceRequirement, {
@@ -571,12 +584,15 @@ async def test_execution_resource_release_scope_cleans_handles():
     manager = _create_manager()
     owner = "scope-test-owner"
 
-    agent_requirement = {
-        "kind": "bash",
-        "scope": "agent",
-        "owner_id": owner,
-        "resource_key": "bash1",
-    }
+    agent_requirement = cast(
+        ExecutionResourceRequirement,
+        {
+            "kind": "bash",
+            "scope": "agent",
+            "owner_id": owner,
+            "resource_key": "bash1",
+        },
+    )
     await manager.async_ensure(agent_requirement)
     reused_agent_handle = await manager.async_ensure(agent_requirement)
     await manager.async_ensure(
@@ -587,7 +603,7 @@ async def test_execution_resource_release_scope_cleans_handles():
     )
 
     assert len(manager.list(scope="agent", owner_id=owner)) == 1
-    assert reused_agent_handle["ref_count"] == 2
+    assert reused_agent_handle.get("ref_count") == 2
     assert len(manager.list(scope="session", owner_id=owner)) == 1
 
     await manager.async_release_scope("agent", owner)
@@ -704,6 +720,125 @@ async def test_execution_resource_provider_failure_does_not_poison_registry():
 
     assert manager.list() == []
     assert manager.inspect(requirement_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_emits_probe_progress_and_actionable_failure():
+    class RecordingEventCenter:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        def emit(self, event: dict[str, Any]) -> None:
+            self.events.append(event)
+
+        async def async_emit(self, event: dict[str, Any]) -> None:
+            self.events.append(event)
+
+    event_center = RecordingEventCenter()
+    manager = ExecutionResourceManager(
+        plugin_manager=Agently.plugin_manager,
+        settings=Settings(name="ExecutionResourceEventTest", parent=Agently.settings),
+        event_center=cast(Any, event_center),
+    )
+
+    class UnavailableDockerProvider:
+        provider_id = "unavailable-docker"
+        supported_kinds = ("code_execution",)
+
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
+            _ = requirement, policy
+            return {
+                "provider_id": self.provider_id,
+                "available": False,
+                "supported_kinds": ["code_execution"],
+                "capabilities": {},
+                "reason": "Docker daemon is unavailable",
+                "meta": {"availability": {"available": False}},
+            }
+
+    manager.register_provider(cast(Any, UnavailableDockerProvider()))
+    with pytest.raises(ExecutionResourceError) as raised:
+        await manager.async_ensure(
+            {
+                "kind": "code_execution",
+                "provider_id": "unavailable-docker",
+                "required_capabilities": {},
+            }
+        )
+
+    assert raised.value.code == "execution_resource.provider_unavailable"
+    event_types = [event["event_type"] for event in event_center.events]
+    assert event_types == ["execution_resource.ensuring", "execution_resource.failed"]
+    failure = event_center.events[-1]["payload"]
+    assert failure["provider_id"] == "unavailable-docker"
+    assert failure["reason"] == "Docker daemon is unavailable"
+    assert "trusted_local" in failure["suggestion"]
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_forwards_provider_preparation_progress():
+    class RecordingEventCenter:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        def emit(self, event: dict[str, Any]) -> None:
+            self.events.append(event)
+
+        async def async_emit(self, event: dict[str, Any]) -> None:
+            self.events.append(event)
+
+    class ProgressProvider:
+        provider_id = "progress"
+        supported_kinds = ("progress_resource",)
+
+        def _bind_runtime_event_emitter(self, emitter):
+            self.emitter = emitter
+
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
+            _ = requirement, policy
+            return {
+                "provider_id": self.provider_id,
+                "available": True,
+                "supported_kinds": list(self.supported_kinds),
+                "capabilities": {},
+                "reason": "ready",
+            }
+
+        async def async_ensure(self, *, requirement: Any, policy: Any, existing_handle: Any = None) -> Any:
+            _ = policy, existing_handle
+            await self.emitter(
+                requirement,
+                phase="image_pull_progress",
+                message="Downloading layer 1/2",
+                details={"image": "example:test"},
+            )
+            return {"handle_id": "progress:1", "resource": object(), "status": "ready"}
+
+        async def async_health_check(self, handle: Any) -> Any:
+            _ = handle
+            return "ready"
+
+        async def async_release(self, handle: Any) -> None:
+            _ = handle
+
+    event_center = RecordingEventCenter()
+    manager = ExecutionResourceManager(
+        plugin_manager=Agently.plugin_manager,
+        settings=Settings(name="ExecutionResourceProgressTest", parent=Agently.settings),
+        event_center=cast(Any, event_center),
+    )
+    manager.register_provider(cast(Any, ProgressProvider()))
+    await manager.async_ensure({"kind": "progress_resource", "provider_id": "progress"})
+
+    event_types = [event["event_type"] for event in event_center.events]
+    assert event_types == [
+        "execution_resource.ensuring",
+        "execution_resource.probed",
+        "execution_resource.progress",
+        "execution_resource.ready",
+    ]
+    assert event_center.events[2]["payload"]["phase"] == "image_pull_progress"
+    assert event_center.events[2]["payload"]["image"] == "example:test"
 
 
 @pytest.mark.asyncio
@@ -831,7 +966,8 @@ async def test_mcp_execution_resource_provider_owns_client_lifecycle():
             requirement={"kind": "mcp", "config": {"transport": transport}},
             policy={},
         )
-        client = handle["resource"]
+        client = handle.get("resource")
+        assert client is not None
         assert client.transport is transport
         assert await provider.async_health_check(handle) == "ready"
         await provider.async_release(handle)
@@ -878,10 +1014,15 @@ async def test_action_use_mcp_shares_one_managed_session_across_registered_tools
         await agent.action.async_use_action_mcp("https://example.com/mcp")
 
     specs = [agent.action.action_registry.get_spec(tool.name) for tool in tools]
-    requirements = [spec["execution_resources"][0] for spec in specs if spec is not None]
+    requirements = [
+        execution_resources[0]
+        for spec in specs
+        if spec is not None
+        and (execution_resources := spec.get("execution_resources"))
+    ]
     assert len(requirements) == 2
-    assert len({item["resource_key"] for item in requirements}) == 1
-    assert requirements[0]["resource_key"].startswith("mcp_server:")
+    assert len({item.get("resource_key") for item in requirements}) == 1
+    assert str(requirements[0].get("resource_key", "")).startswith("mcp_server:")
 
 def test_mcp_executor_resource_blocks_use_action_artifact_contract():
     from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor

@@ -6,6 +6,9 @@ keywords: Agently, ExecutionResource, Action, TriggerFlow, sandbox, MCP, runtime
 
 # Execution Resource
 
+For general Bash/PowerShell source, see [Shell](shell.md):
+`agent.enable_shell(environment=..., approval=...)` uses the managed `shell` resource kind.
+
 > Languages: **English** · [中文](../../cn/actions/execution-environment.md)
 
 > Renamed in the 4.1.3.8 TaskWorkspace/ActionRuntime boundary refactor: the managed
@@ -81,7 +84,7 @@ The built-in providers are:
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | configured local command runner |
 | `docker` | isolated shell actions, direct Docker Actions, and one `code_execution` provider candidate | Docker CLI runner and image provisioning |
-| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, optional macOS Seatbelt, optional Linux Landlock, and the explicit unsafe `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and the restricted Action enabled for the current execution by `agent.enable_skill_script_exec(...)` | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, optional macOS Seatbelt, optional Linux Landlock, and the explicit unsafe `trusted_local` fallback |
 | `browser` | Browse actions that opt into managed browser resources | managed browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -118,6 +121,30 @@ Custom `ActionExecutor.execute(...)` signatures do not change. Managed handles
 are passed through `action_call["execution_resource_handles"]` and live
 resources through `action_call["execution_resource_resources"]`.
 
+### Programmatic Action bindings
+
+The `programmatic` Action planning protocol adds a stricter consumer of the
+existing `code_execution` kind. Its generated Python program needs a provider
+that both satisfies `isolation="required"` and reports host-binding capability.
+The binding bridge carries JSON calls only; it does not move credentials, live
+Action objects, callbacks, or policy authority into the program process.
+
+Each binding request is reconstructed and dispatched through the ordinary
+ActionRuntime/ActionDispatcher path. A provider name, Python support, or
+isolation support alone does not imply binding support. Selection fails closed
+when no provider satisfies all requested capabilities and never falls back to
+`trusted_local`.
+
+On POSIX hosts, the built-in Docker provider and its gVisor variant implement
+the binding bridge while keeping container networking disabled. Eligibility
+still depends on observed `host_async_bindings` and all requested hard-isolation
+axes, not on the provider id.
+
+The provider, bridge, and interpreter are live resources. TriggerFlow snapshots
+cannot serialize a running program or resume it at an awaited binding. Save at
+a settled boundary and start a new program decision after recovery. See
+[Programmatic Action Calling](programmatic-action-calling.md).
+
 ### Ordered code-execution providers
 
 Configure provider priority with strings or candidate descriptors. Descriptor
@@ -145,6 +172,21 @@ Action API.
 snapshot grant. It requires explicit host authorization and cannot satisfy
 `isolation="required"`. `unsafe_fallback=True` must therefore be paired with an
 explicit `isolation="preferred"` or `"none"`; it is never selected implicitly.
+
+If Docker is unavailable and the code is trusted, the explicit subprocess
+compatibility path is:
+
+```python
+agent.enable_code_runtime(
+    language="nodejs",
+    providers=["trusted_local"],
+    unsafe_fallback=True,
+    isolation="none",
+)
+```
+
+Do not use this for untrusted or model-generated code. The safe default fails
+closed instead of silently moving that code into a host subprocess.
 
 The public `isolation=` option is selection policy, not a provider capability
 label. A `code_execution` provider must report concrete boolean isolation axes:
@@ -302,14 +344,26 @@ The manager emits framework events in the `execution_resource.*` family:
 - `execution_resource.declared`
 - `execution_resource.approval_required`
 - `execution_resource.ensuring`
+- `execution_resource.probed`
+- `execution_resource.progress`
 - `execution_resource.ready`
 - `execution_resource.unhealthy`
 - `execution_resource.releasing`
 - `execution_resource.released`
 - `execution_resource.failed`
 
-Payloads include stable ids and status metadata only. They must not include raw
-credentials, environment variables, command secrets, or live resource objects.
+Payloads include stable ids, sanitized provider/image self-check facts, bounded
+preparation progress, status, stable error codes, and actionable guidance. They
+must not include raw credentials, environment variables, command secrets, or
+live resource objects. With `debug=True`, these events form a concise
+environment narrative; `debug="detail"` also shows bounded probe and preparation
+payloads. An authorized `image_pull_policy="if_missing"` displays Docker pull
+progress before the Action starts executing. Simple mode uses human-facing
+labels such as checking environment, downloading image, and image ready rather
+than exposing internal `provider=` or `phase=` fields. Repeated Docker layer
+updates use compact lines, while start, completion, failure, and final readiness
+retain full stage blocks. Detail mode leads with the same readable explanation
+and adds the sanitized fields under `Diagnostics`.
 
 ## Examples
 

@@ -18,10 +18,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -64,6 +66,19 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 def _sanitize(value: Any) -> Any:
     return _json_loads(_json(value), None)
+
+
+def _context_filter_value(value: Any) -> Any:
+    """Stable values only; unsupported equality objects keep the generic source path."""
+    if value is None or type(value) in {str, bool, int}:
+        return [type(value).__name__, value]
+    if type(value) is float and math.isfinite(value):
+        return ["float", value]
+    if type(value) is dict and all(type(key) is str for key in value):
+        return ["dict", [[key, _context_filter_value(item)] for key, item in sorted(value.items())]]
+    if type(value) in {list, tuple}:
+        return [type(value).__name__, [_context_filter_value(item) for item in cast(Any, value)]]
+    raise TypeError("Context filter cannot be normalized without changing its equality contract.")
 
 
 class LocalRecordStore:
@@ -179,7 +194,8 @@ class LocalRecordStore:
         )
         return self.embedding_provider, self.vector_store_provider
 
-    def _connect(self, *, write: bool = False) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         if write:
             if self.read_only:
                 raise RecordStorePolicyError("RecordStore persistence backend is read-only.")
@@ -190,9 +206,13 @@ class LocalRecordStore:
         if not self.db_path.exists() and not write:
             raise FileNotFoundError(f"RecordStore database does not exist: {self.db_path}")
         connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_records_table(connection: sqlite3.Connection) -> None:
@@ -427,6 +447,9 @@ class LocalRecordStore:
         ref = ref_or_id if isinstance(ref_or_id, dict) else await self.get_record(str(ref_or_id))
         if ref is None:
             raise KeyError(f"RecordStore record not found: {ref_or_id}")
+        return self._ref_envelope(ref)
+
+    def _ref_envelope(self, ref: RecordRef) -> RecordReference:
         return {
             "record_store_id": self.record_store_id,
             "kind": str(ref.get("kind") or "record"),
@@ -440,6 +463,108 @@ class LocalRecordStore:
             "policy_labels": list(ref.get("meta", {}).get("policy_labels", [])),
             "backend_capabilities": {"bounded_read": True, "stream_read": True},
         }
+
+    def _context_snapshot(
+        self,
+        filters: dict[str, Any],
+        *,
+        record_store_id: str,
+        page: tuple[int, int] | None = None,
+        exact: tuple[str, int, int] | None = None,
+        projection_limit: int = 2000,
+    ) -> tuple[str, tuple[RecordRef, ...], dict[str, RecordContentSegment]] | None:
+        """Read scoped metadata and requested bodies from one local SQLite view.
+
+        Legitimate body writes insert their digest atomically. Revision scans
+        metadata, never all bodies; very large metadata/row counts still cost O(n).
+        None selects the unchanged generic path for non-normalizable filters.
+        """
+        normalized: dict[str, Any] = {}
+        try:
+            for key, expected in filters.items():
+                if type(key) is not str:
+                    return None
+                if type(expected) in {list, tuple, set}:
+                    normalized[key] = ["in", sorted({_json(_context_filter_value(item)) for item in expected})]
+                else:
+                    normalized[key] = ["eq", _context_filter_value(expected)]
+        except TypeError:
+            return None
+        if exact is not None and (exact[1] < 0 or exact[2] < 0):
+            raise ValueError("RecordStore read offset and limit must be non-negative.")
+        digest = hashlib.sha256(_json({
+            "algorithm": "record-store-scope/v1",
+            "record_store_id": record_store_id,
+            "filters": normalized,
+        }).encode("utf-8"))
+        try:
+            self.db_path.stat()
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        manager = (
+            closing(sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=30))
+            if exists else nullcontext(None)
+        )
+        with manager as connection:
+            try:
+                rows: list[sqlite3.Row] = []
+                if connection is not None:
+                    connection.row_factory = sqlite3.Row
+                    connection.execute("BEGIN")
+                    if self._table_exists(connection, "records"):
+                        rows = connection.execute(
+                            "SELECT id, collection, kind, path, sha256, size, summary, scope, source, "
+                            "created_at, meta, content_format FROM records ORDER BY created_at DESC, id DESC"
+                        ).fetchall()
+                refs: list[RecordRef] = []
+                metadata: list[dict[str, Any]] = []
+                for row in rows:
+                    ref = self._row_to_ref(row)
+                    if self._matches_filters(ref, filters):
+                        refs.append(ref)
+                        metadata.append({**ref, "content_format": str(row["content_format"])})
+                for item in sorted(metadata, key=lambda item: str(item["id"])):
+                    payload = _json(item).encode("utf-8")
+                    digest.update(len(payload).to_bytes(8, "big"))
+                    digest.update(payload)
+                selected = refs[page[0]:page[0] + page[1]] if page is not None else []
+                offset, limit = 0, projection_limit
+                if exact is not None:
+                    selected = [ref for ref in refs if ref["id"] == exact[0]]
+                    if not selected:
+                        raise KeyError(f"RecordStore context record is not visible: {exact[0]}")
+                    offset, limit = exact[1], exact[2]
+                selected_refs = {ref["id"]: ref for ref in selected}
+                bodies: dict[str, RecordContentSegment] = {}
+                record_ids = list(selected_refs)
+                for start in range(0, len(record_ids), 256):
+                    assert connection is not None
+                    batch = record_ids[start:start + 256]
+                    placeholders = ",".join("?" for _ in batch)
+                    body_rows = connection.execute(
+                        f"SELECT id, content, content_format FROM records WHERE id IN ({placeholders})", batch
+                    ).fetchall()
+                    for row in body_rows:
+                        record_id = str(row["id"])
+                        data = self._decode_content(str(row["content"]), str(row["content_format"]))
+                        raw = self._content_text(data).encode("utf-8")
+                        end = min(len(raw), offset + limit)
+                        segment = raw[offset:end]
+                        bodies[record_id] = {
+                            "ref": self._ref_envelope(selected_refs[record_id]),
+                            "content": segment.decode("utf-8", errors="replace"),
+                            "offset": offset,
+                            "size": len(segment),
+                            "total_size": len(raw),
+                            "eof": end >= len(raw),
+                            "digest": hashlib.sha256(raw).hexdigest(),
+                            "content_type": "text/plain",
+                        }
+                return f"record-store-revision:{digest.hexdigest()}", tuple(refs), bodies
+            finally:
+                if connection is not None:
+                    connection.rollback()
 
     async def read_bounded(
         self,

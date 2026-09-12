@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from agently.types.options import ExecutionOptions
 from agently.types.plugins import AgentOrchestrator
 
-from .modules.execution import AgentExecution
+from agently.builtins.plugins.AgentExecution import AgentExecution
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 
 class AgentlyAgentOrchestrator(AgentOrchestrator):
-    """Default Agent auto-orchestration plugin."""
+    """Released creation compatibility; delegates to the execution plugin."""
 
     name = "AgentlyAgentOrchestrator"
     DEFAULT_SETTINGS: dict[str, Any] = {}

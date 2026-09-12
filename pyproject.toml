@@ -1,6 +1,6 @@
 [project]
 name = "agently"
-version = "4.1.4.7"
+version = "4.1.4.8"
 description = "AI application development framework for stable structured outputs, observable actions, and durable workflows."
 authors = [
     {name = "Agently Team",email = "developer@agently.tech"},
@@ -19,6 +19,7 @@ dependencies = [
     "json5 (>=0.12.0,<0.13.0)",
     "greenlet (>=3.2.3,<4.0.0)",
     "packaging (>=25.0,<26.0)",
+    "markdown-it-py (>=3.0,<5.0)",
     "agently-stage (>=0.3.8,<0.4.0)"
 ]
 
@@ -35,3 +36,21 @@ anyio = ">=4,<5"
 [tool.black]
 line-length = 120
 skip-string-normalization = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["examples/archived"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["E402", "F401"]
+"agently/base.py" = ["E402"]
+"agently/core/operation/Action/ActionProgram.py" = ["E721"]
+"agently/integrations/chromadb.py" = ["E402"]
+"agently/integrations/fastapi.py" = ["E402"]
+"agently/types/data/code_execution.py" = ["E721"]
+"agently/types/data/prompt.py" = ["E721"]
+"agently/utils/Storage.py" = ["E402"]

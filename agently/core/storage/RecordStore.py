@@ -221,6 +221,43 @@ class RecordStore:
             scoped.setdefault(filter_key, value)
         return scoped
 
+    def _context_snapshot(
+        self,
+        *,
+        page: tuple[int, int] | None = None,
+        exact: tuple[str, int, int] | None = None,
+        projection_limit: int = 2000,
+    ) -> tuple[str, tuple[RecordRef, ...], dict[str, RecordContentSegment]] | None:
+        """Use only the original built-in read path; preserve provider/instance adapters."""
+        from .LocalRecordStore import LocalRecordStore
+        from .Registry import RecordStoreRegistry
+
+        if type(self) is not RecordStore or self._provider is not None:
+            return None
+        if any(name in vars(self) for name in ("search", "read_bounded", "get_data", "_scoped_filters")):
+            return None
+        backend = self._backend
+        if backend is None:
+            if type(self.manager) is not RecordStoreRegistry or "_materialize_record_store" in vars(self.manager):
+                return None
+            # Pure path access: leave the facade binding and all component loaders lazy.
+            backend = LocalRecordStore(self.root / ".agently" / "records", create=False, mode="read_only")
+        if type(backend) is not LocalRecordStore:
+            return None
+        if any(name in vars(backend) for name in (
+            "search", "read_bounded", "get_data", "get", "get_record", "_record_id",
+            "_connect", "_table_exists", "_row_to_ref", "_matches_filters",
+            "_decode_content", "_content_text", "ref_envelope", "_ref_envelope",
+        )):
+            return None
+        return backend._context_snapshot(
+            self._scoped_filters(None),
+            record_store_id=self.record_store_id,
+            page=page,
+            exact=exact,
+            projection_limit=projection_limit,
+        )
+
     def _matches_default_search_scope(self, ref: RecordRef) -> bool:
         if not self.default_search_scope:
             return True

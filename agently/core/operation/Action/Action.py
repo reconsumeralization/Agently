@@ -33,7 +33,6 @@ from __future__ import annotations
 from agently_stage import default_stage_call_bridge
 
 import inspect
-import json
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -62,7 +61,7 @@ from agently.types.data import (
     ActionResult,
     ActionRunContext,
     ActionSpec,
-    ExecutionResourcePolicy,
+    ExecutionResourceProviderCandidate,
     ExecutionResourceRequirement,
 )
 from agently.types.plugins import (
@@ -77,7 +76,11 @@ from agently.utils import DataFormatter
 from .ActionArtifactManager import ActionArtifactManager
 from .ActionDispatcher import ActionDispatcher
 from .ActionFlowController import ActionFlowController
-from .ActionMetadata import sanitize_action_spec_for_metadata, summarize_action_records
+from .ActionMetadata import (
+    project_action_spec_for_planning,
+    sanitize_action_spec_for_metadata,
+    summarize_action_records,
+)
 from .ActionResourceRegistrar import ActionResourceRegistrar
 from .ActionNormalization import (
     apply_action_decision_round_dispatch_policy,
@@ -116,10 +119,9 @@ class _DeprecatedActionManagerProxy:
 
 class Action:
     ACTION_RESULT_QUOTE_NOTICE = (
-        "NOTICE: MUST QUOTE KEY INFO OR MARK SOURCE (PREFER URL INCLUDED) FROM {action_results} "
-        "IN REPLY IF YOU USE {action_results} TO IMPROVE REPLY! WHEN THE OUTPUT CONTRACT REQUESTS "
-        "STRUCTURED EVIDENCE REFERENCES, USE THE OFFERED HOST-ISSUED action_call_id; ORDINARY "
-        "OUTPUTS DO NOT NEED TO ADD EVIDENCE BINDINGS."
+        "Use {action_results} as execution evidence. Never describe a failed Action as having run "
+        "successfully. When the output contract requests structured evidence references, use the "
+        "host-issued action_call_id; ordinary replies do not need evidence bindings."
     )
     TOOL_RESULT_QUOTE_NOTICE = ACTION_RESULT_QUOTE_NOTICE
 
@@ -140,6 +142,15 @@ class Action:
         self.action_settings.setdefault("loop.max_consecutive_failed_rounds_per_action", 2)
         self.action_settings.setdefault("protocol", "structured_plan")
         self.action_settings.setdefault("planning_model_key", None)
+        self.action_settings.setdefault("programmatic.max_program_bytes", 20000)
+        self.action_settings.setdefault("programmatic.max_description_bytes", 1024)
+        self.action_settings.setdefault("programmatic.max_active_catalogs", 64)
+        self.action_settings.setdefault("programmatic.max_subcalls", 128)
+        self.action_settings.setdefault("programmatic.max_binding_value_bytes", 4 * 1024 * 1024)
+        self.action_settings.setdefault("programmatic.max_total_binding_bytes", 32 * 1024 * 1024)
+        self.action_settings.setdefault("programmatic.max_output_bytes", 1024 * 1024)
+        self.action_settings.setdefault("programmatic.max_log_bytes", 64 * 1024)
+        self.action_settings.setdefault("programmatic.timeout", 60)
         self.action_settings.setdefault("policy.global", {})
         self.action_settings.setdefault("policy.agent", {})
 
@@ -172,6 +183,255 @@ class Action:
         self.use_action_mcp = default_stage_call_bridge.as_sync(self.async_use_action_mcp)
         self.use_mcp = default_stage_call_bridge.as_sync(self.async_use_mcp)
         self.read_action_artifact = default_stage_call_bridge.as_sync(self.async_read_action_artifact)
+
+    def _ensure_programmatic_action_transport(self, *, settings: "Settings") -> None:
+        """Lazily install the framework-owned programmatic transport Action."""
+
+        from agently.types.data import PROGRAMMATIC_ACTION_TRANSPORT_ID
+        from agently.types.data.code_execution import required_code_execution_isolation
+
+        action_id = PROGRAMMATIC_ACTION_TRANSPORT_ID
+        if self.action_registry.has(action_id):
+            if self.action_registry._is_reserved(action_id):
+                return
+            raise ValueError(f"Action id '{action_id}' is reserved when planning_protocol='programmatic'.")
+
+        requirement = cast(
+            ExecutionResourceRequirement,
+            {
+                "requirement_id": f"code_execution:{action_id}",
+                "kind": "code_execution",
+                "scope": "action_call",
+                "resource_key": action_id,
+                "required_capabilities": {
+                    "language": "python",
+                    "toolchains": {"python": {"minimum_version": "3.10"}},
+                    "workspace_access_mode": "snapshot",
+                    "isolation": required_code_execution_isolation(),
+                    "host_async_bindings": True,
+                },
+                "workspace_access": {"mode": "snapshot", "retain_source": True},
+                "meta": {
+                    "component": "programmatic_action_transport",
+                    "active_only_for_protocol": "programmatic",
+                },
+            },
+        )
+
+        def requirements_factory(*, spec, settings, policy):
+            _ = (spec, policy)
+            provider_candidates = self._resource_registrar._normalize_code_execution_providers(
+                cast(Any, settings.get("code_execution.providers", None))
+            )
+            timeout_raw = settings.get("action.programmatic.timeout", 60)
+            timeout = (
+                int(timeout_raw)
+                if isinstance(timeout_raw, int) and not isinstance(timeout_raw, bool) and timeout_raw > 0
+                else 60
+            )
+            prepared = cast(ExecutionResourceRequirement, dict(requirement))
+            prepared["provider_candidates"] = cast(
+                list[str | ExecutionResourceProviderCandidate],
+                provider_candidates,
+            )
+            prepared["config"] = {
+                "dependency_policy": {"mode": "deny"},
+                "runtime_profile": {
+                    "language": "python",
+                    "image": "python:3.12-slim",
+                    "provisioning_profile": "strict",
+                    "image_pull_policy": "never",
+                    "network_mode": "disabled",
+                    "dependency_policy": {"mode": "deny"},
+                },
+            }
+            prepared["policy"] = {
+                "network_mode": "disabled",
+                "timeout_seconds": timeout,
+            }
+            return [prepared]
+
+        executor = self._create_executor(
+            "ProgrammaticActionExecutor",
+            action=self,
+            timeout=60,
+        )
+        spec = self._sanitize_action_spec(
+            action_id=action_id,
+            desc=(
+                "Run one bounded Python program against the current host-offered "
+                "read-only Action bindings. Framework-reserved transport."
+            ),
+            kwargs=cast(
+                "KwargsType",
+                {
+                    "program": (str, "Validated async Python function body."),
+                    "description": (str, "Short observer-facing program label."),
+                    "catalog_revision": (str, "Host-bound Action catalog revision."),
+                },
+            ),
+            required_input_keys=["program", "description", "catalog_revision"],
+            returns=cast(
+                "ReturnType",
+                {
+                    "value": ("JSONValue | None", "Lossless-JSON program return value."),
+                    "logs": ("list[str]", "Bounded ordered program print output."),
+                },
+            ),
+            tags=[],
+            default_policy={"network_mode": "disabled"},
+            side_effect_level="exec",
+            approval_required=False,
+            sandbox_required=True,
+            replay_safe=True,
+            concurrency_mode="exclusive",
+            expose_to_model=False,
+            executor_type=str(getattr(executor, "kind", "programmatic_action")),
+            execution_resources=[requirement],
+            meta={
+                "component": "programmatic_action_transport",
+                "_execution_resource_requirements_factory": requirements_factory,
+            },
+        )
+        self.action_registry._register_reserved(spec, executor)
+
+    def _release_programmatic_action_call_catalog(self, action_call: Any) -> None:
+        if not isinstance(action_call, dict):
+            return
+        if str(action_call.get("action_id", "")) != "run_action_program":
+            return
+        action_input = action_call.get("action_input", {})
+        revision = str(action_input.get("catalog_revision", "")) if isinstance(action_input, dict) else ""
+        if not revision:
+            return
+        resolve_catalog = getattr(self.action_runtime, "resolve_programmatic_catalog", None)
+        release_planned = getattr(self.action_runtime, "_release_planned_catalog", None)
+        catalog = resolve_catalog(revision) if callable(resolve_catalog) else None
+        if (
+            isinstance(catalog, dict)
+            and catalog.get("_action_input") == action_input
+            and callable(release_planned)
+            and release_planned(revision)
+        ):
+            return
+        release_catalog = getattr(
+            self.action_runtime,
+            "release_programmatic_catalog",
+            None,
+        )
+        if callable(release_catalog):
+            release_catalog(revision)
+
+    def release_programmatic_action_calls(
+        self,
+        action_calls: list[ActionCall] | list[dict[str, Any]],
+    ) -> int:
+        """Release catalog leases for generated program calls that will not run."""
+
+        released = 0
+        revisions: set[str] = set()
+        for action_call in action_calls:
+            if not isinstance(action_call, dict):
+                continue
+            if str(action_call.get("action_id", "")) != "run_action_program":
+                continue
+            action_input = action_call.get("action_input", {})
+            revision = str(action_input.get("catalog_revision", "")) if isinstance(action_input, dict) else ""
+            if not revision or revision in revisions:
+                continue
+            revisions.add(revision)
+            if (
+                getattr(
+                    self.action_runtime,
+                    "resolve_programmatic_catalog",
+                    lambda _revision: None,
+                )(revision)
+                is not None
+            ):
+                self._release_programmatic_action_call_catalog(action_call)
+                released += 1
+        return released
+
+    def _check_action_scope(
+        self,
+        action_calls: list[ActionCall],
+        offered_actions: list[dict[str, Any]],
+        *,
+        run_id: str,
+        round_index: int,
+    ) -> list[ActionResult]:
+        """Reject an entire model batch before handlers, approval or dispatch."""
+
+        from .ActionProgram import build_programmatic_action_catalog
+        from agently.types.data import PROGRAMMATIC_ACTION_TRANSPORT_ID
+
+        offered = {
+            str(item.get("action_id") or item.get("name") or ""): item
+            for item in offered_actions if isinstance(item, dict)
+        }
+        rejected: list[str] = []
+        owned_revisions: set[str] = set()
+        for command in action_calls:
+            action_id = str(command.get("action_id") or "")
+            if action_id in offered and action_id != PROGRAMMATIC_ACTION_TRANSPORT_ID:
+                continue
+            valid_transport = False
+            if action_id == PROGRAMMATIC_ACTION_TRANSPORT_ID and self.action_registry._is_reserved(action_id):
+                action_input = command.get("action_input", {})
+                revision = str(action_input.get("catalog_revision") or "")
+                resolve = getattr(self.action_runtime, "resolve_programmatic_catalog", None)
+                catalog = resolve(revision) if callable(resolve) else None
+                if isinstance(catalog, dict):
+                    origin = catalog.get("_planning_scope")
+                    current = {"run_id": run_id, "round_index": round_index}
+                    if isinstance(origin, dict) and origin == current:
+                        owned_revisions.add(revision)
+                    correlated = origin is None or (
+                        origin == current and catalog.get("_action_input") == action_input
+                    )
+                    if correlated:
+                        executor = self.action_registry.get_executor(action_id)
+                        check_catalog = getattr(executor, "_resolve_catalog", None)
+                        try:
+                            checked = check_catalog(revision) if callable(check_catalog) else None
+                            entries = checked.get("entries", []) if isinstance(checked, dict) else []
+                            ids = [str(entry.get("action_id") or "") for entry in entries]
+                            if isinstance(checked, dict) and ids and all(item in offered for item in ids):
+                                current_catalog = build_programmatic_action_catalog(
+                                    [offered[item] for item in ids],
+                                    revision_seed=checked.get("_revision_seed"),
+                                )
+                                valid_transport = current_catalog.get("catalog_revision") == revision
+                        except (KeyError, TypeError, ValueError):
+                            valid_transport = False
+            if not valid_transport:
+                rejected.append(action_id)
+        if not rejected:
+            return []
+        # Only the current Host-owned round may abandon its retained leases.
+        # A fabricated or duplicated revision must not consume another lease.
+        release = getattr(self.action_runtime, "_release_planned_catalog", None)
+        if not callable(release):
+            release = getattr(self.action_runtime, "release_programmatic_catalog", None)
+        if callable(release):
+            for revision in owned_revisions:
+                release(revision)
+        diagnostic = {
+            "source": "ActionRuntime",
+            "severity": "error",
+            "code": "action.scope.not_offered",
+            "message": "The model Action batch contains an Action outside the Host-offered scope.",
+            "meta": {"action_ids": rejected, "round_index": round_index},
+        }
+        return [self._normalize_execution_record(
+            {
+                "ok": False, "success": False, "status": "blocked",
+                "action_id": "action_planning", "tool_name": "action_planning",
+                "purpose": diagnostic["message"], "kwargs": {},
+                "result": diagnostic, "data": diagnostic, "error": diagnostic["message"],
+                "diagnostics": [diagnostic], "expose_to_model": True,
+            }, None, 0,
+        )]
 
     def _register_action_artifact_recall_action(self):
         self.register_action(
@@ -211,9 +471,7 @@ class Action:
 
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("Action artifact readback offset must be an integer >= 0.")
-        if max_bytes is not None and (
-            isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
-        ):
+        if max_bytes is not None and (isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0):
             raise ValueError("Action artifact readback max_bytes must be a positive integer.")
 
         expected_scope = self._artifact_manager.current_artifact_scope()
@@ -345,27 +603,32 @@ class Action:
         approval_required: bool,
         sandbox_required: bool,
         replay_safe: bool,
+        concurrency_mode: Literal["parallel", "exclusive"],
         expose_to_model: bool,
         executor_type: str,
         execution_resources: list[ExecutionResourceRequirement] | None,
         meta: dict[str, Any] | None,
     ) -> "ActionSpec":
-        spec = cast(ActionSpec, {
-            "action_id": action_id,
-            "name": action_id,
-            "desc": desc if desc is not None else "",
-            "kwargs": kwargs if kwargs is not None else {},
-            "tags": tags,
-            "default_policy": default_policy if default_policy is not None else {},
-            "side_effect_level": side_effect_level,
-            "approval_required": approval_required,
-            "sandbox_required": sandbox_required,
-            "replay_safe": replay_safe,
-            "expose_to_model": expose_to_model,
-            "executor_type": executor_type,
-            "execution_resources": execution_resources if execution_resources is not None else [],
-            "meta": meta if meta is not None else {},
-        })
+        spec = cast(
+            ActionSpec,
+            {
+                "action_id": action_id,
+                "name": action_id,
+                "desc": desc if desc is not None else "",
+                "kwargs": kwargs if kwargs is not None else {},
+                "tags": tags,
+                "default_policy": default_policy if default_policy is not None else {},
+                "side_effect_level": side_effect_level,
+                "approval_required": approval_required,
+                "sandbox_required": sandbox_required,
+                "replay_safe": replay_safe,
+                "concurrency_mode": concurrency_mode,
+                "expose_to_model": expose_to_model,
+                "executor_type": executor_type,
+                "execution_resources": execution_resources if execution_resources is not None else [],
+                "meta": meta if meta is not None else {},
+            },
+        )
         if required_input_keys:
             spec["required_input_keys"] = required_input_keys
         if returns is not None:
@@ -385,20 +648,12 @@ class Action:
             required = [str(key) for key in required_input_keys]
             unknown = sorted(set(required) - declared_set)
             if unknown:
-                raise ValueError(
-                    "required_input_keys contains undeclared Action kwargs: "
-                    + ", ".join(unknown)
-                    + "."
-                )
+                raise ValueError("required_input_keys contains undeclared Action kwargs: " + ", ".join(unknown) + ".")
             return [key for key in declared if key in set(required)]
 
         markers: dict[str, bool] = {}
         for key, descriptor in (kwargs or {}).items():
-            if (
-                isinstance(descriptor, tuple)
-                and len(descriptor) >= 3
-                and isinstance(descriptor[2], bool)
-            ):
+            if isinstance(descriptor, tuple) and len(descriptor) >= 3 and isinstance(descriptor[2], bool):
                 markers[str(key)] = descriptor[2]
 
         signature_required: set[str] = set()
@@ -415,12 +670,7 @@ class Action:
                 }
                 and parameter.default is inspect.Parameter.empty
             }
-        return [
-            key
-            for key in declared
-            if key != "<*>"
-            and markers.get(key, key in signature_required)
-        ]
+        return [key for key in declared if key != "<*>" and markers.get(key, key in signature_required)]
 
     def register_action(
         self,
@@ -438,6 +688,7 @@ class Action:
         approval_required: bool = False,
         sandbox_required: bool = False,
         replay_safe: bool = True,
+        concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
         expose_to_model: bool = True,
         execution_resources: list[ExecutionResourceRequirement] | None = None,
         meta: dict[str, Any] | None = None,
@@ -446,6 +697,8 @@ class Action:
             if func is None:
                 raise ValueError("register_action() requires either func or executor.")
             executor = self._create_executor("LocalFunctionActionExecutor", func=func)
+        if concurrency_mode not in {"parallel", "exclusive"}:
+            raise ValueError("concurrency_mode must be 'parallel' or 'exclusive'.")
         normalized_tags = self._normalize_tags(tags)
         executor_type = str(getattr(executor, "kind", "function"))
         resolved_required_input_keys = self._resolve_required_input_keys(
@@ -465,6 +718,7 @@ class Action:
             approval_required=approval_required,
             sandbox_required=sandbox_required,
             replay_safe=replay_safe,
+            concurrency_mode=concurrency_mode,
             expose_to_model=expose_to_model,
             executor_type=executor_type,
             execution_resources=execution_resources,
@@ -721,8 +975,12 @@ class Action:
     def _summarize_action_instruction(self, record: "ActionResult"):
         return self._artifact_manager._summarize_action_instruction(record)
 
-    def _build_execution_digest(self, record: "ActionResult", *, artifact_refs: list[ActionArtifact], redaction_report: list[str]) -> dict[str, Any]:
-        return self._artifact_manager._build_execution_digest(record, artifact_refs=artifact_refs, redaction_report=redaction_report)
+    def _build_execution_digest(
+        self, record: "ActionResult", *, artifact_refs: list[ActionArtifact], redaction_report: list[str]
+    ) -> dict[str, Any]:
+        return self._artifact_manager._build_execution_digest(
+            record, artifact_refs=artifact_refs, redaction_report=redaction_report
+        )
 
     def _finalize_action_result(
         self,
@@ -739,14 +997,8 @@ class Action:
     def _artifact_scope_from_run_context(run_context: Any) -> dict[str, str]:
         meta = getattr(run_context, "meta", None)
         lineage = meta.get("lineage") if isinstance(meta, dict) else None
-        task_id = (
-            str(meta.get("task_id") or "").strip()
-            if isinstance(meta, dict)
-            else ""
-        ) or (
-            str(lineage.get("task_id") or "").strip()
-            if isinstance(lineage, dict)
-            else ""
+        task_id = (str(meta.get("task_id") or "").strip() if isinstance(meta, dict) else "") or (
+            str(lineage.get("task_id") or "").strip() if isinstance(lineage, dict) else ""
         )
         if task_id:
             return {"kind": "agent_task", "id": task_id}
@@ -785,9 +1037,7 @@ class Action:
         """
 
         run_scope = cls._artifact_scope_from_run_context(run_context)
-        execution_scope = cls._artifact_scope_from_agent_execution_context(
-            agent_execution_context
-        )
+        execution_scope = cls._artifact_scope_from_agent_execution_context(agent_execution_context)
         if run_scope.get("kind") == "agent_task":
             return run_scope
         if execution_scope is not None and execution_scope.get("kind") == "agent_task":
@@ -831,6 +1081,10 @@ class Action:
         return ActionArtifactManager.to_model_visible_records(records)
 
     @classmethod
+    def _to_model_planning_records(cls, records: list["ActionResult"] | None):
+        return ActionArtifactManager.to_model_planning_records(records)
+
+    @classmethod
     def _to_action_flow_return_records(cls, records: list["ActionResult"] | None):
         return ActionArtifactManager._to_action_flow_return_records(records)
 
@@ -838,7 +1092,9 @@ class Action:
     def _to_runtime_visible_observation(cls, observation: dict[str, Any]) -> dict[str, Any]:
         return ActionArtifactManager._to_runtime_visible_observation(observation)
 
-    def _with_action_artifact_recall_action(self, action_list: list[dict[str, Any]], records: list["ActionResult"] | None):
+    def _with_action_artifact_recall_action(
+        self, action_list: list[dict[str, Any]], records: list["ActionResult"] | None
+    ):
         return self._artifact_manager.with_action_artifact_recall_action(action_list, records)
 
     def _iter_action_ids(self, tags: str | list[str] | None = None, *, expose_only: bool = True):
@@ -902,6 +1158,16 @@ class Action:
 
     def get_action_list(self, tags: str | list[str] | None = None):
         return list(self.get_action_info(tags).values())
+
+    @staticmethod
+    def _to_model_planning_action_list(action_list: list[dict[str, Any]] | None):
+        if not isinstance(action_list, list):
+            return []
+        return [
+            project_action_spec_for_planning(spec)
+            for spec in action_list
+            if isinstance(spec, dict)
+        ]
 
     def get_tool_list(self, tags: str | list[str] | None = None):
         return list(self.get_tool_info(tags).values())
@@ -976,6 +1242,8 @@ class Action:
     ):
         owns_scope = artifact_scope is None
         resolved_scope = artifact_scope or {"kind": "action_call", "id": f"act_call_{uuid.uuid4().hex}"}
+        programmatic_catalog_revision = str(kwargs.get("catalog_revision", "")) if name == "run_action_program" else ""
+        programmatic_input = dict(kwargs) if programmatic_catalog_revision else {}
         finalized: Any = None
         try:
             with self._artifact_manager.bind_artifact_scope(resolved_scope):
@@ -992,15 +1260,50 @@ class Action:
                 )
                 finalized = self._finalize_action_result(result, artifact_scope=resolved_scope)
         finally:
+            if programmatic_catalog_revision:
+                self._release_programmatic_action_call_catalog(
+                    {
+                        "action_id": name,
+                        "action_input": programmatic_input,
+                    }
+                )
             if owns_scope:
                 self._release_artifact_scope(resolved_scope)
-        returned = (
-            self._project_released_artifact_scope(finalized, resolved_scope)
-            if owns_scope
-            else finalized
-        )
+        returned = self._project_released_artifact_scope(finalized, resolved_scope) if owns_scope else finalized
         bounded = self._to_action_flow_return_records([returned])
         return bounded[0] if bounded else returned
+
+    async def _async_execute_program_binding_action(
+        self,
+        name: str,
+        kwargs: dict[str, Any],
+        *,
+        settings: "Settings",
+        purpose: str,
+        artifact_scope: dict[str, str],
+    ) -> tuple[Any, "ActionResult"]:
+        """Dispatch one program-originated Action and preserve both consumers.
+
+        The live program receives the authoritative business value. Evidence,
+        RuntimeEvent, state, and later model consumers receive the ordinary
+        finalized ActionResult. This method intentionally bypasses only the
+        ActionFlow carrier-size projection; it never bypasses ActionDispatcher.
+        """
+
+        with self._artifact_manager.bind_artifact_scope(artifact_scope):
+            raw_result = await self.action_dispatcher.async_execute(
+                name,
+                kwargs,
+                settings=settings,
+                purpose=purpose,
+                source_protocol="programmatic",
+            )
+            canonical_value = raw_result.get("data", raw_result.get("result"))
+            finalized = self._finalize_action_result(
+                raw_result,
+                artifact_scope=artifact_scope,
+            )
+        return canonical_value, finalized
 
     def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
         return default_stage_call_bridge.as_sync(self.async_execute_action)(name, kwargs, **kwargs_options)
@@ -1327,8 +1630,13 @@ class Action:
     async def _default_structured_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
         return await self._flow_controller.default_structured_planning_handler(context, request)
 
-    async def _default_native_tool_call_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
+    async def _default_native_tool_call_planning_handler(
+        self, context: ActionRunContext, request: ActionPlanningRequest
+    ):
         return await self._flow_controller.default_native_tool_call_planning_handler(context, request)
+
+    async def _default_programmatic_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
+        return await self._flow_controller.default_programmatic_planning_handler(context, request)
 
     async def _default_planning_handler(self, context: ActionRunContext, request: ActionPlanningRequest):
         return await self._flow_controller.default_planning_handler(context, request)
@@ -1441,7 +1749,7 @@ class Action:
 
     @staticmethod
     def to_action_results(records: list["ActionResult"]):
-        return to_action_results(ActionArtifactManager.to_model_visible_records(records))
+        return to_action_results(ActionArtifactManager.to_model_planning_records(records))
 
     @staticmethod
     def _should_continue(decision: "ActionDecision", *, round_index: int, max_rounds: int | None):
@@ -1505,6 +1813,8 @@ class Action:
         concurrency: int | None = None,
         timeout: float | None = None,
         planning_protocol: str | None = None,
+        response_stream_handler=None,
+        terminal_response_handler=None,
     ) -> list["ActionResult"]:
         return await self._flow_controller.async_plan_and_execute(
             prompt=prompt,
@@ -1521,6 +1831,8 @@ class Action:
             concurrency=concurrency,
             timeout=timeout,
             planning_protocol=planning_protocol,
+            response_stream_handler=response_stream_handler,
+            terminal_response_handler=terminal_response_handler,
         )
 
 

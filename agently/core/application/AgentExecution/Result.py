@@ -35,6 +35,12 @@ class AgentExecutionResult:
     def __init__(self, execution: Any):
         self.execution = execution
         self.execution_id = execution.id
+        self.revision: int = getattr(execution, "revision", 0)
+
+    @property
+    def _view(self) -> Any:
+        history = getattr(self.execution, "_revision_history", {})
+        return history.get(self.revision, self.execution)
 
     @property
     def result(self) -> "AgentExecutionResult":
@@ -42,22 +48,22 @@ class AgentExecutionResult:
 
     @property
     def status(self) -> str:
-        return str(self.execution.status)
+        return str(self._view.status)
 
     @property
     def task_refs(self) -> dict[str, Any]:
-        refs = getattr(self.execution, "task_refs", None)
+        refs = getattr(self._view, "task_refs", None)
         return dict(refs) if isinstance(refs, dict) else {}
 
     @property
     def full_result_data(self) -> dict[str, Any]:
-        raw_result = getattr(self.execution, "result", None)
+        raw_result = getattr(self._view, "result", None)
         if isinstance(raw_result, dict) and "result" in raw_result and "extra" in raw_result:
             return dict(raw_result)
         return {
             "result": raw_result,
             "extra": {
-                "logs": getattr(self.execution, "logs", {}),
+                "logs": getattr(self._view, "logs", {}),
                 "task_refs": self.task_refs,
             },
         }
@@ -102,7 +108,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: Any = None,
     ) -> Any:
-        return await self.execution.async_get_data(
+        return await self._view.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -153,7 +159,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: Any = None,
     ) -> Any:
-        return self.execution.get_data(
+        return self._view.get_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -176,7 +182,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: Any = None,
     ) -> Any:
-        return await self.execution.async_get_full_data(
+        return await self._view.async_get_full_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -199,7 +205,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: Any = None,
     ) -> Any:
-        return self.execution.get_full_data(
+        return self._view.get_full_data(
             type=type,
             ensure_keys=ensure_keys,
             ensure_all_keys=ensure_all_keys,
@@ -247,7 +253,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ) -> "BaseModel | None":
-        return await self.execution.async_get_data_object(
+        return await self._view.async_get_data_object(
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
             key_style=key_style,
@@ -293,7 +299,7 @@ class AgentExecutionResult:
         raise_ensure_failure: bool = True,
         parent_run_context: "RunContext | None" = None,
     ) -> "BaseModel | None":
-        return self.execution.get_data_object(
+        return self._view.get_data_object(
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
             key_style=key_style,
@@ -303,16 +309,16 @@ class AgentExecutionResult:
         )
 
     async def async_get_text(self, *, parent_run_context: Any = None) -> str:
-        return await self.execution.async_get_text(parent_run_context=parent_run_context)
+        return await self._view.async_get_text(parent_run_context=parent_run_context)
 
     def get_text(self, *, parent_run_context: Any = None) -> str:
-        return self.execution.get_text(parent_run_context=parent_run_context)
+        return self._view.get_text(parent_run_context=parent_run_context)
 
     async def async_get_meta(self) -> "AgentExecutionMeta":
-        return await self.execution.async_get_meta()
+        return await self._view.async_get_meta()
 
     def get_meta(self) -> "AgentExecutionMeta":
-        return self.execution.get_meta()
+        return self._view.get_meta()
 
     @overload
     def get_async_generator(
@@ -350,7 +356,7 @@ class AgentExecutionResult:
     def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[str, None]: ...
 
     def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        return self.execution.get_async_generator(*args, **kwargs)
+        return self._view.get_async_generator(*args, **kwargs)
 
     @overload
     def get_generator(
@@ -388,15 +394,15 @@ class AgentExecutionResult:
     def get_generator(self, *args: Any, **kwargs: Any) -> Generator[str, None, None]: ...
 
     def get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]:
-        return self.execution.get_generator(*args, **kwargs)
+        return self._view.get_generator(*args, **kwargs)
 
     async def async_get_status(self) -> str:
         await self.async_get_meta()
-        return str(self.execution.status)
+        return str(self._view.status)
 
     def get_status(self) -> str:
         self.get_meta()
-        return str(self.execution.status)
+        return str(self._view.status)
 
     async def async_resume(self, *args: Any, **kwargs: Any) -> Any:
         task_id = kwargs.pop("task_id", None)
@@ -406,7 +412,7 @@ class AgentExecutionResult:
             remaining_args = remaining_args[1:]
         task_id = task_id or self.task_refs.get("task_id")
         if task_id:
-            return await self.execution.agent.async_resume(str(task_id), *remaining_args, **kwargs)
+            return await self._view.agent.async_resume(str(task_id), *remaining_args, **kwargs)
         return {
             "execution_id": self.execution_id,
             "status": self.status,
@@ -422,7 +428,7 @@ class AgentExecutionResult:
             remaining_args = remaining_args[1:]
         task_id = task_id or self.task_refs.get("task_id")
         if task_id:
-            return self.execution.agent.resume(str(task_id), *remaining_args, **kwargs)
+            return self._view.agent.resume(str(task_id), *remaining_args, **kwargs)
         return {
             "execution_id": self.execution_id,
             "status": self.status,

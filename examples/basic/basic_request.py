@@ -3,8 +3,8 @@ from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
 
-from agently import Agently
-from agently.utils import SettingsNamespace
+from agently import Agently  # noqa: E402
+from agently.utils import SettingsNamespace  # noqa: E402
 
 request_settings = SettingsNamespace(
     Agently.settings,

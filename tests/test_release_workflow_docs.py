@@ -1,7 +1,45 @@
 from pathlib import Path
+import json
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_4_1_4_8_change_guide_covers_late_additions_and_has_valid_links() -> None:
+    guide = ROOT / "examples/release_pinned_usage/CHANGES_4_1_4_8.md"
+    text = guide.read_text(encoding="utf-8")
+    for target in re.findall(r"\]\(([^)]+)\)", text):
+        assert (guide.parent / target.split("#", 1)[0]).is_file(), target
+    manifest = json.loads(
+        (ROOT / "examples/release_pinned_usage/pinned_usage_manifest.json").read_text(encoding="utf-8")
+    )
+    covered = {
+        path
+        for item in manifest["development_line_4_1_4_8_coverage"]
+        for path in item["examples"]
+    }
+    assert {
+        "examples/basic/auto_continue.py",
+        "examples/agent_auto_orchestration/29_field_long_content_ollama.py",
+        "examples/agent_auto_orchestration/29_execution_controls_ollama.py",
+        "examples/audio/tts_stt_roundtrip.py",
+        "examples/audio/continuous_audio.py",
+        "examples/action_runtime/3_8_general_shell_model.py",
+        "examples/agent_task/action_result_dependency.py",
+        "examples/skills_executor/11_conditional_resource_read.py",
+    } <= covered
+
+
+def test_4_1_4_8_docs_explain_scope_compatibility_and_deferred_work() -> None:
+    for language in ("cn", "en"):
+        notes = (ROOT / f"docs/{language}/development/release-notes-4.1.4.8.md").read_text(encoding="utf-8")
+        for required in ("CHANGES_4_1_4_8.md", "4.1.4.7", "4.1.4.9", "4.2", "ensure_long_output", "auto_continue", "offline"):
+            assert required in notes
+    for filename in ("README.md", "README_CN.md"):
+        introduction = (ROOT / filename).read_text(encoding="utf-8")
+        assert "built-in Pattern" not in introduction
+        assert "review、verify" not in introduction
 
 
 def test_publish_workflow_has_an_explicit_failed_release_retry_path():

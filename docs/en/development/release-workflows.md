@@ -276,6 +276,18 @@ run, the reason each one was included, and whether the result preserved the
 existing developer-facing usage shape. Do not silently replace a pinned example
 with a new pattern only to make the release gate pass.
 
+Pull requests run
+`python scripts/check_changed_python_quality.py --base <reviewed-base>` for
+fast changed-file feedback. Final release validation runs Ruff over the complete
+`agently`, `tests`, `examples`, and `scripts` Python surface before full Pyright
+and pytest. Intentional package re-exports, exact scalar comparisons, and
+example/bootstrap import ordering use narrow path-level exceptions; AgentTask
+mixins declare their `TaskShared` dependencies explicitly. Do not add a global
+ignore merely to keep a branch green. New or materially changed runtime paths
+should also run under `-W error::RuntimeWarning`. Keep compatibility tests that
+deliberately exercise warnings explicit rather than suppressing all warnings
+repository-wide.
+
 ## Release PR Body
 
 The release PR from `dev` to `main` must include enough information for a
@@ -324,6 +336,13 @@ previously unuploaded version after the complete validation matrix passes. Do
 not bump the package version or upload locally merely to recover a failed run.
 
 The PyPI project list page shows the package metadata `Summary`, which comes from `[project].description` in `pyproject.toml`. The full project page renders the README from `[project].readme`.
+
+Migrating this workflow to PyPI Trusted Publishing requires both sides of the
+OIDC trust relationship before the repository workflow changes: a protected
+GitHub `pypi` environment and a matching PyPI project publisher for this
+repository/workflow/environment. Verify both first, then replace token-based
+publication in one reviewed change. Do not remove the working publication
+credential when only the repository half has been prepared.
 
 When preparing a release:
 

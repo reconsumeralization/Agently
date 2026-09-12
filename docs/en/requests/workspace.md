@@ -175,6 +175,15 @@ cannot be silently dropped. Optional prose relevance uses an Agently
 selection keys are host-issued and validated before canonical records are
 reconstructed.
 
+The native `RecordStoreContextSource` revision includes its bound view's effective
+search scope and visible record metadata. Out-of-scope writes do not expire that
+view; visible changes still require refresh. Page and exact reads bind to the
+same read-only transaction. This source rejects exact reads outside its scope,
+but public `RecordStore.read_bounded()` does not thereby become an authorization
+boundary. Custom providers, read overrides and explicit source revisions retain
+their existing path, not an automatic native scoped-revision guarantee. Native
+revision checks still scan metadata; validate costs for large record collections.
+
 ContextIndex enumerates source descriptors into revision/profile/provider-keyed
 partitions. It may use `structural`, `lexical`, or host-configured `hybrid`
 candidate retrieval, but exact bytes still come from the source's

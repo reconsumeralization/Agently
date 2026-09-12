@@ -94,7 +94,7 @@ class ExecutionExchangeResponse(TypedDict, total=False):
     meta: dict[str, Any]
 
 
-class ExecutionExchangeView(TypedDict, total=False):
+class ExecutionExchangeView(TypedDict):
     exchange_id: str | None
     interrupt_id: str
     execution_id: str
@@ -108,6 +108,12 @@ class ExecutionExchangeView(TypedDict, total=False):
     actor_id: str | None
     created_at: float | None
     resolved_at: float | None
+
+
+AgentInteractionHandler: TypeAlias = Callable[
+    [ExecutionExchangeView],
+    object | Awaitable[object],
+]
 
 
 ExchangeRoutingHandler = Callable[

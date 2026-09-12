@@ -391,6 +391,18 @@ class ExecutionExchangeManager:
                 provider = cast("ExecutionExchangeProvider", candidate)
         if provider is not None:
             return provider
+        from agently.core.runtime.RuntimeContext import (
+            get_current_agent_execution_context,
+        )
+
+        agent_execution_context = get_current_agent_execution_context()
+        candidate = getattr(
+            agent_execution_context,
+            "execution_exchange_provider",
+            None,
+        )
+        if callable(getattr(candidate, "publish_request", None)):
+            return cast("ExecutionExchangeProvider", candidate)
         request = interrupt.get("external_wait_request")
         provider_id = request.get("provider_id") if isinstance(request, dict) else None
         return self.get_provider(provider_id)

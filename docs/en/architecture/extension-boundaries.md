@@ -82,7 +82,7 @@ TriggerFlow or EventCenter requests `managed=True`; this prevents compatibility
 helpers from changing error or cancellation semantics merely because they adapt
 sync and async call shapes.
 
-Agently 4.1.4.7 depends on Agently-Stage 0.3.8 or newer in the 0.3 compatibility line.
+Agently 4.1.4.8 depends on Agently-Stage 0.3.8 or newer in the 0.3 compatibility line.
 Stage owns automatic physical carrier selection across mixed sync/async
 boundaries; TriggerFlow still owns workflow lifecycle and public state. Reusing
 one safe carrier does not merge separate Stage scope inventories or expose

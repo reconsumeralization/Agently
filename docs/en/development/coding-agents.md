@@ -41,13 +41,18 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 | `agently-design` | designing or auditing a non-trivial cross-layer ModelRequest, evidence, lifecycle, concurrency, or observability topology |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, ExecutionResource, FastAPI exposure, DevTools wiring |
-| `agently-stage` | Agently-Stage process-local lifetime, sync/async bridging, settlement, replay channels, and local listeners |
+| `agently-stage` | process-local task lifetime, sync/async bridging, stream channels, and listeners |
 | `agently-triggerflow` | needing branching, concurrency, pause/resume, save/load |
 | `agently-migration` | migrating from LangChain, LangGraph, LlamaIndex, CrewAI, or similar systems |
 
-The current public catalog generation is `v3`. The actual public skill list lives in `Agently-Skills/skills/` and should contain only these 7 skills.
+The current public catalog generation is `v3`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 7 skills.
 
-TaskDAG and the `DynamicTask` convenience facade remain supported framework APIs. Because model-generated or app-submitted DAG work is a less common application path, it no longer has a standalone coding-agent skill. Start with `agently` and load its TaskDAG / Dynamic Task reference only when that capability is actually needed.
+TaskDAG / DynamicTask guidance now lives in `agently/references/task-dag.md`;
+there is no standalone TaskDAG Skill in V3. V2 is frozen on
+`update/archive-v2-catalog`, last supporting Agently `4.1.4.7`.
+The 4.1.4.8 line uses `agently-skills.authoring.v3`; this protocol version is
+separate from the catalog generation. Audio, LongContent/auto_continue and
+Execution/Shell guidance is routed through the request and runtime Skills.
 
 ## Installing the skills
 

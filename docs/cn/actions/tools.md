@@ -146,9 +146,17 @@ download-like binary response，且当前 execution 绑定了 TaskWorkspace 时�
 Browse 会 fail closed，不会把 raw bytes 放进模型 hot path。
 
 shell 能力优先使用 `agent.enable_shell(...)`，它挂载托管 `run_bash` action。
-`Cmd` 仍作为低层兼容 package 与 Bash 执行实现 helper 保留。shell 用于测试、构建、
+`Cmd` 仍作为低层兼容 package 保留，但原生进程执行已反向委托共享 Shell 执行核心，
+不再自行实现进程生命周期。本次内部迁移不会让既有 argv 入口自动获得完整 Shell 语法。
+shell 用于测试、构建、
 git inspection 和只读诊断；文件读取、检索、编辑和写入使用 `read_file`、`grep_files`、
 `edit_file`、`apply_patch` 等 TaskWorkspace file actions。
+
+Cmd-backed 本地命令使用异步子进程等待，不阻塞调用方事件循环。超时或取消会清理本次
+进程；POSIX 同时终止它创建的进程组，其他平台只保证直接子进程。取消继续向调用方传播，
+不会返回成功；这不构成对脱离进程组的后代的完整隔离。`max_output_chars` 只限制输出预览，
+不是峰值内存限制；配置输出 artifact 时仍保留完整捕获内容。命令仍按 argv 执行，不新增
+shell 管道、重定向或交互会话语义。
 
 当前 action-native 示例见 `examples/builtin_actions/`。历史 built-in tool 示例已移到
 `examples/archived/builtin_tools/`，并在 README 中指向当前替代案例。

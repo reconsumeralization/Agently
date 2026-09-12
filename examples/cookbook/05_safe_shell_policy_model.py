@@ -1,5 +1,4 @@
 from pathlib import Path
-from pprint import pprint
 
 from _shared_model import (
     create_model_agent,

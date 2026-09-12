@@ -1,0 +1,153 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import json
+from typing import Any, TYPE_CHECKING
+
+from agently.utils import DataFormatter
+from agently.core.operation.Action.ActionMetadata import _scoped_action_list
+
+if TYPE_CHECKING:
+    from agently.core.Agent import BaseAgent
+
+
+class HybridRoutePlanner:
+    """Candidate-driven route planner for one Agent execution."""
+
+    def __init__(self, agent: "BaseAgent", *, prompt_snapshot: dict[str, Any] | None = None, execution: Any = None):
+        self.agent = agent
+        self.prompt_snapshot = dict(prompt_snapshot or {})
+        self.execution = execution
+
+    def task_target(self) -> str:
+        value = self.prompt_snapshot.get("input")
+        if isinstance(value, str) and value.strip():
+            return value
+        if value is not None:
+            return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False)
+        return "Agent task"
+
+    def action_candidates(self) -> list[dict[str, Any]]:
+        action = getattr(self.agent, "action", None)
+        if action is None:
+            return []
+        try:
+            return _scoped_action_list(
+                action, self.agent.name,
+                execution_context=getattr(self.execution, "execution_context", None),
+            )
+        except Exception:
+            return []
+
+    def skill_candidate_summary(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {"model_decision": False, "required": False}
+        for mode in ("model_decision", "required"):
+            collect_skills = getattr(self.agent, "_collect_skill_selectors", None)
+            collect_packs = getattr(self.agent, "_collect_skills_pack_selectors", None)
+            try:
+                raw_skills = collect_skills(skills=None, mode=mode) if callable(collect_skills) else []
+                raw_packs = collect_packs(skills_packs=None, mode=mode) if callable(collect_packs) else []
+            except Exception:
+                raw_skills, raw_packs = [], []
+            skills = list(raw_skills) if isinstance(raw_skills, (list, tuple, set)) else []
+            packs = list(raw_packs) if isinstance(raw_packs, (list, tuple, set)) else []
+            for item in getattr(self.execution, "local_skill_selectors", []) or []:
+                if item.get("mode") == mode:
+                    skills.append(item.get("selector"))
+            for item in getattr(self.execution, "local_skills_pack_selectors", []) or []:
+                if item.get("mode") == mode:
+                    packs.append(item.get("selector"))
+            summary[mode] = bool(skills or packs)
+            summary[f"{ mode }_skills"] = skills
+            summary[f"{ mode }_skills_packs"] = packs
+        return summary
+
+    def route_policy(self) -> dict[str, Any]:
+        execution = self.execution
+        if execution is None:
+            return {}
+        for source_name in ("options", "effective_options"):
+            source = getattr(execution, source_name, None)
+            if isinstance(source, dict):
+                policy = source.get("route_policy")
+                if isinstance(policy, dict):
+                    return policy
+        return {}
+
+    def allowed_routes(self) -> set[str] | None:
+        policy = self.route_policy()
+        raw_routes = policy.get("allowed_routes")
+        if raw_routes is None:
+            raw_routes = policy.get("allowed")
+        if raw_routes is None:
+            raw_routes = policy.get("routes")
+        forced_route = policy.get("force_route") or policy.get("required_route")
+        if forced_route is not None:
+            raw_routes = [forced_route]
+        if raw_routes is None:
+            return None
+        if isinstance(raw_routes, str):
+            candidates = [raw_routes]
+        elif isinstance(raw_routes, (list, tuple, set)):
+            candidates = [str(item) for item in raw_routes]
+        else:
+            return None
+        routes = {route.strip() for route in candidates if route.strip()}
+        return routes or None
+
+    def route_allowed(self, route: str) -> bool:
+        allowed_routes = self.allowed_routes()
+        return allowed_routes is None or route in allowed_routes
+
+    def on_violation(self) -> str:
+        mode = str(self.route_policy().get("on_violation") or "fallback").strip().lower()
+        return mode if mode in {"fallback", "block"} else "fallback"
+
+    async def select_route(self) -> tuple[str, dict[str, Any]]:
+        skills = self.skill_candidate_summary()
+        action_candidates = self.action_candidates()
+
+        if self.route_allowed("model_request"):
+            meta: dict[str, Any] = {"selected_by": "single_candidate"}
+            if action_candidates:
+                meta["with_actions"] = True
+            if skills.get("required") or skills.get("model_decision"):
+                meta["skill_context"] = True
+            return "model_request", meta
+
+        # No candidate satisfied the route policy. on_violation="block" surfaces
+        # the violation as an explicit blocked route (the AgentTask loop turns it
+        # into a replan signal); the default "fallback" runs model_request with a
+        # recorded warning to preserve backward-compatible behavior.
+        violation_meta = {
+            "route_policy": DataFormatter.sanitize(self.route_policy()),
+            "allowed_routes": sorted(self.allowed_routes() or []),
+            "route_policy_warning": "No allowed route candidate was available for the route policy.",
+        }
+        if self.on_violation() == "block":
+            return "route_policy_blocked", {"selected_by": "route_policy_violation", **violation_meta}
+        return "model_request", {"selected_by": "route_policy_fallback", **violation_meta}
+
+    def build_route_plan(self, *, execution_id: str, route: str, route_meta: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "execution_id": execution_id,
+            "selected_route": route,
+            "route_meta": DataFormatter.sanitize(route_meta),
+            "candidates": {
+                "actions": self.action_candidates(),
+                "skills": self.skill_candidate_summary(),
+            },
+        }

@@ -216,7 +216,7 @@ class ChromaCollection:
         embedding_function = embedding_function or self.embedding_function
         if embedding_function is None:
             raise NotImplementedError(
-                f"Embedding function must be assigned either in ChromaCollection initialize or .add() method."
+                "Embedding function must be assigned either in ChromaCollection initialize or .add() method."
             )
         if not isinstance(data, ChromaData):
             data = ChromaData(data, embedding_function=embedding_function)
@@ -260,7 +260,7 @@ class ChromaCollection:
         embedding_function = embedding_function or self.embedding_function
         if embedding_function is None:
             raise NotImplementedError(
-                f"Embedding function must be assigned either in ChromaCollection initialize or .query() method."
+                "Embedding function must be assigned either in ChromaCollection initialize or .query() method."
             )
         if not isinstance(query_or_queries, list):
             query_or_queries = [query_or_queries]

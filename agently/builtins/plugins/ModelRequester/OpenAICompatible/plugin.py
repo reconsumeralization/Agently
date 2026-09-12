@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from httpx import AsyncClient
+from httpx import AsyncClient as AsyncClient
 
 from agently.types.plugins import ModelRequester
 from agently.types.settings import OpenAICompatibleSettings

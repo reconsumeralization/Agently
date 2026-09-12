@@ -8,7 +8,7 @@ import pytest
 from agently import Agently
 from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
-from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
+from agently.builtins.plugins.AgentExecution.long_task.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
 from agently.types.data import ContextBlock, ContextOmission, ContextPackage
 

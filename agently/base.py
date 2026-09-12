@@ -14,7 +14,6 @@
 
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
@@ -29,10 +28,10 @@ from agently.core import (
     PolicyApprovalManager,
     PluginManager,
     EventCenter,
-    Tool,
     TriggerFlow,
     Prompt,
     ModelRequest,
+    AudioModelRequest,
     BaseAgent,
     Blocks,
     SkillsExecutor,
@@ -204,6 +203,7 @@ if settings.get("debug", None) is not None:
 # Extensions Installation
 # BaseAgent + Extensions = Agent
 from agently.builtins.agent_extensions import (
+    AudioExtension,
     StreamingPrintExtension,
     SessionExtension,
     TaskWorkspaceExtension,
@@ -217,6 +217,7 @@ from agently.builtins.agent_extensions import (
 
 
 class Agent(
+    AudioExtension,
     StreamingPrintExtension,
     SessionExtension,
     SkillsExtension,
@@ -364,6 +365,19 @@ class AgentlyMain(Generic[A]):
             self.plugin_manager,
             parent_settings=self.settings,
             agent_name=name,
+        )
+
+    def create_audio_request(
+        self, *, base_url: str, api_key: str = "", tts_model: str | None = None,
+        stt_model: str | None = None, driver: str = "OpenAICompatible", timeout: float = 120.0,
+    ) -> AudioModelRequest:
+        """Create independent audio capability without changing text settings or mounting an Agent."""
+        from agently.types.data.audio import AudioConnection
+        from agently.types.plugins.AudioModelRequester import AudioModelRequester
+
+        driver_class = cast(type[AudioModelRequester], self.plugin_manager.get_plugin("AudioModelRequester", driver))
+        return AudioModelRequest(
+            driver_class(AudioConnection(base_url, api_key, timeout)), tts_model=tts_model, stt_model=stt_model,
         )
 
     def create_dynamic_task(

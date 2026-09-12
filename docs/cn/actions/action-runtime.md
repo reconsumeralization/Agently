@@ -125,6 +125,52 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 `agent.use_mcp(...)` 挂载的 MCP tools，以及 `enable_*` component helpers。只有需要
 窄范围子集时才传显式 `tags=[...]`。托管执行环境 metadata 在这个可见 schema
 里会脱敏原始 `env` 值，但保留 env key；provider 只会在实际执行路径中拿到 raw env。
+声明的 `kwargs` / `returns` 是调用 schema，不属于运行环境值；其中名为 `env` 的
+业务字段及其嵌套类型、描述会原样保留。不要把秘密值写入面向模型的 schema 描述。
+
+模型调用范围由 Host 决定。没有显式 Execution 范围时使用 Agent 的默认
+Actions；Host 可以在 Execution 上显式选择其它已注册、允许向模型暴露的
+Actions。嵌套 Execution 的非空范围与祖先范围取交集，step scope 只能继续
+收窄。`execution.use_actions([])` 清除本级限制，不清除祖先限制；交集为空
+就是没有可用 Action，不能回退为全量。模型生成的 required ids 或 planner
+capability 列表不是新增授权，不能通过创建 child 给越界 Action 补注册或 tags。
+
+内置 ActionFlow 按该轮 Host 实际提供的 Action 集合核对整批调用，在审批、
+Action 执行和第三方 `execution_handler` 前拒绝越界批次，返回
+`action.scope.not_offered`，保留之前已完成的记录。Host 按真实产物引用动态
+提供的 `read_action_artifact` 保持可用，原 selection key / scope 校验仍生效。
+Programmatic transport 必须持有真实且未失效的 catalog，且其全部 Actions
+仍在该轮提供范围内；名称、协议标签或一个 revision 字符串本身不能授权。
+手工 Host retained catalog / custom planner 用法保留，不要求新增关联参数。
+默认 planner 未消费的 catalog 租约会在终结、异常或取消时释放，不影响
+其它 Host 租约；live pause 仍保留等待资源。公开 Host 直接 Action 调用不
+自动套用此模型调用范围检查，其原审批、资源和执行策略不变。
+
+默认 structured planner 收到的投影比这个公开检查 API 更小：只包含 `action_id`、
+描述、可调用 kwargs、required inputs，以及非默认的 approval/side-effect/concurrency
+约束。host-only 的 `execution_resources`、provider 配置、executor metadata 与空默认值
+留在 Action 边界后，模型选中 id 后再从 canonical registry 解析。空 round state 不发送，
+最新 Action result 也不会同时在历史与 last-round input 中重复出现。
+可修复的参数、代码或 runtime 错误会进入下一轮生成修正后的调用；provider/环境不可用时
+则选择其他合格路径或明确报告 blocker/修复建议，不能伪造执行结果。
+
+默认 loop 是 Action-or-Response loop。每轮规划都从完整的 execution-local Prompt
+派生，因此 `.input(...)`、`.info(...)`、instructions、Session history、语言策略、
+附件和原始输出合同都会保留，只在其上追加精简的 Action 状态。每轮只能返回一个分支：
+
+- `execute`：返回一个或多个 Action 调用，不返回最终回复；或
+- `response`：不返回 Action 调用，返回完整的最终回复 carrier。
+
+选择 `response` 后，该字段直接进入既有外层 Request/AgentExecution stream、parser、
+validator、result reader 和 Session finalizer。决策 JSON 不会成为业务输出，Agently 也
+不会再发一次请求重复生成相同答案。因此，一次 Action 的任务通常使用两次模型请求：
+选择并执行，然后回复；进入 action-enabled 路径后不需要 Action 的任务通常只用一次。
+结构化 `.output(...)` 仍是权威合同：`response` 携带 JSON 或其他已配置 carrier，再由
+外层 Request 按原合同解析和验证。
+
+旧 custom planning handler 或 ActionFlow plugin 如果只返回
+`next_action="response"` 而没有 response 值，会保留兼容的最终 ModelRequest fallback。
+`auto_continue` 当前也保留独立交付路径。这些是 fallback，不是默认 ActionLoop 拓扑。
 
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
@@ -258,10 +304,33 @@ skipped diagnostics，不会导入 ACP 依赖，也不会伪造可用 agent。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
 `desc_mode="default"`。
 
+## 规划协议
+
+通过 `set_action_loop(...)` 选择 ActionRuntime 如何规划一轮 Action：
+
+```python
+agent.set_action_loop(planning_protocol="programmatic")
+```
+
+| 值 | 适用场景 |
+|---|---|
+| `structured_plan` | 默认、provider-neutral 的结构化 Action call |
+| `native_tool_calls` | provider-native Action/tool calling |
+| `programmatic` | 用一段有边界 Python 程序对合格只读 Actions 做分支、循环或聚合 |
+
+在 `get_action_result(...)` 或 `async_get_action_result(...)` 上显式传入的
+`planning_protocol=...` 会覆盖本次调用的 Agent 设置。程序化模式只纳入有明确
+返回 contract、只读且 replay-safe 的 Actions，并依赖支持 host binding 的隔离
+code ExecutionResource。嵌套 Action 默认独占执行；只有 host 明确注册为
+`concurrency_mode="parallel"` 的 Action 才会在有界调度器下并发。它不会替代可持久化的 TriggerFlow
+或 TaskDAG 编排。完整的合格条件、安全、上下文与恢复边界见
+[程序化 Action 调用](programmatic-action-calling.md)。
+
 ## 模型来源输入安全
 
 模型规划产生的 Action command 在 Action 边界被视为不可信输入。对于
-`structured_plan` 和 `native_tool_calls` command，`ActionDispatcher` 会在调用
+`structured_plan`、`native_tool_calls` 和嵌套 `programmatic` command，
+`ActionDispatcher` 会在调用
 executor 之前，把 `action_input` 过滤到注册时 `ActionSpec.kwargs` 声明过的 key。
 host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
 
@@ -436,7 +505,7 @@ agent.set_settings("model_profiles", {
 agent.set_settings("action.planning_model_key", "task-main")
 ```
 
-这个配置同时作用于默认 structured-plan 和 native tool-call planning
+这个配置同时作用于 structured-plan、native tool-call 和 programmatic planning
 路径。当 AgentExecution Skill binding 或 AgentTask 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
@@ -447,7 +516,8 @@ signal。ActionRuntime 会等待最终结构化解析结果，让正常的 reque
 metadata 与 usage 完成收尾，再关闭当前 bounded Action step。
 
 `agent.get_action_result(..., timeout=N)` 会约束完整 action loop，包括
-structured planning 和 native tool-call selection。如果 loop 不能在 deadline
+structured planning、native tool-call selection 和 programmatic execution。
+如果 loop 不能在 deadline
 前结束，Agently 会抛出 `RuntimeStageStallError`，其中
 `stage="action_loop_close"`。
 

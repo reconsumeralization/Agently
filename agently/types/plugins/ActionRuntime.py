@@ -127,6 +127,12 @@ class ActionRuntime(AgentlyPlugin, Protocol):
         request: "ActionPlanningRequest",
     ) -> ActionDecision | dict[str, Any]: ...
 
+    async def _default_programmatic_planning_handler(
+        self,
+        context: "ActionRunContext",
+        request: "ActionPlanningRequest",
+    ) -> ActionDecision | dict[str, Any]: ...
+
     async def _default_planning_handler(
         self,
         context: "ActionRunContext",

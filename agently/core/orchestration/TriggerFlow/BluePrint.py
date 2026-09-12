@@ -23,7 +23,7 @@ from pathlib import Path
 from json import JSONDecodeError
 from asyncio import Event, Semaphore
 from collections.abc import Mapping
-from typing import Any, Literal, TYPE_CHECKING, Sequence, cast
+from typing import Any, Literal, TYPE_CHECKING, Sequence
 from ._async_utils import gather_cancel_on_error
 
 if TYPE_CHECKING:

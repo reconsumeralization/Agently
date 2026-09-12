@@ -2,7 +2,7 @@ import pytest
 import json5
 import json
 from typing import Any, cast
-from agently.utils import DataFormatter, DataLocator, StreamingJSONCompleter
+from agently.utils import DataLocator, StreamingJSONCompleter
 
 
 def run_complete_and_parse(json_str: str, expected_keys: list[str]):

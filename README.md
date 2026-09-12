@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.4.7 - AI Application Runtime Framework
+# Agently 4.1.4.8 - AI Application Runtime Framework
 
 > Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
@@ -32,9 +32,14 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
-Agently 4.1.4.7 requires Agently-Stage 0.3.8, adds built-in inactive
-gVisor/Seatbelt/Landlock code-execution candidates without new third-party
-Python dependencies, and improves reasoning and validation diagnostics. Read the
+Agently 4.1.4.8 makes one-run Agent composition easier to discover and verify:
+Actions and Skills preserve `AgentExecution` fluent typing, built-in Execution,
+effort, strategy, Action protocol, and concurrency choices appear in IDEs, and
+stable interaction, review, final validation, and artifact delivery APIs now have
+complete examples. It also adds accepted retry-stream replay, fail-closed model
+aliases, execution-scoped Skills, programmatic Action calling, and clearer
+concurrent debug output. Read the
+[4.1.4.8 Release Notes](docs/en/development/release-notes-4.1.4.8.md),
 [4.1.4.7 Release Notes](docs/en/development/release-notes-4.1.4.7.md),
 [4.1.4.6 Release Notes](docs/en/development/release-notes-4.1.4.6.md),
 [4.1.4.5 Release Notes](docs/en/development/release-notes-4.1.4.5.md),
@@ -49,7 +54,7 @@ Many AI frameworks are strong at exploration or at assembling broad integration 
 
 Agently is a good fit when you care about:
 
-- **AI services should be runtime executions, not prompt glue** - `AgentExecution` owns one run's prompt, strategy, Actions, Skill bindings, process stream, TaskContext evidence, and result views across direct, flat, and TaskBoard strategies. Read [4.1.4.7 Release Notes](docs/en/development/release-notes-4.1.4.7.md), [4.1.4 Release Notes](docs/en/development/release-notes-4.1.4.md), and [Agent Auto Orchestration examples](examples/agent_auto_orchestration/).
+- **AI services should be runtime executions, not prompt glue** - `AgentExecution` owns one run's prompt, strategy, Actions, Skill bindings, process stream, TaskContext evidence, and result views across direct, flat, and TaskBoard strategies. Read [4.1.4.8 Release Notes](docs/en/development/release-notes-4.1.4.8.md), [4.1.4 Release Notes](docs/en/development/release-notes-4.1.4.md), and [Agent Auto Orchestration examples](examples/agent_auto_orchestration/).
 - **Model switching should not rewrite business logic** - Agently normalizes provider setup, prompt slots, response parsing, action execution, and response reading into one request/runtime contract. Read [Model Setup](docs/en/start/model-setup.md), [Models Overview](docs/en/models/overview.md), and [Requests Overview](docs/en/requests/overview.md).
 - **Structured output should be a framework guarantee, not only a provider feature** - `.output(...)` schemas, required field extraction, parser feedback, retries, `ensure_keys`, `ensure_all_keys`, and validation handlers work together inside Agently. Read [Schema as Prompt](docs/en/requests/schema-as-prompt.md), [Output Control](docs/en/requests/output-control.md), and examples in [`examples/basic/`](examples/basic/).
 - **Streaming should expose structure before the final token** - `instant` mode lets consumers react to structured fields while the model is still streaming, which is useful for UI updates, SSE routes, and workflow signals. Read [Model Response](docs/en/requests/model-response.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [`examples/fastapi/`](examples/fastapi/).
@@ -61,7 +66,7 @@ Agently is a good fit when you care about:
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.4.7`.
+Current framework version: `4.1.4.8`.
 
 Python: `>=3.10`.
 
@@ -216,7 +221,7 @@ Prompts are composed from named slots. That keeps application intent, constraint
 result = (
     agent
     .role("You are a concise release-note writer.")
-    .info({"version": "4.1.4.7", "audience": "framework users"})
+    .info({"version": "4.1.4.8", "audience": "framework users"})
     .instruct("Return only facts grounded in the input.")
     .input("Summarize this release line for an engineering changelog.")
     .output({
@@ -359,8 +364,8 @@ immutable installed revisions, AgentExecution owns selection and exact-revision
 binding, and TaskContext owns progressive disclosure. `agent.use_skills(...)`
 is the normal candidate-binding surface; `agent.require_skills(...)` binds a
 known exact revision. `Agently.skills_executor` remains a thin compatibility
-facade for installation, inspection, and context projection. In the 4.1.4.7
-release, its legacy TaskDAG `skill` resolver helper is not an executor-ready
+facade for installation, inspection, and context projection. In 4.1.4.8, as in
+4.1.4.7, its legacy TaskDAG `skill` resolver helper is not an executor-ready
 integration: it still needs a host adapter from the real `TaskDAGContext` before
 node selectors reach the compatibility projection.
 
@@ -528,7 +533,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.4.7 recommends `agently-devtools >=0.1.11,<0.2.0`.
+Agently 4.1.4.8 recommends `agently-devtools >=0.1.11,<0.2.0`.
 
 ## Architecture
 
@@ -703,7 +708,7 @@ Agently-Skills gives coding agents current Agently implementation guidance.
 - Repository: https://github.com/AgentEra/Agently-Skills
 - Current catalog generation: `v3`
 - Recommended bundle: `app`
-- Agently 4.1.4.7 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
+- Agently 4.1.4.8 compatibility: Skills authoring protocol `agently-skills.authoring.v3`
 
 Use it when asking Codex, Claude Code, Cursor, or another coding agent to implement Agently patterns.
 
@@ -778,8 +783,8 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 
 ## Compatibility Notes
 
-- The current package version is `4.1.4.7`.
-- The current release manifest is `compatibility/releases/4.1.4.7.json`.
+- The current package version is `4.1.4.8`.
+- The current release manifest is `compatibility/releases/4.1.4.8.json`.
 - Development-line planning belongs in `compatibility/in-development.json`; do not treat planned future versions as released.
 - `AgentExecutionResult.get_data()` returns business data; callers that need status, TaskBoard, diagnostics, or other route/task internals use `get_full_data()`.
 - An explicitly captured `AgentExecution` represents one run. Create a fresh execution for the next request after it starts.

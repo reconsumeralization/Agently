@@ -113,6 +113,44 @@ async def test_action_loop_hot_wait_approval_executes_action_in_place():
 
 
 @pytest.mark.asyncio
+async def test_action_loop_uses_standard_agent_interaction_handler():
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+    from agently.types.data import ExecutionExchangeView
+
+    calls: list[dict[str, Any]] = []
+    exchanges: list[ExecutionExchangeView] = []
+    agent = _build_agent_with_guarded_action(calls)
+
+    async def approve(exchange: ExecutionExchangeView):
+        exchanges.append(exchange)
+        await asyncio.sleep(0)
+        return {"status": "approved", "approved": True, "reason": "operator approved"}
+
+    owner = agent.interact(approve)
+    owner.request.settings.set("policy_approval.handler", "fail_closed")
+    registered_before = execution_exchange.list_providers()
+    prompt = Agently.create_prompt().set("input", "clean up the stale report")
+
+    with bind_runtime_context(agent_execution_context=owner.execution_context):
+        records = await agent.action.async_plan_and_execute(
+            prompt=prompt,
+            settings=owner.request.settings,
+            action_list=agent.action.get_action_list(tags=["exchange-test"]),
+            agent_name=agent.name,
+            planning_handler=_planning_handler,
+            max_rounds=3,
+        )
+
+    assert calls == [{"path": "./tmp/report.md"}]
+    assert len(exchanges) == 1
+    assert exchanges[0]["kind"] == "approval"
+    assert exchanges[0]["payload"]["request"]["capability"] == "delete_report"
+    executed = [record for record in records if record.get("action_id") == "delete_report"]
+    assert executed and executed[0].get("status") == "success"
+    assert execution_exchange.list_providers() == registered_before
+
+
+@pytest.mark.asyncio
 async def test_action_loop_durable_mode_returns_paused_records_instead_of_raising(monkeypatch):
     calls: list[dict[str, Any]] = []
     agent = _build_agent_with_guarded_action(calls)

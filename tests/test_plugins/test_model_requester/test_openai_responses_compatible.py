@@ -534,8 +534,28 @@ def test_broadcast_response_maps_incomplete_terminal_to_length():
             "model": "gpt-5.5",
             "status": "incomplete",
             "finish_reason": "length",
+            "incomplete_details": {"reason": "max_output_tokens"},
         },
     ) in events
+
+
+def test_incomplete_filtering_is_not_eligible_for_long_output_continuation():
+    from agently.builtins.plugins.AgentExecution.modules.long_output import LongOutputError, normalized_terminal
+
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+    response = {
+        "id": "filtered-response",
+        "status": "incomplete",
+        "output": [],
+        "incomplete_details": {"reason": "content_filter"},
+    }
+    events = collect_events(plugin, [
+        ("response.incomplete", json.dumps({"type": "response.incomplete", "response": response})),
+    ])
+    meta = next(value for event, value in events if event == "meta")
+    assert meta["incomplete_details"] == response["incomplete_details"]
+    with pytest.raises(LongOutputError, match="content_filter"):
+        normalized_terminal(meta)
 
 
 def test_broadcast_response_preserves_core_status_record():

@@ -42,6 +42,33 @@ class AgentExecutionPromptDraft:
         prompt_snapshot = self.request.prompt.get()
         return dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else {}
 
+    @staticmethod
+    def _goal_values(value: Any) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        return [str(item).strip() for item in values if str(item or "").strip()]
+
+    @property
+    def goal_items(self) -> list[str]:
+        return self._goal_values(self.request.prompt.get("goal"))
+
+    @property
+    def success_criteria_items(self) -> list[str]:
+        return self._goal_values(self.request.prompt.get("success_criteria"))
+
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> "AgentExecutionPromptDraft":
+        """Declare semantic requirements without selecting execution behavior."""
+        goals = self._goal_values(goal)
+        if goals:
+            self.request.prompt.set("goal", goals)
+        criteria = self._goal_values(success_criteria)
+        if criteria:
+            self.request.prompt.set("success_criteria", criteria)
+        return self
+
     def set_execution_prompt(
         self,
         key: "PromptStandardSlot | str",
