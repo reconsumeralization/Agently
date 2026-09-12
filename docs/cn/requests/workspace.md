@@ -160,6 +160,12 @@ refresh 或创建新 reader。如果列举候选本身推进了 source revision�
 candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic selector；
 模型只返回宿主发放的 selection key，宿主校验后再重建 canonical record。
 
+原生 `RecordStoreContextSource` 的版本包含绑定视图的有效查询范围和可见记录元数据。
+范围外写入不使该视图过期，可见记录变化仍需刷新；页面与精确读回绑定同一次只读事务。
+该 source 的精确读取拒绝范围外记录，但公共 `RecordStore.read_bounded()` 不因此成为
+权限边界。自定义 provider、读取覆盖或显式 source revision 保留其原有路径，不自动获得
+原生范围版本保证。原生版本检查仍扫描元数据；巨量记录的成本需要按实际规模验证。
+
 ContextIndex 把 source descriptor 枚举成以 revision/profile/provider 为 key 的
 partition，可使用 `structural`、`lexical` 或宿主配置的 `hybrid` 候选检索；精确 bytes
 仍由 source 的 `async_read_exact(...)` 返回，或在 ref 选定后由可选的确定性 scoped-read

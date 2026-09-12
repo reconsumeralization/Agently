@@ -105,6 +105,14 @@ The built-in SQLite RecordStore and vector store now close connections when each
 operation exits, preserving commit, rollback and error propagation. This fixes
 connection leaks without changing public calls, read-only policy or lazy creation.
 
+Built-in RecordStore context revisions now follow the visible scope: unrelated
+writes outside that view no longer invalidate its Reader, while visible changes
+still require refresh. Page and exact reads use one read-only transaction's
+revision. ContextSource excludes out-of-scope records; public RecordStore reads
+do not acquire new permission rules. Custom providers/read adapters retain their
+existing path. Revision checks still scan metadata; cost is not independent of
+record count.
+
 Structured task-repair requirements and evidence identities now survive the
 projection into subsequent planning, including saved/restored iteration summaries.
 Requirements already lost from historical snapshots are not reconstructed.
