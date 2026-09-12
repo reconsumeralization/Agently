@@ -101,11 +101,15 @@ execution = agent.input("Write a chapter-organized operations manual.").output({
 }).auto_continue()
 ```
 
-## Examples Added For This Release
-
 The built-in SQLite RecordStore and vector store now close connections when each
 operation exits, preserving commit, rollback and error propagation. This fixes
 connection leaks without changing public calls, read-only policy or lazy creation.
+
+Structured task-repair requirements and evidence identities now survive the
+projection into subsequent planning, including saved/restored iteration summaries.
+Requirements already lost from historical snapshots are not reconstructed.
+
+## Examples Added For This Release
 
 - `examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py`
   proves real local-Qwen generation, model-backed review, required blocking handler

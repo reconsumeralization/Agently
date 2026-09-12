@@ -88,14 +88,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if isinstance(execution_meta, Mapping)
                 else {}
             )
+            material_claim_audit = verification.get("material_claim_audit")
             material_claim_projection = {
                 "valid": (
-                    verification.get("material_claim_audit", {}).get("valid")
-                    if isinstance(verification.get("material_claim_audit"), Mapping)
+                    material_claim_audit.get("valid")
+                    if isinstance(material_claim_audit, Mapping)
                     else None
                 ),
                 "repair_contract": DataFormatter.sanitize(
-                    verification.get("material_claim_repair_contract", {})
+                    verification.get(
+                        "material_claim_repair_contract",
+                        material_claim_audit.get("repair_contract", {})
+                        if isinstance(material_claim_audit, Mapping)
+                        else {},
+                    )
                 ),
             }
             terminal_convergence = verification.get("terminal_convergence")
@@ -114,6 +120,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         "replan_instruction": verification.get("replan_instruction", ""),
                         "repair_constraints": verification.get("repair_constraints", []),
                         "next_step_requirements": verification.get("next_step_requirements", []),
+                        "criterion_repair_contract": DataFormatter.sanitize(
+                            verification.get("criterion_repair_contract", {})
+                        ),
                         "material_claim_audit": material_claim_projection,
                         "terminal_convergence": (
                             DataFormatter.sanitize(terminal_convergence)
@@ -421,6 +430,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         replan_instruction = str(verification.get("replan_instruction") or "").strip()
         failure_analysis = str(verification.get("failure_analysis") or "").strip()
         material_claim_repair_contract = verification.get("material_claim_repair_contract")
+        if "material_claim_repair_contract" not in verification:
+            # Summary-only snapshots retain material repair under the audit view.
+            # Explicit empty/invalid top-level values must shadow stale nested data.
+            material_claim_audit = verification.get("material_claim_audit")
+            material_claim_repair_contract = (
+                material_claim_audit.get("repair_contract")
+                if isinstance(material_claim_audit, Mapping)
+                else None
+            )
         if not isinstance(material_claim_repair_contract, Mapping):
             material_claim_repair_contract = {}
         else:
