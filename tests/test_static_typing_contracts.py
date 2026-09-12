@@ -382,6 +382,8 @@ def test_unknown_finite_choices_are_rejected_by_pyright():
     assert "unknown_protocol" in output
     assert "release_4_1_4_8_finite_invalid.py:15" in output
     assert "serial" in output
+    for invalid in ("unrestricted", "sometimes", "cmd"):
+        assert invalid in output
 
 
 def test_changed_runtime_protocols_are_publicly_typed():

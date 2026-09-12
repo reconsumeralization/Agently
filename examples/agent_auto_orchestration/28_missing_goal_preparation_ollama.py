@@ -26,7 +26,7 @@ async def main() -> None:
     model = configure_ollama_qwen(max_tokens=2600)
     agent = Agently.create_agent("missing-goal-preparation").use_task_workspace(RUNTIME_ROOT)
     execution = (
-        agent.create_execution("long_task", limits={"max_model_requests": 10, "max_seconds": 210})
+        agent.create_execution("long_task", limits={"max_model_requests": 10, "max_seconds": None})
         .input({
             "request": "Recommend an approach for an internal daily CSV report; provide a decision, not implementation.",
             "constraints": ["Raw records must remain inside the company network.", "No real deployment is requested."],

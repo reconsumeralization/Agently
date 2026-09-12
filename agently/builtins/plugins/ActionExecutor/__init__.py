@@ -1,6 +1,7 @@
 from .LocalFunctionActionExecutor import LocalFunctionActionExecutor
 from .MCPActionExecutor import MCPActionExecutor
 from .BashSandboxActionExecutor import BashSandboxActionExecutor
+from .ShellActionExecutor import ShellActionExecutor
 from .SearchActionExecutor import SearchActionExecutor
 from .BrowseActionExecutor import BrowseActionExecutor
 from .CodeExecutionActionExecutor import CodeExecutionActionExecutor

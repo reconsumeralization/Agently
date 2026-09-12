@@ -102,10 +102,7 @@ async def run_quick_prompt(agent: Any) -> tuple[dict[str, Any], AgentExecutionMe
 
 
 async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionMeta, list[str]]:
-    workspace = getattr(agent, "workspace", None)
-    if workspace is None:
-        raise RuntimeError("TaskWorkspace is required for task-loop strategy examples.")
-    await workspace.put(
+    await agent.record_store.put(
         content=ACCOUNT_SIGNAL,
         collection="observations",
         kind="account_signal",
@@ -129,8 +126,8 @@ async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionM
             ],
             task_workspace=RUNTIME_ROOT,
             max_iterations=2,
-            limits={"max_model_requests": 8, "max_seconds": 240, "max_no_progress_seconds": 120},
-            options={"agent_task": {"stream_snapshots": True, "request_timeout_seconds": 90}},
+            limits={"max_model_requests": 8, "max_seconds": None, "max_no_progress_seconds": None},
+            options={"agent_task": {"stream_snapshots": True}},
         )
         .input({"account_signal": ACCOUNT_SIGNAL})
     )
@@ -151,6 +148,7 @@ async def main() -> None:
         shutil.rmtree(RUNTIME_ROOT)
 
     agent = Agently.create_agent("unified-agent-execution-result").use_task_workspace(RUNTIME_ROOT)
+    agent.use_record_store(RUNTIME_ROOT / "records", mode="read_write")
     agent.define(
         prompt={
             "rule": (

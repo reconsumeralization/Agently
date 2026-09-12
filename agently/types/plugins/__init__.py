@@ -21,6 +21,7 @@ from .ContextSource import (
 )
 from .ActionFlow import ActionFlow, ActionFlowObservationHandler
 from .ActionExecutor import ActionExecutor as ActionExecutor
+from .ShellResource import ShellResource as ShellResource
 from .ExecutionResourceProvider import (
     CodeExecutionResource as CodeExecutionResource,
     ExecutionResourceProvider as ExecutionResourceProvider,

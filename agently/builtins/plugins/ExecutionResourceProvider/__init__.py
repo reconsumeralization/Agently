@@ -1,5 +1,6 @@
 from .ACPExecutionResourceProvider import ACPExecutionResourceProvider
 from .BashExecutionResourceProvider import BashExecutionResourceProvider
+from .ShellProvider import ShellProvider
 from .MCPExecutionResourceProvider import MCPExecutionResourceProvider
 from .DockerExecutionResourceProvider import DockerExecutionResourceProvider
 from .GVisorDockerExecutionResourceProvider import GVisorDockerExecutionResourceProvider

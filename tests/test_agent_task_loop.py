@@ -22525,8 +22525,23 @@ async def test_agent_task_resume_without_snapshot_raises(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
+async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path, monkeypatch):
     """ISSUE-010: max_seconds is a task wall-clock deadline across task stages."""
+    # Hold the owner clock during context setup, then leave a real 200ms
+    # deadline at the plan boundary. Machine load must not choose the stage.
+    wall_origin, monotonic_origin = time.time(), time.monotonic()
+    elapsed = 0.0
+    budget = 30.0
+    clock = SimpleNamespace(
+        time=lambda: wall_origin + elapsed,
+        monotonic=lambda: monotonic_origin + elapsed,
+    )
+    for module_name in (
+        "agently.core.application.AgentExecution.Context",
+        "agently.builtins.plugins.AgentExecution.modules.limits",
+        "agently.builtins.plugins.AgentExecution.long_task.RuntimeControl",
+    ):
+        monkeypatch.setattr(importlib.import_module(module_name), "time", clock)
     agent = _create_agent("agent-task-deadline").use_task_workspace(tmp_path / "task-workspace")
     task = agent.create_task(
         task_id="deadline",
@@ -22535,23 +22550,33 @@ async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
         task_workspace=tmp_path / "task-workspace",
         execution="flat",
         max_iterations=3,
-        limits={"max_seconds": 0.2},
+        limits={"max_seconds": budget},
     )
 
-    async def slow_request_plan(_iteration_index, _context_pack):
-        await asyncio.sleep(0.6)
-        return {
-            "step_instruction": "repair the script",
-            "expected_evidence": "script execution succeeds",
-            "rationale": "the task should not reach this plan after the deadline",
-        }
+    started, settled = asyncio.Event(), asyncio.Event()
+    remaining_at_plan = []
+
+    async def pending_plan():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            settled.set()
+
+    def slow_request_plan(_iteration_index, _context_pack):
+        nonlocal elapsed
+        elapsed = budget - 0.2
+        remaining_at_plan.append(cast(AgentTask, task.task_record)._task_deadline_remaining())
+        return pending_plan()
 
     cast(Any, task)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
 
-    result = await task.async_run()
+    result = await asyncio.wait_for(task.async_run(), timeout=5)
     assert result["status"] == "timed_out"
     assert task.status == "timed_out"
     assert "plan stage" in result["reason"]
+    assert remaining_at_plan == [pytest.approx(0.2)]
+    assert started.is_set() and settled.is_set()
 
 
 def test_action_final_status_exempts_recovered_actions():

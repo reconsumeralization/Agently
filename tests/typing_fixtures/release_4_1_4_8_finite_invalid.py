@@ -14,3 +14,6 @@ agent.register_action(
     func=sample_action,
     concurrency_mode="serial",
 )
+agent.enable_shell(environment="unrestricted")
+agent.enable_shell(approval="sometimes")
+agent.enable_shell(shell="cmd")

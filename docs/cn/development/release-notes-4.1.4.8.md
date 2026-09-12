@@ -88,7 +88,7 @@ IDE 会为 `create_execution`、`effort`、`strategy`、`planning_protocol` 和 
 | 长文与续写 | `long_content` 负责结构长文生产；`LongContent` 字段独立生成后填回结构；`auto_continue` 只接续未完成的请求。 | 长字段使用 `(LongContent, "写作要求")`；按需启用 `.auto_continue()`。 | 兼容 `"long_content"` 类型表达和旧 `.ensure_long_output()`；不强制触发续写。 | `examples/basic/auto_continue.py`、`examples/agent_auto_orchestration/29_field_long_content_ollama.py`、续写/输出控制测试。 |
 | 执行控制 | 安全边界暂停/恢复、保存/加载与同对象 revision 返工；旧 reader 保留原结果。 | 使用 execution 的 `pause/resume/save/load/rework` 及异步对应方法，先检查 `control_capabilities`。 | 不承诺恢复活跃 provider、活动子执行或完整嵌套预算。 | 统一执行控制、生命周期/返工/快照及安装后 typing 测试。 |
 | 音频 | 独立 `AudioModelRequest` 提供 TTS/STT，Agent 显式挂载；四种组合流区分连续 PCM、独立音频段、转录块和文字句末。 | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`；流使用 `async with`。 | 不复用文本 Prompt；不隐式录音/播放；内置驱动尚无原生实时 STT 输入。 | [音频用法](../models/audio.md)、`examples/audio/tts_stt_roundtrip.py`、`examples/audio/continuous_audio.py`、音频测试。 |
-| Shell（未完成范围） | 原生进程核心与 Cmd 反向委托已实现；三档环境、四档审批及通用 Agent 新入口仍未完成。 | 当前旧 Cmd/enable_shell 仍保留 argv 语义，不把它当作完整 Bash/PowerShell 脚本接口。 | **待完成，不是已支持能力**；本轮 Windows 测试环境为 CrossOver，不代表原生隔离已验证。 | Shell/Cmd 生命周期测试；完整功能验收仍开放。 |
+| [Shell](../actions/shell.md) | `enable_shell` 提供三档环境、四档审批及通用脚本 Action；Cmd 反向委托共享进程核心。 | 显式旧 `commands`/`sandbox` 保留 argv 语义；新脚本入口使用 `command`/`workdir`。 | 默认 offline/all；Docker 与 Windows Sandbox 缺能力均拒绝，不回退 host；原生 Windows 隔离待用户实测。 | Shell/Cmd 回归、Docker 组合和 CrossOver 实跑；最终发布组合检查另行完成。 |
 
 Windows：本轮开发测试使用 CrossOver；已有 Windows Python 3.14.7 与 PowerShell 7.6.6
 的基础探针证据，不是原生 Windows 全场景测试。请 Windows 使用者在自己的环境测试和反馈；
@@ -135,6 +135,8 @@ Flat 中没有终态候选、产物或既存修复的普通成功命令观察现
 
 ## 本版补齐的 Examples
 
+- `22_unified_agent_execution_result.py`：业务观察写入 `RecordStore`，文件仍由
+  `TaskWorkspace` 持有。22、28 的长任务示例不再预设固定总时限，保留请求与迭代预算。
 - `25_agent_execution_delivery_review_ollama.py`：真实本地 Qwen 生成、模型 review、
   blocking handler review 与物理 artifact readback。
 - `26_plan_execution_interaction_ollama.py`：一次 connected clarification exchange、

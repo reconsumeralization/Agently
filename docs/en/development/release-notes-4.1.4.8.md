@@ -91,7 +91,7 @@ recognition, without requiring separate stubs or suppressed missing-type warning
 | Long content and continuation | `long_content` produces structured long prose; `LongContent` fields are generated separately and filled back into the structure; `auto_continue` only continues unfinished requests. | Declare `(LongContent, "writing requirements")`; enable `.auto_continue()` when needed. | The `"long_content"` type spelling and `.ensure_long_output()` alias remain compatible; continuation need not trigger. | `examples/basic/auto_continue.py`, `examples/agent_auto_orchestration/29_field_long_content_ollama.py`, continuation/output-control tests. |
 | Execution controls | Safe-boundary pause/resume and save/load, plus same-object revision rework with retained earlier readers. | Use execution `pause/resume/save/load/rework` and async equivalents; inspect `control_capabilities` first. | Active provider/child snapshots and complete nested-budget recovery are not promised. | Unified control documentation, lifecycle/rework/snapshot tests, installed typing. |
 | Audio | Independent `AudioModelRequest` provides TTS/STT with explicit Agent binding; four composed streams distinguish continuous PCM, independent speech segments, transcript blocks and textual sentence endings. | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`; consume streams with `async with`. | No text Prompt reuse or implicit recording/playback; built-in native realtime STT input is not implemented. | [Audio usage](../models/audio.md), `examples/audio/tts_stt_roundtrip.py`, `examples/audio/continuous_audio.py`, audio tests. |
-| Shell (unfinished scope) | Native process core and reverse Cmd delegation are implemented; three environment profiles, four approval presets and the new general Agent entry are not complete. | Existing Cmd/enable_shell retains argv semantics; do not treat it as a general Bash/PowerShell script interface. | **Pending, not a supported capability**; this round uses CrossOver for Windows testing, not proof of native isolation. | Shell/Cmd lifecycle tests; complete feature acceptance remains open. |
+| [Shell](../actions/shell.md) | `enable_shell` exposes three environments, four approval presets and general script execution; Cmd delegates to the shared process core. | Explicit legacy `commands`/`sandbox` retains argv semantics; general scripts use `command`/`workdir`. | Defaults to offline/all; missing Docker or Windows Sandbox fails without host fallback. Native Windows isolation needs user testing. | Shell/Cmd regression, Docker combinations and CrossOver runs; final release-combination checks remain separate. |
 
 Windows: development testing for this release uses CrossOver. Existing basic probes cover
 Windows Python 3.14.7 and PowerShell 7.6.6, not all scenarios on native Windows.
@@ -155,6 +155,9 @@ still undergoes verification; outer `review` / `validate` are unchanged.
 
 ## Examples Added For This Release
 
+- `22_unified_agent_execution_result.py` stores observations in `RecordStore`,
+  while `TaskWorkspace` owns files. Long-task examples 22 and 28 retain request
+  and iteration budgets without a fixed total wall-clock limit.
 - `examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py`
   proves real local-Qwen generation, model-backed review, required blocking handler
   review, and physical artifact readback.

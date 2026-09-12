@@ -74,6 +74,7 @@ Browser、SQLite action 可以声明自己的 requirement，Action dispatcher �
 | Kind | 使用方 | 托管资源 |
 |---|---|---|
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
+| `shell` | 新 `agent.enable_shell(environment=..., approval=...)` | [通用 Bash/PowerShell](shell.md)、隔离环境与进程树 |
 | `bash` | `sandbox="trusted_local"` shell actions | 配置后的本地命令 runner |
 | `docker` | 隔离 shell actions、direct Docker Actions，以及一个 `code_execution` provider 候选 | Docker CLI runner 与镜像 provisioning |
 | `code_execution` | `agent.enable_python(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 与 `agent.enable_skill_script_exec(...)` 为当前 execution 启用的受限 Action | provider-neutral、Workspace-bound 执行；内置包括 Docker、可选的 gVisor/runsc、可选的 macOS Seatbelt、可选的 Linux Landlock 与显式无防护 `trusted_local` fallback |

@@ -16,6 +16,8 @@ from agently_stage import default_stage_call_bridge
 
 import asyncio
 import contextlib
+import math
+import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -30,6 +32,7 @@ from agently.core.runtime.RuntimeContext import (
 )
 from agently.utils import DeprecationWarnings
 from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
+from agently.types.data.shell import ShellApproval, ShellEnvironment, ShellLanguage, ShellRiskHandler
 
 if TYPE_CHECKING:
     from agently.core import Prompt, TaskWorkspace
@@ -488,25 +491,134 @@ class ActionExtension(BaseAgent):
         *,
         root: str | Path | None = None,
         commands: list[str] | None = None,
-        action_id: str = "run_bash",
+        action_id: str | None = None,
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
         expose_to_model: bool = True,
         timeout: int = 20,
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
-        sandbox: CodeSandboxMode = "auto",
+        sandbox: CodeSandboxMode | None = None,
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
         dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
         provisioning_profile: ProvisioningProfileMode = "strict",
         image_pull_policy: ImagePullPolicyMode | None = None,
+        environment: ShellEnvironment | None = None,
+        approval: ShellApproval = "all",
+        shell: ShellLanguage | None = None,
+        binary: str | None = None,
+        read_paths: Mapping[str, str | Path] | None = None,
+        max_output_bytes: int = 20000,
+        deny: Sequence[str] = (),
+        risk_handler: ShellRiskHandler | None = None,
     ) -> Self:
+        """Expose general Shell source with explicit environment and approval.
+
+        Defaults to offline isolation and approval for every call. Windows uses
+        PowerShell; other hosts use Bash. ``host`` has no filesystem/network
+        sandbox. ``read_paths`` maps resource aliases to host-selected read-only
+        directories (e.g. an entire Skill package, without per-script Actions).
+        Selective write/delete approval uses advisory risk analysis, not a hard
+        sandbox. Missing providers never fall back to host execution.
+
+        Explicit legacy ``commands``/``sandbox`` retains the old argv contract;
+        do not mix it with the new Shell policy parameters.
+        """
         task_workspace = getattr(self, "task_workspace", None)
         if root is None and task_workspace is not None:
             root = getattr(task_workspace, "root", None)
         root_path = Path(root).expanduser().resolve() if root is not None else None
+        if commands is None and sandbox is None:
+            if root_path is None or not root_path.is_dir():
+                raise ValueError("Shell requires an existing root or bound TaskWorkspace")
+            environment = environment or "offline"
+            shell = shell or ("powershell" if os.name == "nt" else "bash")
+            if environment not in {"offline", "online", "host"} or approval not in {"all", "write", "delete", "none"}:
+                raise ValueError("Invalid Shell environment or approval mode")
+            if shell not in {"bash", "powershell"}:
+                raise ValueError("shell must be 'bash' or 'powershell'")
+            if (
+                isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0
+                or isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes <= 0
+            ):
+                raise ValueError("Shell timeout and output byte limit must be positive")
+            if docker_default_args or dependency_policy is not None or max_output_chars != 20000:
+                raise ValueError("General Shell does not accept legacy Docker arguments or dependency_policy")
+            read_only = task_workspace is not None and root_path == Path(str(task_workspace.root)).resolve() and task_workspace.mode == "read_only"
+            if read_only and environment == "host":
+                raise ValueError("Host Shell cannot enforce a read-only TaskWorkspace; select isolation or grant read_write")
+            paths: dict[str, str] = {}
+            for alias, path in (read_paths or {}).items():
+                if not isinstance(alias, str) or not alias.isidentifier():
+                    raise ValueError("Shell read_paths aliases must be identifiers")
+                resolved = Path(path).expanduser().resolve(strict=True)
+                if not resolved.is_dir() or resolved == Path(resolved.anchor):
+                    raise ValueError("Shell read_paths requires bounded directories, not a filesystem root")
+                paths[alias] = str(resolved)
+            forbidden = ("\n", "\r", "%") if os.name == "nt" else (":", "\n", "\r")
+            if environment != "host" and any(char in path for path in [str(root_path), *paths.values()] for char in forbidden):
+                raise ValueError("Shell mount paths contain unsupported platform mount characters")
+            if any(not isinstance(rule, str) or not rule for rule in deny):
+                raise ValueError("Shell deny rules must be non-empty strings")
+            if isinstance(deny, str):
+                raise ValueError("Shell deny must be a sequence of rules, not a string")
+            if binary is not None and (not isinstance(binary, str) or not binary or "\0" in binary):
+                raise ValueError("Shell binary must be a non-empty NUL-free string")
+            if root_path == Path(root_path.anchor):
+                raise ValueError("Shell root cannot be a filesystem root")
+            config = {
+                "root": str(root_path), "shell": shell, "environment": environment,
+                "binary": binary or ("powershell.exe" if os.name == "nt" and shell == "powershell" else "pwsh" if shell == "powershell" else "bash"),
+                "env": dict(env or {}), "timeout": timeout, "max_output_bytes": max_output_bytes,
+                "read_paths": paths, "read_only": read_only, "docker_image": docker_image,
+                "docker_binary": docker_binary, "provisioning_profile": provisioning_profile,
+                "image_pull_policy": image_pull_policy,
+            }
+            executor = self.action._create_executor("ShellActionExecutor",
+                config=config, approval=approval, deny=tuple(deny),
+                request_factory=self.create_temp_request, risk_handler=risk_handler,
+            )
+            action_id = action_id or "run_shell"
+            from agently.builtins.plugins.ExecutionResourceProvider._windows_sandbox import sandbox_paths
+            visible_root, visible_paths = sandbox_paths(config)
+            default_desc = (
+                f"Run one {shell} script in environment={environment}. "
+                f"Starting root: {visible_root}. "
+                f"Resource paths: {visible_paths}. "
+                "Pipes, redirection and multiline source use the selected interpreter's syntax. "
+                "No interactive input, persistent sessions or detached background work. "
+                "Return bounded stdout/stderr, exit code and truncation facts. "
+                + ("Host mode is NOT sandboxed; cwd does not constrain command effects." if environment == "host" else "Only host-authorized paths are mounted.")
+            )
+            self.action.register_action(
+                action_id=action_id, desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+                kwargs={"command": (str, "Complete source for the selected Shell."), "workdir": (str, "Starting directory under the stated root; defaults to '.'.")},
+                required_input_keys=["command"], executor=executor,
+                tags=[f"agent-{self.name}"], expose_to_model=expose_to_model,
+                side_effect_level="exec", replay_safe=False, sandbox_required=environment != "host",
+                execution_resources=[{
+                    "requirement_id": f"shell:{action_id}", "kind": "shell", "scope": "action_call",
+                    "resource_key": action_id, "config": config,
+                    "required_capabilities": {"shell": shell, **({"isolation": {
+                        "process_contained": True, "host_filesystem_restricted": True,
+                        "network_mode": "disabled" if environment == "offline" else "enabled",
+                    }} if environment != "host" else {})},
+                }],
+                meta={"_host_approval_required_when": lambda call: executor.needs_approval(call)},
+            )
+            return self
+        if environment is not None or approval != "all" or shell is not None or binary is not None or read_paths or deny or risk_handler is not None or max_output_bytes != 20000:
+            raise ValueError("Do not mix legacy argv commands/sandbox with general Shell configuration")
+        DeprecationWarnings.warn_deprecated_once(
+            "enable_shell.argv",
+            "enable_shell(commands=.../sandbox=...) is the legacy argv interface. "
+            "For general Shell source, select environment= and approval= without legacy parameters; "
+            "the default Action becomes run_shell(command=..., workdir=...). Legacy cleanup is planned for 4.2.",
+        )
+        action_id = action_id or "run_bash"
+        sandbox = sandbox or "auto"
         if (
             task_workspace is not None
             and root_path is not None

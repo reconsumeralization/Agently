@@ -30,6 +30,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.ActionRuntime import AgentlyActionRuntime
     from agently.builtins.plugins.ActionExecutor import (
         BashSandboxActionExecutor,
+        ShellActionExecutor,
         BrowseActionExecutor,
         CodeExecutionActionExecutor,
         DockerActionExecutor,
@@ -42,6 +43,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.ExecutionResourceProvider import (
         ACPExecutionResourceProvider,
         BashExecutionResourceProvider,
+        ShellProvider,
         BrowserExecutionResourceProvider,
         DockerExecutionResourceProvider,
         GVisorDockerExecutionResourceProvider,
@@ -58,6 +60,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionExecutor", LocalFunctionActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", MCPActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BashSandboxActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", ShellActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SearchActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BrowseActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", CodeExecutionActionExecutor, activate=False)
@@ -67,6 +70,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", MCPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BashExecutionResourceProvider, activate=False)
+    plugin_manager.register("ExecutionResourceProvider", ShellProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", DockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", GVisorDockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", LandlockExecutionResourceProvider, activate=False)

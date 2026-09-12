@@ -23,7 +23,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
           'bodies or changing selector signatures, budgets, Skill scope or permissions; complete resource roots also '
           'suppress already-read child delivery independent of selection order, without refunding read budgets; '
           'Cmd-backed local commands use non-blocking async subprocess waiting and settle owned processes on '
-          'timeout/cancellation (POSIX process groups, direct child elsewhere), preserving argv, policy, result '
+          'timeout/cancellation (POSIX process groups, Windows Job Objects), preserving argv, policy, result '
           'envelopes and full output artifacts; committed DeepSeek examples standardize their fallback on '
           'deepseek-v4-flash with thinking explicitly disabled, while environment overrides and intentional '
           'thinking-stream demonstrations remain supported; explicit model keys fail before provider dispatch when a '
@@ -50,6 +50,18 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
           'intact: TaskContext owns bounded disclosure, TaskWorkspace owns files and artifacts, RecordStore owns '
           'durable runtime state including opt-in record_store_recovery, and SkillLibrary owns immutable Skill '
           'revisions.',
+ 'shell_capability': {
+     'status': 'in_development',
+     'entry': 'Agent.enable_shell',
+     'language': ['bash', 'powershell'],
+     'environment': ['offline', 'online', 'host'],
+     'approval': ['all', 'write', 'delete', 'none'],
+     'defaults': {'environment': 'offline', 'approval': 'all', 'action_id': 'run_shell'},
+     'resource': 'shell / ShellResource',
+     'legacy': 'Explicit commands or sandbox retain argv semantics; Cmd delegates to Shell, for removal in 4.2.',
+     'soft_risk': 'Isolated ModelRequest or Host risk_handler; unknown/failed analysis requires approval. Not a security proof.',
+     'windows_evidence': 'CrossOver with Windows Python 3.14.7 and PowerShell 7.6.6; native Windows users should test and report issues.',
+     'native_windows_isolation': 'Windows Sandbox CLI backend; native VM isolation unverified, CrossOver controller tested. Missing capability fails closed without host fallback.'},
  'audio_capability': {'status': 'in_development',
                       'owner': 'AudioModelRequest',
                       'driver_protocol': 'AudioModelRequester',

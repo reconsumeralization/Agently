@@ -6,6 +6,9 @@ keywords: Agently, ExecutionResource, Action, TriggerFlow, sandbox, MCP, runtime
 
 # Execution Resource
 
+For general Bash/PowerShell source, see [Shell](shell.md):
+`agent.enable_shell(environment=..., approval=...)` uses the managed `shell` resource kind.
+
 > Languages: **English** · [中文](../../cn/actions/execution-environment.md)
 
 > Renamed in the 4.1.3.8 TaskWorkspace/ActionRuntime boundary refactor: the managed

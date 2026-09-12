@@ -17,6 +17,7 @@ from __future__ import annotations
 from agently_stage import default_stage_call_bridge
 
 import asyncio
+import copy
 import inspect
 import json
 import uuid
@@ -816,13 +817,21 @@ class ActionDispatcher:
         if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
             policy["policy_approval_handler"] = str(policy_approval_handler)
 
+        checked_policy = copy.deepcopy(self._merge_policy(execution_settings, spec, sanitized_override)) if getattr(executor, "recheck_policy", False) else None
+
         dynamic_approval_required = False
         spec_meta = spec.get("meta")
         approval_predicate = spec_meta.get("_host_approval_required_when") if isinstance(spec_meta, dict) else None
         if callable(approval_predicate):
-            predicate_result = approval_predicate(action_call)
-            if inspect.isawaitable(predicate_result):
-                predicate_result = await predicate_result
+            try:
+                predicate_result = approval_predicate(action_call)
+                if inspect.isawaitable(predicate_result):
+                    predicate_result = await predicate_result
+            except (ValueError, PermissionError) as error:
+                return self._execution_resource_error_result(
+                    spec=spec, action_call=action_call, status="blocked",
+                    error=str(error),
+                )
             if isinstance(predicate_result, dict):
                 dynamic_approval_required = bool(predicate_result.get("required"))
                 context = predicate_result.get("context")
@@ -1014,6 +1023,11 @@ class ActionDispatcher:
         execution_error_result: ActionResult | None = None
         output: Any = None
         try:
+            if checked_policy is not None and (
+                checked_policy != self._merge_policy(execution_settings, spec, sanitized_override)
+                or self.registry.get_executor(action_id) is not executor
+            ):
+                raise PermissionError("Action policy or registration changed during approval; submit a fresh call")
             with bind_runtime_context(action_policy=cast(dict[str, Any], dict(policy))):
                 if isinstance(timeout, (int, float)) and timeout > 0:
                     output = await asyncio.wait_for(

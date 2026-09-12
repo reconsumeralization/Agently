@@ -12,32 +12,18 @@ can compose this resource without depending on the legacy Cmd Action package.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import codecs
 import locale
-import os
-import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from ._bounded_process import run_bounded_process
+
 
 class Shell:
     """Shared native argv execution; no shell parsing or implicit working root."""
-
-    @staticmethod
-    def _kill(process: asyncio.subprocess.Process) -> None:
-        try:
-            if os.name == "posix":
-                # A finished parent can leave descendants holding its pipes.
-                os.killpg(process.pid, signal.SIGKILL)
-            elif process.returncode is None:
-                # Native Windows process-tree containment is a separate backend
-                # acceptance item. This preserves Cmd's existing parent cleanup.
-                process.kill()
-        except ProcessLookupError:
-            pass
 
     async def run_argv(
         self,
@@ -60,59 +46,20 @@ class Shell:
             raise ValueError("argv requires an executable and string arguments without NUL bytes")
         if encoding is not None:
             codecs.lookup(encoding)
-        spawn = asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(workdir),
-                env=dict(env) if env is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
+            b"".decode(encoding)
+        result = await run_bounded_process(
+            args, cwd=str(workdir), env=env, timeout=timeout,
+            max_output_bytes=None, stdin=None,
         )
-        output: asyncio.Task[tuple[bytes, bytes]] | None = None
-
-        async def stop() -> None:
-            process = await spawn
-            self._kill(process)
-            if output is None:
-                await process.communicate()
-            else:
-                await output
-            await process.wait()
-
-        timed_out = False
-        try:
-            # Shield creation too: cancellation must not lose a just-created
-            # process whose handle has not yet reached this coroutine.
-            process = await asyncio.shield(spawn)
-            output = asyncio.create_task(process.communicate())
-            try:
-                stdout, stderr = await asyncio.wait_for(asyncio.shield(output), timeout=timeout)
-            except asyncio.TimeoutError:
-                timed_out = True
-                self._kill(process)
-                stdout, stderr = await asyncio.shield(output)
-        except BaseException:
-            cleanup = asyncio.create_task(stop())
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    # Repeated cancellation must not abandon owned cleanup.
-                    continue
-            cleanup.result()
-            raise
-        if timed_out:
+        if result.timed_out:
             assert timeout is not None
-            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
-        assert process.returncode is not None
+            raise subprocess.TimeoutExpired(args, timeout, output=result.stdout, stderr=result.stderr)
         output_encoding = encoding if encoding is not None else locale.getpreferredencoding(False)
 
         def text(value: bytes) -> str:
             return value.decode(output_encoding).replace("\r\n", "\n").replace("\r", "\n")
 
-        return subprocess.CompletedProcess(args, process.returncode, text(stdout), text(stderr))
+        return subprocess.CompletedProcess(args, result.returncode, text(result.stdout), text(result.stderr))
 
     @staticmethod
     def _check(command: str) -> None:
@@ -128,6 +75,11 @@ class BashExecutor(Shell):
     def __init__(self, binary: str = "bash") -> None:
         self.binary = binary
 
+    def prepare(self, command: str) -> list[str]:
+        """Validate source and produce literal interpreter argv, without executing."""
+        self._check(command)
+        return [self.binary, "--noprofile", "--norc", "-c", command]
+
     async def run(
         self,
         command: str,
@@ -136,11 +88,10 @@ class BashExecutor(Shell):
         timeout: float | None,
         env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        self._check(command)
         # The source is one argv item. Do not split it or concatenate it into
         # an outer shell command. Bash owns pipes, quoting and exit semantics.
         return await self.run_argv(
-            [self.binary, "--noprofile", "--norc", "-c", command],
+            self.prepare(command),
             workdir=workdir,
             timeout=timeout,
             env=env,
@@ -154,14 +105,8 @@ class PowerShellExecutor(Shell):
         # Host code can explicitly select pwsh. No interpreter fallback.
         self.binary = binary
 
-    async def run(
-        self,
-        command: str,
-        *,
-        workdir: Path,
-        timeout: float | None,
-        env: Mapping[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    def prepare(self, command: str) -> list[str]:
+        """Build the Unicode PowerShell transport without executing source."""
         self._check(command)
         # Configure only this child process. Compile user source separately so
         # leading param/using statements remain valid, without shell interpolation.
@@ -190,8 +135,18 @@ class PowerShellExecutor(Shell):
         if len(source) > 16384:
             raise ValueError("PowerShell command exceeds 16384 UTF-16LE bytes")
         encoded = base64.b64encode(source).decode("ascii")
+        return [self.binary, "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", encoded]
+
+    async def run(
+        self,
+        command: str,
+        *,
+        workdir: Path,
+        timeout: float | None,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return await self.run_argv(
-            [self.binary, "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", encoded],
+            self.prepare(command),
             workdir=workdir,
             timeout=timeout,
             env=env,

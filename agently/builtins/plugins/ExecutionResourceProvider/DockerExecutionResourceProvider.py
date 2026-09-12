@@ -971,7 +971,7 @@ class DockerExecutionResource:
         profile: dict[str, Any] | None = None,
         workdir: str = "/sandbox",
         env: dict[str, str] | None = None,
-        timeout: int | None = None,
+        timeout: float | None = None,
         extra_mounts: list[str] | None = None,
         binding_bridge: CodeExecutionBindingBridge | None = None,
     ) -> dict[str, Any]:

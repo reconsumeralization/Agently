@@ -34,6 +34,11 @@ class AVOID_COPY:
 EMPTY = AVOID_COPY()
 
 from .output import LongContent
+from .shell import (
+    ShellLanguage as ShellLanguage, ShellEnvironment as ShellEnvironment,
+    ShellApproval as ShellApproval, ShellEffect as ShellEffect,
+    ShellRisk as ShellRisk, ShellRiskHandler as ShellRiskHandler, ShellResult as ShellResult,
+)
 
 from .context import (
     ContextBlock,

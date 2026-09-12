@@ -46,6 +46,11 @@ Example groups:
   - `3_5_action_execution_recall_local.py`
   - `3_6_action_input_safety_local.py`
   - `3_7_action_evidence_refs_local.py`
+  - `3_8_general_shell_model.py` runs a real model with one general Shell Action
+    and a read-only Skill resource mount, then reports the script's fresh token.
+    Set `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; the checked local
+    defaults are oMLX/Qwen3.8-27B-4bit. The default environment is offline Docker;
+    `SHELL_ENVIRONMENT=host` is an explicit unisolated opt-in.
 - Plugin customization examples
   - `4_1_custom_action_executor_plugin_local.py`
   - `4_2_custom_action_runtime_plugin_local.py`

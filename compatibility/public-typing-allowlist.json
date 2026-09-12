@@ -6,6 +6,10 @@
   },
   "public_surfaces": [
     {
+      "symbol": "agently.types.plugins.ShellResource.ShellResource",
+      "scan": "declared_public_callables"
+    },
+    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution",
       "scan": "declared_public_callables"
     },

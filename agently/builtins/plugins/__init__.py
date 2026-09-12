@@ -15,6 +15,7 @@
 from .ActionFlow import TriggerFlowActionFlow
 from .ActionExecutor import (
     BashSandboxActionExecutor,
+    ShellActionExecutor,
     CodeExecutionActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
@@ -24,6 +25,7 @@ from .ActionRuntime import AgentlyActionRuntime
 from .ExecutionResourceProvider import (
     ACPExecutionResourceProvider,
     BashExecutionResourceProvider,
+    ShellProvider,
     GVisorDockerExecutionResourceProvider,
     LandlockExecutionResourceProvider,
     SeatbeltExecutionResourceProvider,
