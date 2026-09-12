@@ -559,13 +559,34 @@ async def test_expired_goal_preparation_dispatches_nothing(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["deadline", "cancel"])
-async def test_goal_preparation_stops_and_joins_before_terminal(tmp_path, monkeypatch, stop):
+@pytest.mark.parametrize("dispatch_delay", [0, 0.2])
+async def test_goal_preparation_stops_and_joins_before_terminal(tmp_path, monkeypatch, stop, dispatch_delay):
+    from importlib import import_module
+    from types import SimpleNamespace
+
     from agently.core.application.AgentExecution import RuntimeStageStallError
 
     started = asyncio.Event()
     settled = asyncio.Event()
+    origin = time.monotonic()
+    dispatched_at = None
+
+    def monotonic():
+        return origin if dispatched_at is None else origin + time.monotonic() - dispatched_at
+
+    # This test owns in-flight cancellation, not startup timing. Begin its
+    # logical clock at provider dispatch, then let the real timer expire.
+    clock = SimpleNamespace(monotonic=monotonic)
+    for module_name in (
+        "agently.core.application.AgentExecution.Context",
+        "agently.builtins.plugins.AgentExecution.modules.limits",
+    ):
+        monkeypatch.setattr(import_module(module_name), "time", clock)
 
     async def pending_model(self, request_data):
+        nonlocal dispatched_at
+        await asyncio.sleep(dispatch_delay)
+        dispatched_at = time.monotonic()
         ScriptedExecutionRequester.model_dispatches += 1
         started.set()
         try:
@@ -584,29 +605,55 @@ async def test_goal_preparation_stops_and_joins_before_terminal(tmp_path, monkey
     policies = []
     execution.validate(lambda result, context: policies.append(result) or True)
     work = asyncio.create_task(execution.async_get_data())
-    await asyncio.wait_for(started.wait(), timeout=1)
-    if stop == "cancel":
-        work.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await work
-    else:
-        with pytest.raises(RuntimeStageStallError) as caught:
-            await asyncio.wait_for(work, timeout=1)
-        assert caught.value.status == "timed_out"
-    assert settled.is_set()
-    assert execution.task_record is None
-    assert policies == []
-    assert ScriptedExecutionRequester.model_dispatches == 1
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if stop == "cancel":
+            work.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await work
+        else:
+            with pytest.raises(RuntimeStageStallError) as caught:
+                await asyncio.wait_for(work, timeout=2)
+            assert caught.value.status == "timed_out"
+        assert settled.is_set()
+        assert execution.task_record is None
+        assert policies == []
+        assert ScriptedExecutionRequester.model_dispatches == 1
+    finally:
+        if not work.done():
+            work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_preparation_and_task_share_absolute_execution_deadline(tmp_path, monkeypatch):
+    from importlib import import_module
+    from inspect import CORO_CLOSED, getcoroutinestate
+    from types import SimpleNamespace
+
     from agently.builtins.plugins.AgentExecution.long_task import AgentTask
+
+    # Advance only the owners' logical clocks. Global time and asyncio's clock
+    # stay real; a busy host cannot consume this test's budget before handoff.
+    monotonic_origin, wall_origin = time.monotonic(), time.time()
+    logical_elapsed = 0.0
+    budget, preparation_elapsed = 30.0, 10.0
+    clock = SimpleNamespace(
+        monotonic=lambda: monotonic_origin + logical_elapsed,
+        time=lambda: wall_origin + logical_elapsed,
+    )
+    for module_name in (
+        "agently.core.application.AgentExecution.Context",
+        "agently.builtins.plugins.AgentExecution.modules.limits",
+        "agently.builtins.plugins.AgentExecution.long_task.RuntimeControl",
+    ):
+        monkeypatch.setattr(import_module(module_name), "time", clock)
 
     original_request = ScriptedExecutionRequester.request_model
 
     async def delayed_preparation(self, request_data):
-        await asyncio.sleep(0.08)
+        nonlocal logical_elapsed
+        logical_elapsed = preparation_elapsed
         async for item in original_request(self, request_data):
             yield item
 
@@ -616,17 +663,30 @@ async def test_preparation_and_task_share_absolute_execution_deadline(tmp_path, 
         "success_criteria": ["Return the requested report"], "missing_information": [],
     }])
     execution = cast(AgentExecution, agent.create_execution(
-        "long_task", limits={"max_seconds": 0.25, "max_no_progress_seconds": 5},
+        "long_task", limits={"max_seconds": budget},
     ).input("Write a report.").strategy("flat"))
     observed = []
+    plan_coroutines = []
+    planner_started = False
 
-    async def pending_plan(iteration_index, context_pack):
-        task = cast(AgentTask, execution.task_record)
-        elapsed = time.monotonic() - execution.execution_context.started_at
-        observed.append((elapsed, task._task_deadline_remaining()))
+    async def pending_plan():
+        nonlocal planner_started
+        planner_started = True
         await asyncio.Event().wait()
 
-    execution._agent_task_step_overrides = {"_request_plan": pending_plan}
+    def prepare_plan(iteration_index, context_pack):
+        nonlocal logical_elapsed
+        task = cast(AgentTask, execution.task_record)
+        elapsed = clock.monotonic() - execution.execution_context.started_at
+        observed.append((elapsed, task._task_deadline_remaining()))
+        # Expire at the actual Flat plan dispatch boundary. The real guard must
+        # close the unstarted coroutine, not dispatch a new planner request.
+        logical_elapsed = budget
+        plan_coro = pending_plan()
+        plan_coroutines.append(plan_coro)
+        return plan_coro
+
+    execution._agent_task_step_overrides = {"_request_plan": prepare_plan}
     result = await asyncio.wait_for(execution.async_get_full_data(), timeout=2)
 
     assert result["status"] == "timed_out"
@@ -635,14 +695,81 @@ async def test_preparation_and_task_share_absolute_execution_deadline(tmp_path, 
     assert execution.status == "timed_out"
     assert len(observed) == 1
     elapsed, remaining = observed[0]
-    assert elapsed >= 0.08
+    assert elapsed == pytest.approx(preparation_elapsed)
     assert remaining is not None
-    assert elapsed + remaining == pytest.approx(0.25, abs=0.02)
+    assert remaining == pytest.approx(budget - preparation_elapsed)
+    assert elapsed + remaining == pytest.approx(budget)
     task = cast(AgentTask, execution.task_record)
-    assert task._execution_deadline_monotonic == execution.execution_context.started_at + 0.25
-    assert task.limits["max_seconds"] == execution.limits["max_seconds"] == 0.25
+    assert task._execution_deadline_monotonic == execution.execution_context.started_at + budget
+    assert task.limits["max_seconds"] == execution.limits["max_seconds"] == budget
     assert "_execution_deadline_monotonic" not in task.options
     assert ScriptedExecutionRequester.model_dispatches == 1
+    assert planner_started is False
+    assert len(plan_coroutines) == 1
+    assert getcoroutinestate(plan_coroutines[0]) == CORO_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_task_plan_deadline_cancels_and_joins_pending_work(tmp_path, monkeypatch):
+    from importlib import import_module
+    from types import SimpleNamespace
+
+    from agently.builtins.plugins.AgentExecution.long_task import AgentTask
+    from agently.builtins.plugins.AgentExecution.long_task.TaskShared import _AgentTaskDeadlineExceeded
+
+    agent = create_execution_agent(tmp_path, "pending-plan-deadline", [])
+    task = AgentTask(
+        agent, goal="Clock fixture", success_criteria=["Clock invariant"],
+        limits={"max_seconds": 0.05},
+    )
+    monotonic_origin, wall_origin = time.monotonic(), time.time()
+    clock = SimpleNamespace(monotonic=lambda: monotonic_origin, time=lambda: wall_origin)
+    monkeypatch.setattr(
+        import_module("agently.builtins.plugins.AgentExecution.long_task.RuntimeControl"),
+        "time", clock,
+    )
+    task.started_at = wall_origin
+    task._execution_deadline_monotonic = monotonic_origin + 0.05
+    assert task._task_deadline_remaining() == pytest.approx(0.05)
+
+    started, cleanup_started, release_cleanup, settled = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    )
+
+    async def pending_plan():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            settled.set()
+
+    plan_work = asyncio.create_task(pending_plan())
+    deadline_work = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # Only the arithmetic clock is fixed; asyncio performs a real timed
+        # wait on already-running work and the owner must cancel and join it.
+        deadline_work = asyncio.create_task(task._await_task_deadline(plan_work, stage="plan"))
+        await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+        assert not deadline_work.done()
+        assert not settled.is_set()
+        release_cleanup.set()
+        with pytest.raises(_AgentTaskDeadlineExceeded) as caught:
+            await asyncio.wait_for(deadline_work, timeout=2)
+        assert caught.value.stage == "plan"
+        assert caught.value.limit_name == "max_seconds"
+        assert caught.value.timeout_seconds == 0.05
+        assert plan_work.done() and settled.is_set()
+        assert ScriptedExecutionRequester.model_dispatches == 0
+    finally:
+        release_cleanup.set()
+        owned_work = [plan_work] + ([deadline_work] if deadline_work is not None else [])
+        for work in owned_work:
+            if not work.done():
+                work.cancel()
+        await asyncio.gather(*owned_work, return_exceptions=True)
 
 
 @pytest.mark.parametrize("task_seconds,parent_seconds,expected", [
