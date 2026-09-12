@@ -17,8 +17,8 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
  'framework_version': '4.1.4.8',
  'release_train': '2026-09-4.1.4.8',
- 'released_at': None,
- 'notes': 'Release candidate for Agently 4.1.4.8; not yet published. 4.1.4.8 development target; default ContextReader '
+ 'released_at': '2026-09-13',
+ 'notes': 'Agently 4.1.4.8 release; default ContextReader '
           'resource selection receives current-read instruction content and completeness without preloading optional '
           'bodies or changing selector signatures, budgets, Skill scope or permissions; complete resource roots also '
           'suppress already-read child delivery independent of selection order, without refunding read budgets; '
