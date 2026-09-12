@@ -72,6 +72,8 @@ The built-in values for `create_execution`, `effort`, `strategy`,
 `planning_protocol`, and Action `concurrency_mode` are finite IDE suggestions.
 Plugin-extensible Execution and alternate orchestrator strategy names remain open
 where the public contract permits them.
+Bundled Execution plugin imports retain the installed package's `py.typed`
+recognition, without requiring separate stubs or suppressed missing-type warnings.
 
 ## Core Changes
 

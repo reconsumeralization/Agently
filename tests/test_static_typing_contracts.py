@@ -195,6 +195,14 @@ def test_programmatic_action_observation_types_are_explicitly_exported():
         assert_type(settled["peak_active_binding_calls"], int)
         assert_type(catalog["contract_bytes"], int)
 
+def test_bundled_plugins_retain_regular_typed_package_boundary() -> None:
+    """A namespace gap loses the installed root py.typed marker in Pyright."""
+    package = importlib.util.find_spec("agently.builtins")
+    assert package is not None and package.origin is not None
+    assert Path(package.origin).name == "__init__.py"
+    assert (Path(package.origin).parents[1] / "py.typed").is_file()
+
+
 def test_public_handler_type_aliases():
     if TYPE_CHECKING:
         from agently.builtins.plugins.AgentExecution import (

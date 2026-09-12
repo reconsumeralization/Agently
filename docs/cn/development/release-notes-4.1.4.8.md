@@ -69,6 +69,8 @@ Skills 采用同样的返回类型规则；Skill 注册与 exact-revision 绑定
 IDE 会为 `create_execution`、`effort`、`strategy`、`planning_protocol` 和 Action
 `concurrency_mode` 显示内置候选；公开合同允许扩展的位置仍接受插件 Execution 名或
 替代 orchestrator strategy 名。
+内置 Execution 插件导入现在保持安装包的 `py.typed` 标记识别，不需要为这些已注解模块
+另装 stub 或忽略缺失类型提示。
 
 ## 核心变动
 
