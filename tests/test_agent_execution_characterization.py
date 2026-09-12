@@ -57,6 +57,7 @@ def test_execution_matches_recovered_behavior(case: str, frozen: dict[str, Any],
     ("action_once", ["action_calls"], ["marker", "marker"]),
     ("provider_failure", ["outcome", "error", "type"], "ValueError"),
     ("artifact_review", ["artifacts", 0, "sha256"], "0" * 64),
+    ("artifact_review", ["artifacts", 0, "media_type"], "application/x-unapproved"),
     ("default_review_artifact", ["requests", 1, "prompt_text"], "Artifact body omitted"),
 ])
 def test_comparator_detects_unapproved_changes(

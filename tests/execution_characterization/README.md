@@ -28,6 +28,18 @@ every other Python/dependency/OS combination has identical representations.
 Unknown differences still fail: do not normalize away schema, MIME or Prompt
 fields, silently select a candidate-derived baseline, or skip failed cases.
 
+The isolated probe pins MIME lookup to `mimetypes.MimeTypes().guess_type`, using
+the interpreter's built-in table rather than the host OS MIME database. Both
+old and current source use this same environmental dependency. Artifact MIME
+fields remain exact, with a negative control for an unapproved MIME change.
+This does not change production MIME lookup or claim platform-independent
+production MIME defaults.
+The same immutable old commit was replayed twice on Python 3.10.21 and 3.14.7
+after this probe change; all 29 old observations stayed byte-equivalent after
+existing normalization, and both candidate runs matched their exact approved
+deltas. Only the probe hash provenance changed; baseline observations and
+approved delta ledgers were not refreshed.
+
 For a fresh old/current comparison, export the fixed commit into an empty
 temporary directory. No branch or worktree is needed. Substitute the actual
 temporary path printed by `mktemp`; do not reuse a working checkout as the export
