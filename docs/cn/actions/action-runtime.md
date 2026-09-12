@@ -126,6 +126,24 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 窄范围子集时才传显式 `tags=[...]`。托管执行环境 metadata 在这个可见 schema
 里会脱敏原始 `env` 值，但保留 env key；provider 只会在实际执行路径中拿到 raw env。
 
+模型调用范围由 Host 决定。没有显式 Execution 范围时使用 Agent 的默认
+Actions；Host 可以在 Execution 上显式选择其它已注册、允许向模型暴露的
+Actions。嵌套 Execution 的非空范围与祖先范围取交集，step scope 只能继续
+收窄。`execution.use_actions([])` 清除本级限制，不清除祖先限制；交集为空
+就是没有可用 Action，不能回退为全量。模型生成的 required ids 或 planner
+capability 列表不是新增授权，不能通过创建 child 给越界 Action 补注册或 tags。
+
+内置 ActionFlow 按该轮 Host 实际提供的 Action 集合核对整批调用，在审批、
+Action 执行和第三方 `execution_handler` 前拒绝越界批次，返回
+`action.scope.not_offered`，保留之前已完成的记录。Host 按真实产物引用动态
+提供的 `read_action_artifact` 保持可用，原 selection key / scope 校验仍生效。
+Programmatic transport 必须持有真实且未失效的 catalog，且其全部 Actions
+仍在该轮提供范围内；名称、协议标签或一个 revision 字符串本身不能授权。
+手工 Host retained catalog / custom planner 用法保留，不要求新增关联参数。
+默认 planner 未消费的 catalog 租约会在终结、异常或取消时释放，不影响
+其它 Host 租约；live pause 仍保留等待资源。公开 Host 直接 Action 调用不
+自动套用此模型调用范围检查，其原审批、资源和执行策略不变。
+
 默认 structured planner 收到的投影比这个公开检查 API 更小：只包含 `action_id`、
 描述、可调用 kwargs、required inputs，以及非默认的 approval/side-effect/concurrency
 约束。host-only 的 `execution_resources`、provider 配置、executor metadata 与空默认值

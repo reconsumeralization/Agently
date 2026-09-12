@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from agently.builtins.plugins.ActionExecutor.ProgrammaticActionExecutor import (
     ProgrammaticActionExecutor,
 )
 from agently.core.TaskWorkspace import TaskWorkspace
+from agently.core.runtime import bind_runtime_context
 from agently.core.operation.Action.ActionRegistry import ActionRegistry
 from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
 from agently.core.operation.Action.ActionProgram import (
@@ -817,3 +819,108 @@ async def test_programmatic_reserved_action_runs_through_triggerflow_action_flow
     assert records[0].get("action_id") == PROGRAMMATIC_ACTION_TRANSPORT_ID
     assert all(record.get("action_id") != "lookup_record" for record in records)
     assert agent.action.action_runtime.resolve_programmatic_catalog(catalog["catalog_revision"]) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+@pytest.mark.parametrize("outcome", [
+    "success", "success_extra", "cancel", "cancel_extra", "cancel_host_release", "exception", "mixed", "mixed_extra",
+])
+async def test_default_program_loop_settles_only_its_unconsumed_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flow_name: str, outcome: str,
+) -> None:
+    """Real planner/Flow/dispatcher, synthetic model and binding resource only."""
+
+    monkeypatch.chdir(tmp_path)
+    provider_id = f"ptc_scope_{flow_name}_{outcome}"
+    provider = _FlowBindingProvider(provider_id)
+    Agently.execution_resource.register_provider(cast(Any, provider))
+    agent = (Agently.create_agent()
+             .use_task_workspace(tmp_path / "files")
+             .use_record_store(tmp_path / "records", mode="read_write"))
+    agent.set_settings("code_execution.providers", [provider_id])
+    observed: list[str] = []
+
+    def lookup_record(record_id: str) -> dict[str, Any]:
+        observed.append(record_id)
+        return {"record_id": record_id}
+
+    agent.action.register_action(action_id="lookup_record", desc="Memory only.",
+        kwargs={"record_id": (str, "Known id.")}, func=lookup_record,
+        returns={"record_id": str}, replay_safe=True, tags=[f"agent-{agent.name}"])
+    parent = agent.create_execution(limits={"max_model_requests": 0}).use_actions("lookup_record")
+    runtime = agent.action.action_runtime
+    action_list = agent.action.get_action_list(tags=[f"agent-{agent.name}"])
+    unrelated = dict(build_programmatic_action_catalog(action_list, revision_seed="host-unrelated"))
+    foreign = dict(build_programmatic_action_catalog(action_list, revision_seed="foreign-loop"))
+    foreign["_planning_scope"] = {"run_id": "foreign-loop", "round_index": 0}
+    runtime._retain_programmatic_catalog(unrelated)
+    runtime._retain_programmatic_catalog(foreign)
+    revisions: list[str] = []
+    module = importlib.import_module("agently.builtins.plugins.ActionRuntime.AgentlyActionRuntime")
+
+    class Reader:
+        async def async_get_data(self):
+            return {"next_action": "execute", "description": "Read one memory record.",
+                    "program": "return await actions.lookup_record({'record_id': 'r1'})"}
+
+    monkeypatch.setattr(module, "_get_model_request_result", lambda *_args, **_kwargs: SimpleNamespace(result=Reader()))
+
+    async def planning(context, request):
+        decision = await runtime._default_programmatic_planning_handler(context, request)
+        revision = decision["action_calls"][0]["action_input"]["catalog_revision"]
+        revisions.append(revision)
+        if outcome.endswith("_extra"):
+            runtime._retain_programmatic_catalog(runtime.resolve_programmatic_catalog(revision))
+        if outcome == "cancel_host_release":
+            runtime._retain_programmatic_catalog(runtime.resolve_programmatic_catalog(revision))
+            runtime.release_programmatic_catalog(revision)
+        if outcome.startswith("mixed"):
+            decision["action_calls"].append({"action_id": "unoffered", "action_input": {}})
+        return decision
+
+    async def observe(event):
+        if event.get("kind") == "plan_ready":
+            if outcome.startswith("cancel"):
+                raise asyncio.CancelledError("Cancel after Host retain, before execute.")
+            if outcome == "exception":
+                raise RuntimeError("Observer failed after Host retain, before execute.")
+
+    try:
+        with bind_runtime_context(agent_execution_context=parent.execution_context, settings=agent.settings):
+            flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+            run = flow.async_run(action=agent.action, prompt=parent.request.prompt,
+                settings=agent.settings, action_list=agent._get_scoped_action_list(), agent_name=agent.name,
+                planning_handler=planning, execution_handler=runtime.resolve_execution_handler(None),
+                runtime_observation_handler=observe, max_rounds=1, planning_protocol="programmatic")
+            if outcome.startswith("cancel"):
+                with pytest.raises(asyncio.CancelledError):
+                    await run
+            elif outcome == "exception":
+                with pytest.raises(RuntimeError, match="Observer failed"):
+                    await run
+            else:
+                records = await run
+                if outcome.startswith("mixed"):
+                    assert records[0]["status"] == "blocked"
+                else:
+                    assert records[0]["success"] is True
+        # DAG currently plans once more before its round policy stops dispatch;
+        # the unused decision must be settled as well, without changing policy.
+        success = outcome.startswith("success")
+        assert len(revisions) == (2 if success and flow_name == "DAGActionFlow" else 1)
+        retained = runtime._programmatic_catalogs
+        for revision in revisions:
+            owned = retained.get(revision)
+            if outcome.endswith("_extra"):
+                assert owned and owned["leases"] == 1 and not owned["planning_lease"]
+            else:
+                assert owned is None
+        assert retained[unrelated["catalog_revision"]]["leases"] == 1
+        assert retained[foreign["catalog_revision"]]["leases"] == 1
+        assert observed == (["r1"] if success else [])
+        assert provider.ensure_count == provider.release_count == (1 if success else 0)
+        assert parent.execution_context.model_request_count == 0
+    finally:
+        for revision in [*revisions, unrelated["catalog_revision"], foreign["catalog_revision"]]:
+            runtime.release_programmatic_catalog(revision)

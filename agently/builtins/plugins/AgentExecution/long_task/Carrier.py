@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from agently.types.data import RunContext
+from agently.core.operation.Action.ActionMetadata import _scoped_action_list
 
 from .TaskShared import (
     AgentTaskMixinBase,
@@ -40,6 +41,16 @@ from .TaskShared import (
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _bounded_action_scope(self, allowed_action_ids: Sequence[str] = ()) -> set[str]:
+        """Keep model commands inside existing Host scope and visible Actions."""
+
+        return {
+            str(item.get("action_id") or item.get("name") or "").strip()
+            for item in _scoped_action_list(
+                self.agent.action, self.agent.name, allowed_action_ids=allowed_action_ids
+            )
+        }
+
     def _bounded_action_result_refs(
         self,
         records: Sequence[Mapping[str, Any]],
@@ -128,6 +139,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         raw_commands: Any,
         required_action_ids: Sequence[str],
         unit_label: str,
+        allowed_action_ids: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], tuple[str, str] | None]:
         """Validate model-authored Action commands against mounted contracts."""
 
@@ -142,6 +154,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
         has_action = getattr(registry, "has", None)
         get_spec = getattr(registry, "get_spec", None)
+        allowed = self._bounded_action_scope(allowed_action_ids)
         commands: list[dict[str, Any]] = []
         for index, raw_command in enumerate(raw_commands):
             if not isinstance(raw_command, Mapping):
@@ -155,6 +168,11 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 return [], (
                     "unknown_action",
                     f"{unit_label} action command references unavailable Action '{action_id}'.",
+                )
+            if action_id not in allowed:
+                return [], (
+                    "action_not_allowed",
+                    f"{unit_label} action command '{action_id}' is outside the visible execution scope.",
                 )
             if not isinstance(action_input, Mapping):
                 return [], (
@@ -264,6 +282,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         concurrency: int | None = None,
         iteration_index: int | None = None,
         project_flat_action_batch: bool = False,
+        allowed_action_ids: Sequence[str] = (),
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Validate one bounded command batch and dispatch it through ActionRuntime."""
 
@@ -281,6 +300,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             raw_commands=raw_commands,
             required_action_ids=required_action_ids,
             unit_label=unit_label,
+            allowed_action_ids=allowed_action_ids,
         )
         if validation_error is not None:
             return failure(*validation_error)
@@ -419,13 +439,20 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
     def _bounded_action_contracts(
         self,
         required_action_ids: Sequence[str],
+        *,
+        allowed_action_ids: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], str | None]:
         registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
         get_spec = getattr(registry, "get_spec", None)
         contracts: list[dict[str, Any]] = []
+        allowed = self._bounded_action_scope(allowed_action_ids)
         for action_id in self._normalize_string_list(required_action_ids):
+            if action_id not in allowed:
+                return [], action_id
             spec = get_spec(action_id) if callable(get_spec) else None
-            if not isinstance(spec, Mapping) or spec.get("expose_to_model", True) is not True:
+            # The Host projection already checked ordinary exposure and may
+            # explicitly offer its normally hidden artifact-recall capability.
+            if not isinstance(spec, Mapping):
                 return [], action_id
             contracts.append(
                 {

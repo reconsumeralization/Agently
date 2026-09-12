@@ -18,6 +18,7 @@ import json
 from typing import Any, TYPE_CHECKING
 
 from agently.utils import DataFormatter
+from agently.core.operation.Action.ActionMetadata import _scoped_action_list
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -44,21 +45,12 @@ class HybridRoutePlanner:
         if action is None:
             return []
         try:
-            candidates = list(action.get_action_list(tags=[f"agent-{ self.agent.name }"]))
+            return _scoped_action_list(
+                action, self.agent.name,
+                execution_context=getattr(self.execution, "execution_context", None),
+            )
         except Exception:
             return []
-        local_ids = set(getattr(self.execution, "local_action_ids", []) or [])
-        if local_ids:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if str(candidate.get("action_id") or candidate.get("name") or "") in local_ids
-            ]
-        execution_context = getattr(self.execution, "execution_context", None)
-        recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
-        if callable(recall_records):
-            candidates = action._with_action_artifact_recall_action(candidates, recall_records())
-        return candidates
 
     def skill_candidate_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {"model_decision": False, "required": False}

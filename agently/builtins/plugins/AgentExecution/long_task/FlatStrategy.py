@@ -1103,7 +1103,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if not isinstance(raw_scope, dict):
             raw_scope = {}
         allowed_capability_ids = self._normalize_string_list(
-            raw_scope.get("allowed_capability_ids") or normalized.get("allowed_action_ids")
+            raw_scope.get("allowed_capability_ids", normalized.get("allowed_action_ids"))
         )
         normalized["step_scope"] = {"allowed_capability_ids": allowed_capability_ids}
         normalized["allowed_action_ids"] = allowed_capability_ids
@@ -1322,6 +1322,26 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
     def _configure_step_execution(self, execution: Any, plan: dict[str, Any]) -> dict[str, Any]:
         policy = self._step_execution_policy()
+        # Validate before use_actions/require_actions can mutate registration tags.
+        # Model-required ids and planner snapshots select from Host authority.
+        from agently.core.operation.Action.ActionMetadata import _scoped_action_list
+
+        host_ids = {
+            str(item.get("action_id") or item.get("name") or "")
+            for item in _scoped_action_list(self.agent.action, self.agent.name)
+        }
+        step_scope = plan.get("step_scope")
+        if not isinstance(step_scope, dict):
+            step_scope = {}
+        allowed_capability_ids = self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        )
+        raw_required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
+        outside = (set(allowed_capability_ids) | set(raw_required_action_ids)) - host_ids
+        if outside:
+            raise PermissionError("Step Actions are outside the visible execution scope: " + ", ".join(sorted(outside)))
+        if allowed_capability_ids and set(raw_required_action_ids) - set(allowed_capability_ids):
+            raise PermissionError("Required Actions are outside the declared step scope.")
         requested_shape = str(plan.get("execution_shape") or "direct")
         effective_shape = requested_shape
         dag_allowed = False
@@ -1340,6 +1360,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 if isinstance(item, Mapping)
                 and str(item.get("kind") or "").strip() == "action"
                 and str(item.get("id") or "").strip()
+                and str(item.get("id") or "").strip() in host_ids
             }
             if not action_capability_ids:
                 action_candidates = getattr(execution, "action_candidates", None)
@@ -1355,7 +1376,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                             if not isinstance(item, Mapping):
                                 continue
                             action_id = str(item.get("action_id") or item.get("name") or "").strip()
-                            if action_id:
+                            if action_id and action_id in host_ids:
                                 action_capability_ids.add(action_id)
                     except Exception:
                         action_capability_ids = set()
@@ -1378,11 +1399,6 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         # step_instruction prose. The hard guarantee remains the verifier evidence
         # gate; this only prevents an evidence-gathering step from silently
         # completing the whole task with unrelated capabilities.
-        step_scope = plan.get("step_scope")
-        if not isinstance(step_scope, dict):
-            step_scope = {}
-        allowed_capability_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
-        raw_required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
         task_contract_required_action_ids = self._task_contract_required_action_ids()
         task_required_action_ids = [
             action_id for action_id in raw_required_action_ids if action_id in task_contract_required_action_ids
@@ -1435,6 +1451,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 if isinstance(item, Mapping)
                 and str(item.get("kind") or "").strip() == "action"
                 and str(item.get("id") or "").strip()
+                and str(item.get("id") or "").strip() in host_ids
             ]
             if action_capability_ids:
                 use_actions = getattr(execution, "use_actions", None)
@@ -1998,9 +2015,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         raw_commands = raw_commands_override if raw_commands_override is not None else plan.get("action_commands")
         if raw_commands in (None, [], ()):
             return None
+        step_scope = plan.get("step_scope")
+        allowed_action_ids = self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        ) if isinstance(step_scope, Mapping) else []
         result, meta = await self._execute_bounded_action_commands(
             raw_commands=raw_commands,
             required_action_ids=self._normalize_string_list(plan.get("required_action_ids")),
+            allowed_action_ids=allowed_action_ids,
             execution_id=f"{self.id}:flat:iter-{iteration_index}:action-call",
             code_prefix="agent_task.flat.action_commands",
             execution_kind="flat_bounded_action_calls",
@@ -2055,7 +2077,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
 
         execution_id = f"{self.id}:flat:iter-{iteration_index}:action-call"
-        action_contracts, unavailable_action_id = self._bounded_action_contracts(required_action_ids)
+        step_scope = plan.get("step_scope")
+        allowed_action_ids = self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        ) if isinstance(step_scope, Mapping) else []
+        action_contracts, unavailable_action_id = self._bounded_action_contracts(
+            required_action_ids,
+            allowed_action_ids=allowed_action_ids,
+        )
         if unavailable_action_id is not None:
             return self._bounded_action_command_failure(
                 execution_id=execution_id,

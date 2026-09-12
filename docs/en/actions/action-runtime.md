@@ -129,6 +129,27 @@ narrow subset. Managed execution environment metadata redacts raw `env` values
 in this visible schema while preserving key names; providers still receive the
 raw env only through the execution path.
 
+The Host owns model Action visibility. Without an explicit Execution scope,
+Agent-default Actions are used; a Host may explicitly select other registered,
+model-exposed Actions on an Execution. Non-empty nested scopes intersect their
+ancestors, and a step scope can only narrow that set. `execution.use_actions([])`
+clears the local restriction, not ancestor restrictions; an empty intersection
+means no Actions, never an unrestricted fallback. Model-selected required ids
+or planner capability lists do not grant access or register/tag extra child Actions.
+
+Built-in ActionFlows check the whole batch against that round's Host-offered
+Action set before approval, dispatch, or a third-party `execution_handler`. A
+rejected batch returns `action.scope.not_offered` and preserves prior completed
+records. Host-injected `read_action_artifact` remains available for real retained
+refs, subject to its existing selection-key and artifact-scope checks. Programmatic
+transport requires a real, fresh retained catalog whose entries all remain
+offered; a name, protocol label, or revision string alone is not authorization.
+Existing Host-retained catalogs and custom planners need no new correlation
+arguments. Unconsumed default-planner leases are settled on completion, error,
+or cancellation without consuming other Host leases; live pauses retain waiting
+resources. Direct Host Action calls do not gain this model-call ACL; their
+existing approval, resource, and execution policies remain in force.
+
 The default structured planner receives a smaller projection than this public
 inspection API: `action_id`, description, callable kwargs, required inputs, and
 only non-default approval/side-effect/concurrency constraints. Host-only

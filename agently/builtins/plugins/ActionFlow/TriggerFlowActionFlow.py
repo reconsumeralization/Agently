@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from agently.core.application.AgentExecution import RuntimeStageStallError
@@ -411,6 +412,8 @@ class TriggerFlowActionFlow:
                 action_list,
                 model_visible_last_round_records or model_visible_done_plans,
             )
+            # Preserve the Host projection before a replaceable planner runs.
+            await data.async_set_state("offered_actions", deepcopy(visible_action_list))
 
             decision = action._normalize_action_decision(
                 await resolved_planning_handler(
@@ -440,6 +443,11 @@ class TriggerFlowActionFlow:
                 round_index=round_index,
                 max_rounds=max_rounds,
             )
+            scope_records = action._check_action_scope(
+                decision.get("action_calls", []), data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            ) if dispatch_confirmed else []
+            dispatch_confirmed = dispatch_confirmed and not scope_records
             await publish_runtime_observation(
                 "plan_ready",
                 message=f"Action plan ready for round { round_index }.",
@@ -505,11 +513,11 @@ class TriggerFlowActionFlow:
             if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
-                if terminal_response_handler is not None and decision.get("next_action") == "response":
+                if not scope_records and terminal_response_handler is not None and decision.get("next_action") == "response":
                     terminal_result = terminal_response_handler(decision)
                     if inspect.isawaitable(terminal_result):
                         await terminal_result
-                await data.async_emit("DONE", [*done_plans, *diagnostic_records])
+                await data.async_emit("DONE", [*done_plans, *diagnostic_records, *scope_records])
             return decision
 
         async def execute_step(data):
@@ -523,6 +531,14 @@ class TriggerFlowActionFlow:
             last_round_records = data.get_state("last_round_records", [])
             if not isinstance(last_round_records, list):
                 last_round_records = []
+
+            scope_records = action._check_action_scope(
+                action_calls, data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            )
+            if scope_records:
+                await data.async_emit("DONE", [*done_plans, *scope_records])
+                return scope_records
 
             approval_decisions = data.get_state("policy_approval_decisions", {})
             if not isinstance(approval_decisions, dict):
@@ -908,8 +924,14 @@ class TriggerFlowActionFlow:
         action_loop_completed = False
         standalone_scope_released = False
 
-        def release_standalone_artifact_scope_once() -> None:
+        def release_programmatic_scope() -> None:
+            release = getattr(action.action_runtime, "_release_programmatic_scope", None)
+            if callable(release):
+                release(action_loop_run.run_id)
+
+        def release_loop_resources() -> None:
             nonlocal standalone_scope_released
+            release_programmatic_scope()
             if not owns_artifact_scope or standalone_scope_released:
                 return
             standalone_scope_released = True
@@ -928,11 +950,11 @@ class TriggerFlowActionFlow:
                         interrupt_id=str(pending_interrupt.get("id", "")),
                         exchange_id=pending_envelope.get("exchange_id"),
                         on_resolved=finalize_live_exchange_execution,
-                        on_closed=release_standalone_artifact_scope_once,
+                        on_closed=release_loop_resources,
                     )
                 return
             await execution.async_close(reason="action_loop_exchange_resolved")
-            release_standalone_artifact_scope_once()
+            release_loop_resources()
 
         try:
             with bind_runtime_context(
@@ -968,7 +990,7 @@ class TriggerFlowActionFlow:
                                 interrupt_id=str(pending_interrupt.get("id", "")),
                                 exchange_id=pending_envelope.get("exchange_id"),
                                 on_resolved=finalize_live_exchange_execution,
-                                on_closed=release_standalone_artifact_scope_once,
+                                on_closed=release_loop_resources,
                             )
                         )
                     pending_action = execution.get_state("pending_policy_approval_action", {})
@@ -1185,17 +1207,19 @@ class TriggerFlowActionFlow:
                 )
             raise
         finally:
+            if not exchange_paused:
+                release_programmatic_scope()
             if owns_artifact_scope and not exchange_paused and not action_loop_completed:
-                release_standalone_artifact_scope_once()
+                release_loop_resources()
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             if owns_artifact_scope and not exchange_paused:
-                release_standalone_artifact_scope_once()
+                release_loop_resources()
             return []
         normalized = action._to_action_flow_return_records(result)
         if owns_artifact_scope and not exchange_paused:
-            release_standalone_artifact_scope_once()
+            release_loop_resources()
         if owns_artifact_scope and not exchange_paused:
             normalized = action._project_released_artifact_scope(normalized, artifact_scope)
             for state_key in ("done_plans", "last_round_records", "action_loop_result"):

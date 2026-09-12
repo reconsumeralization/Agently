@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Sequence
 from typing import Any, Callable, cast
 
 from agently.types.data import ActionResult, ActionSpec
@@ -31,6 +32,53 @@ _DEFAULT_VALIDATION_MARKERS = (
     "yarn test",
     "uv test",
 )
+
+
+def _scoped_action_list(
+    action: Any,
+    agent_name: str,
+    *,
+    execution_context: Any = None,
+    allowed_action_ids: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """Project Host visibility; step choices never grant additional Actions."""
+
+    from agently.core.runtime import get_current_agent_execution_context
+
+    context = execution_context or get_current_agent_execution_context()
+    recall_context = context
+    allowed: set[str] | None = None
+    visited: set[int] = set()
+    while context is not None and id(context) not in visited:
+        visited.add(id(context))
+        scoped_ids = getattr(context, "scoped_action_ids", None)
+        raw_ids = scoped_ids() if callable(scoped_ids) else None
+        if isinstance(raw_ids, (set, frozenset, list, tuple)) and raw_ids:
+            scope = {str(item).strip() for item in raw_ids if str(item).strip()}
+            allowed = scope if allowed is None else allowed & scope
+        context = getattr(context, "_parent_execution_context", None)
+
+    get_action_list = getattr(action, "get_action_list", None)
+    if not callable(get_action_list):
+        return []
+    visible = cast(list[dict[str, Any]], (
+        get_action_list(tags=[f"agent-{agent_name}"]) if allowed is None else get_action_list()
+    ))
+    step_ids = {str(item).strip() for item in allowed_action_ids if str(item).strip()}
+    scoped = [
+        item for item in visible
+        if isinstance(item, dict)
+        and item.get("expose_to_model", True) is True
+        and (allowed is None or str(item.get("action_id") or item.get("name") or "") in allowed)
+        and (not step_ids or str(item.get("action_id") or item.get("name") or "") in step_ids)
+    ]
+    # Recall is offered by the Host from actual scoped records after ordinary
+    # filtering, not by a special Action name supplied by the model.
+    recall = getattr(recall_context, "scoped_action_artifact_recall_records", None)
+    inject = getattr(action, "_with_action_artifact_recall_action", None)
+    if callable(recall) and callable(inject):
+        scoped = cast(list[dict[str, Any]], inject(scoped, recall()))
+    return scoped
 
 
 def _redact_env(value: Any) -> Any:

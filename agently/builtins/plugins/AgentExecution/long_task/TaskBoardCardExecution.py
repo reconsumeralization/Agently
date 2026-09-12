@@ -262,6 +262,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         result, execution_meta = await self._execute_bounded_action_commands(
             raw_commands=raw_commands,
             required_action_ids=self._taskboard_card_required_action_ids(card),
+            allowed_action_ids=self._taskboard_card_required_action_ids(card),
             execution_id=f"{self.id}:taskboard:{card_id or 'card'}:action-call",
             code_prefix="taskboard.action_commands",
             execution_kind="taskboard_preplanned_action_calls",
@@ -340,7 +341,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             return None
 
         action_contracts, unavailable_action_id = self._bounded_action_contracts(
-            required_action_ids
+            required_action_ids,
+            allowed_action_ids=required_action_ids,
         )
         if unavailable_action_id is not None:
             return self._taskboard_preplanned_action_failure(

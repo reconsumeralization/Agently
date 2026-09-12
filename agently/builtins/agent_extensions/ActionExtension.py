@@ -23,10 +23,10 @@ from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, 
 from typing_extensions import Self, overload
 
 from agently.core import BaseAgent
+from agently.core.operation.Action.ActionMetadata import _scoped_action_list
 from agently.core.model.ModelRequestRunner import PreparedModelResponse
 from agently.core.runtime.RuntimeContext import (
     get_current_action_policy,
-    get_current_agent_execution_context,
 )
 from agently.utils import DeprecationWarnings
 from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
@@ -351,32 +351,7 @@ class ActionExtension(BaseAgent):
         return str(item.get("action_id") or item.get("name") or "").strip()
 
     def _get_scoped_action_list(self) -> list[dict[str, Any]]:
-        action_list = self.action.get_action_list(tags=[f"agent-{ self.name }"])
-        execution_context = get_current_agent_execution_context()
-        scoped_action_ids = getattr(execution_context, "scoped_action_ids", None)
-        raw_allowed_ids = scoped_action_ids() if callable(scoped_action_ids) else None
-        allowed_ids = (
-            {str(item).strip() for item in raw_allowed_ids if str(item).strip()}
-            if isinstance(raw_allowed_ids, set)
-            else set()
-        )
-        if not allowed_ids:
-            scoped_list = action_list
-        else:
-            # Explicit execution scope is authoritative even for a stable Action
-            # definition that is deliberately not tagged as an Agent default.
-            scoped_list = [
-                item
-                for item in self.action.get_action_list()
-                if self._action_item_id(item) in allowed_ids
-            ]
-        recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
-        if callable(recall_records):
-            scoped_list = self.action._with_action_artifact_recall_action(
-                scoped_list,
-                cast(list["ActionResult"], recall_records()),
-            )
-        return scoped_list
+        return _scoped_action_list(self.action, self.name)
 
     def use_tools(self, tools: object) -> "AgentExecution":
         """Compatibility alias for execution-local ``use_actions(...)``."""

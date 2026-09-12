@@ -304,6 +304,16 @@ class Action:
         revision = str(action_input.get("catalog_revision", "")) if isinstance(action_input, dict) else ""
         if not revision:
             return
+        resolve_catalog = getattr(self.action_runtime, "resolve_programmatic_catalog", None)
+        release_planned = getattr(self.action_runtime, "_release_planned_catalog", None)
+        catalog = resolve_catalog(revision) if callable(resolve_catalog) else None
+        if (
+            isinstance(catalog, dict)
+            and catalog.get("_action_input") == action_input
+            and callable(release_planned)
+            and release_planned(revision)
+        ):
+            return
         release_catalog = getattr(
             self.action_runtime,
             "release_programmatic_catalog",
@@ -341,6 +351,87 @@ class Action:
                 self._release_programmatic_action_call_catalog(action_call)
                 released += 1
         return released
+
+    def _check_action_scope(
+        self,
+        action_calls: list[ActionCall],
+        offered_actions: list[dict[str, Any]],
+        *,
+        run_id: str,
+        round_index: int,
+    ) -> list[ActionResult]:
+        """Reject an entire model batch before handlers, approval or dispatch."""
+
+        from .ActionProgram import build_programmatic_action_catalog
+        from agently.types.data import PROGRAMMATIC_ACTION_TRANSPORT_ID
+
+        offered = {
+            str(item.get("action_id") or item.get("name") or ""): item
+            for item in offered_actions if isinstance(item, dict)
+        }
+        rejected: list[str] = []
+        owned_revisions: set[str] = set()
+        for command in action_calls:
+            action_id = str(command.get("action_id") or "")
+            if action_id in offered and action_id != PROGRAMMATIC_ACTION_TRANSPORT_ID:
+                continue
+            valid_transport = False
+            if action_id == PROGRAMMATIC_ACTION_TRANSPORT_ID and self.action_registry._is_reserved(action_id):
+                action_input = command.get("action_input", {})
+                revision = str(action_input.get("catalog_revision") or "")
+                resolve = getattr(self.action_runtime, "resolve_programmatic_catalog", None)
+                catalog = resolve(revision) if callable(resolve) else None
+                if isinstance(catalog, dict):
+                    origin = catalog.get("_planning_scope")
+                    current = {"run_id": run_id, "round_index": round_index}
+                    if isinstance(origin, dict) and origin == current:
+                        owned_revisions.add(revision)
+                    correlated = origin is None or (
+                        origin == current and catalog.get("_action_input") == action_input
+                    )
+                    if correlated:
+                        executor = self.action_registry.get_executor(action_id)
+                        check_catalog = getattr(executor, "_resolve_catalog", None)
+                        try:
+                            checked = check_catalog(revision) if callable(check_catalog) else None
+                            entries = checked.get("entries", []) if isinstance(checked, dict) else []
+                            ids = [str(entry.get("action_id") or "") for entry in entries]
+                            if isinstance(checked, dict) and ids and all(item in offered for item in ids):
+                                current_catalog = build_programmatic_action_catalog(
+                                    [offered[item] for item in ids],
+                                    revision_seed=checked.get("_revision_seed"),
+                                )
+                                valid_transport = current_catalog.get("catalog_revision") == revision
+                        except (KeyError, TypeError, ValueError):
+                            valid_transport = False
+            if not valid_transport:
+                rejected.append(action_id)
+        if not rejected:
+            return []
+        # Only the current Host-owned round may abandon its retained leases.
+        # A fabricated or duplicated revision must not consume another lease.
+        release = getattr(self.action_runtime, "_release_planned_catalog", None)
+        if not callable(release):
+            release = getattr(self.action_runtime, "release_programmatic_catalog", None)
+        if callable(release):
+            for revision in owned_revisions:
+                release(revision)
+        diagnostic = {
+            "source": "ActionRuntime",
+            "severity": "error",
+            "code": "action.scope.not_offered",
+            "message": "The model Action batch contains an Action outside the Host-offered scope.",
+            "meta": {"action_ids": rejected, "round_index": round_index},
+        }
+        return [self._normalize_execution_record(
+            {
+                "ok": False, "success": False, "status": "blocked",
+                "action_id": "action_planning", "tool_name": "action_planning",
+                "purpose": diagnostic["message"], "kwargs": {},
+                "result": diagnostic, "data": diagnostic, "error": diagnostic["message"],
+                "diagnostics": [diagnostic], "expose_to_model": True,
+            }, None, 0,
+        )]
 
     def _register_action_artifact_recall_action(self):
         self.register_action(
@@ -1152,6 +1243,7 @@ class Action:
         owns_scope = artifact_scope is None
         resolved_scope = artifact_scope or {"kind": "action_call", "id": f"act_call_{uuid.uuid4().hex}"}
         programmatic_catalog_revision = str(kwargs.get("catalog_revision", "")) if name == "run_action_program" else ""
+        programmatic_input = dict(kwargs) if programmatic_catalog_revision else {}
         finalized: Any = None
         try:
             with self._artifact_manager.bind_artifact_scope(resolved_scope):
@@ -1172,9 +1264,7 @@ class Action:
                 self._release_programmatic_action_call_catalog(
                     {
                         "action_id": name,
-                        "action_input": {
-                            "catalog_revision": programmatic_catalog_revision,
-                        },
+                        "action_input": programmatic_input,
                     }
                 )
             if owns_scope:

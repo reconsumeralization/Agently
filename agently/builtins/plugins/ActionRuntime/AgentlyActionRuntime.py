@@ -700,6 +700,7 @@ class AgentlyActionRuntime:
         self._programmatic_catalogs[revision] = {
             "catalog": catalog_snapshot,
             "leases": 1,
+            "planning_lease": isinstance(catalog_snapshot.get("_planning_scope"), dict),
         }
 
     def resolve_programmatic_catalog(self, revision: str) -> dict[str, Any] | None:
@@ -716,6 +717,27 @@ class AgentlyActionRuntime:
             self._programmatic_catalogs.pop(str(revision), None)
         else:
             retained["leases"] = leases
+
+    def _release_planned_catalog(self, revision: str) -> bool:
+        retained = self._programmatic_catalogs.get(str(revision))
+        if not isinstance(retained, dict) or not retained.get("planning_lease"):
+            return False
+        retained["planning_lease"] = False
+        self.release_programmatic_catalog(revision)
+        return True
+
+    def _release_programmatic_scope(self, run_id: str) -> None:
+        """Settle only unconsumed default-planner leases owned by this loop."""
+
+        for revision, retained in list(self._programmatic_catalogs.items()):
+            catalog = retained.get("catalog", {})
+            origin = catalog.get("_planning_scope") if isinstance(catalog, dict) else None
+            if (
+                retained.get("planning_lease")
+                and isinstance(origin, dict)
+                and origin.get("run_id") == run_id
+            ):
+                self._release_planned_catalog(revision)
 
     async def _default_programmatic_planning_handler(
         self,
@@ -1029,10 +1051,6 @@ class AgentlyActionRuntime:
             and max_active_catalogs_raw > 0
             else 64
         )
-        self._retain_programmatic_catalog(
-            catalog_payload,
-            max_active_catalogs=max_active_catalogs,
-        )
         action_call = {
             "purpose": decision["description"],
             "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
@@ -1046,6 +1064,13 @@ class AgentlyActionRuntime:
                 "Use the bounded program result to decide whether to respond or run another Action round."
             ),
         }
+        if parent_run_id:
+            catalog_payload["_planning_scope"] = {"run_id": parent_run_id, "round_index": round_index}
+            catalog_payload["_action_input"] = dict(action_call["action_input"])
+        self._retain_programmatic_catalog(
+            catalog_payload,
+            max_active_catalogs=max_active_catalogs,
+        )
         return cast(
             "ActionDecision",
             {

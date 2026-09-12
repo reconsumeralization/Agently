@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from agently.core.runtime.RuntimeContext import (
@@ -200,6 +201,7 @@ class DAGActionFlow:
                 action_list,
                 model_visible_last_round_records or model_visible_done_plans,
             )
+            await data.async_set_state("offered_actions", deepcopy(visible_action_list))
 
             decision = action._normalize_action_decision(
                 await planning_handler(
@@ -228,6 +230,11 @@ class DAGActionFlow:
                 round_index=round_index,
                 max_rounds=max_rounds,
             )
+            scope_records = action._check_action_scope(
+                decision.get("action_calls", []), data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            ) if dispatch_confirmed else []
+            dispatch_confirmed = dispatch_confirmed and not scope_records
             await publish_runtime_observation(
                 "plan_ready",
                 message=f"Action plan ready for round {round_index}.",
@@ -246,7 +253,7 @@ class DAGActionFlow:
             if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
-                await data.async_emit("DONE", done_plans)
+                await data.async_emit("DONE", [*done_plans, *scope_records])
             return decision
 
         async def execute_step_via_dag(data):
@@ -261,6 +268,14 @@ class DAGActionFlow:
             if len(action_calls) == 0:
                 await data.async_emit("PLAN", None)
                 return []
+
+            scope_records = action._check_action_scope(
+                action_calls, data.get_state("offered_actions", []),
+                run_id=action_loop_run.run_id, round_index=round_index,
+            )
+            if scope_records:
+                await data.async_emit("DONE", [*done_plans, *scope_records])
+                return scope_records
 
             # Build DAG: each action_call becomes an independent node.
             # Future: model-generated depends_on relationships will create edges.
@@ -472,6 +487,9 @@ class DAGActionFlow:
                 )
             raise
         finally:
+            release_catalogs = getattr(action.action_runtime, "_release_programmatic_scope", None)
+            if callable(release_catalogs):
+                release_catalogs(action_loop_run.run_id)
             if owns_artifact_scope and not action_loop_completed:
                 action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
