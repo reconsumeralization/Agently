@@ -38,6 +38,11 @@ jobs:
         run: >-
           poetry run python -m pip install pyright "fastmcp>=3,<4" python-dotenv
           beautifulsoup4 "fastapi>=0.104" sqlmodel aiosqlite "ruff==0.16.5"
+        # Optional packages are needed to inspect the complete public typing surface,
+        # not to import or run a minimal installed Agently application.
+      - name: Install optional typing dependencies
+        if: matrix.python-version == '3.10'
+        run: poetry run python -m pip install "playwright==1.62.0" "chromadb==1.5.9"
       - name: Verify Stage and compatibility contracts
         run: poetry run pytest -q tests/test_stage_support_contract.py tests/test_compatibility_registry.py
       - name: Lint complete Python surface

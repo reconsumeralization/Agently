@@ -1,9 +1,26 @@
 from pathlib import Path
 import json
 import re
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_publish_workflow_installs_optional_typing_dependencies_before_pyright() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/publish-on-version-change.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["validate"]["steps"]
+    names = [step["name"] for step in steps]
+    assert len(names) == len(set(names))
+    install = steps[names.index("Install optional typing dependencies")]
+    check = steps[names.index("Type check")]
+    assert install["if"] == check["if"]
+    assert "playwright==" in install["run"]
+    assert "chromadb==" in install["run"]
+    assert names.index(install["name"]) < names.index(check["name"])
+    assert all("run" in step or "uses" in step for step in steps)
 
 
 def test_4_1_4_8_change_guide_covers_late_additions_and_has_valid_links() -> None:
