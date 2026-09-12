@@ -4,6 +4,8 @@ Set MODEL_BASE_URL, MODEL_API_KEY and MODEL_NAME for an OpenAI-compatible servic
 Optional MODEL_REQUEST_OPTIONS is a JSON object of provider request options.
 The ticket backend below is an in-memory business-system simulation, not a
 replacement for model planning, argument selection, or final verification.
+No fixed wall-clock task limit is imposed: local model throughput varies.
+The explicit model-request and iteration budgets remain in effect.
 Flow: model plans -> lookup_ticket -> observed revision -> acknowledge_revision
 -> ordinary task verification -> final response. No manual result substitution.
 """
@@ -66,7 +68,7 @@ async def run_example() -> dict[str, Any]:
                 ],
             )
             .require_actions([lookup_ticket, acknowledge_revision])
-            .strategy("flat", limits={"max_seconds": 600, "max_model_requests": 20}, max_iterations=4)
+            .strategy("flat", limits={"max_seconds": None, "max_model_requests": 20}, max_iterations=4)
         )
         result = await execution.async_start()
         meta = await execution.async_get_meta()
@@ -76,8 +78,13 @@ async def run_example() -> dict[str, Any]:
 if __name__ == "__main__":
     print(json.dumps(asyncio.run(run_example()), ensure_ascii=False, default=str, indent=2))
 
-# Expected key output from a local Qwen3.8-27B-4bit run:
+# Historical output with the previous 600-second budget (not acceptance):
 # observed_calls[1]["result"]["acknowledged"] == True; both calls used ticket_id "T-208"
 # and the same revision. result["status"] == "timed_out", result["accepted"] == False.
 # The 600-second run reached final verification after correct Actions and a final
 # response draft, but did not finish verification. Action success is not task acceptance.
+# Latest acceptance observation (no wall-clock task limit; not a passing example):
+# Both Actions succeeded with the same observed revision. After 12 model requests
+# and four iterations, status was "max_iterations", accepted was False. A correct
+# generated answer was blocked by task-wide required Actions inherited by the
+# answer-only child execution. The release acceptance gap remains open.

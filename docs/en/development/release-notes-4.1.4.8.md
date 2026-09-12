@@ -6,6 +6,8 @@ keywords: Agently, 4.1.4.8, typing, IDE, AgentExecution, plugin, Action, Skill, 
 
 # Agently 4.1.4.8 Release Notes
 
+This is an unpublished candidate. The implemented usage below does not mean all release acceptance gates have passed.
+
 Agently 4.1.4.8 is an execution-composition and developer-experience release.
 It makes one-run Agent code easier to read in an IDE while preserving the same
 runtime owner: a fluent chain keeps returning one `AgentExecution`, and its
@@ -18,17 +20,17 @@ V2 aligned to framework 4.1.4.8.
 
 ## Recommended Usage
 
-This example uses local Ollama and demo account data. Connect the Action to your
+This example uses an explicitly configured OpenAI-compatible service and demo account data. Connect the Action to your
 account system in a real application.
 
 ```python
+import os
 from agently import Agently
 
-Agently.set_settings("OpenAICompatible", {
-    "base_url": "http://127.0.0.1:11434/v1",
-    "api_key": "ollama-local",
-    "model": "qwen3.5:9b",
-    "model_type": "chat",
+Agently.set_settings("plugins.ModelRequester.OpenAICompatible", {
+    "base_url": os.environ["MODEL_BASE_URL"],
+    "auth": os.environ["MODEL_API_KEY"],
+    "model": os.environ["MODEL_NAME"],
 })
 agent = Agently.create_agent("renewal-review")
 agent.use_task_workspace("./workspace")
@@ -80,10 +82,24 @@ where the public contract permits them.
 | Model selection | Explicit unknown model aliases fail before provider dispatch; `resolve_model_profile` exposes a non-secret preflight view. | Validate configured model keys before starting application work. | Fail-closed for misspelled aliases when `model_pool` is configured. | Model configuration tests and `examples/model_configures/typed_settings_and_model_profiles.py`. |
 | Action Runtime | `programmatic` planning can execute one bounded read-only Action micro-DAG; Actions declare `parallel` or `exclusive` concurrency. | Keep `structured_plan` as the default; opt into `programmatic` only with eligible Actions and an isolated code provider. | Explicit opt-in, policy-gated, no universal cost/latency promise. | Action runtime suites and `examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py`. |
 | Action delivery and debug | Terminal Action responses reuse the existing execution result; concurrent console streams display in first-delta FIFO order without serializing execution. | Use `debug=True` for readable output and EventCenter/DevTools for complete facts. | Display-only change; event and execution ordering remain authoritative. | Pinned examples 04 and 05 plus console/action tests. |
-| Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; script discovery returns inert candidates until explicit host authorization. | Use `always=True` for Agent defaults and execution methods for one-run additions. | Fail-closed scope; no implicit script actionization. | Pinned examples 03 and 07, Skills tests, Agently-Skills V2 guidance. |
+| Skills | Skill defaults and execution-local declarations freeze one exact-revision scope; scripts remain inert descriptors in `selected_resources`, not Actions or authorization grants. | Use `always=True` for Agent defaults and execution methods for one-run additions; mount execution capabilities explicitly. | Fail-closed scope; no implicit script actionization. | Pinned example 03, Skills tests, Agently-Skills V2 guidance; reconciliation of pinned example 07 remains open. |
 | Agent delivery policies | `interact`, `review(rules=..., on_fail=...)`, and verified TaskWorkspace `artifact` delivery are stable public methods. | Attach handlers to the execution that owns the result and artifact. | Additive; blocking review can prevent terminal success. | Examples 25 and 26 and AgentExecution handler/artifact tests. |
 | Execution plugins | `create_execution(name)` returns the registered execution instance; built-ins are `auto`, `request`, `long_task`, `plan`, and `long_content`. | Choose the producer explicitly when needed; `.goal(..., turn_on_long_task=False)` declares semantic goals only. | Replaces unreleased Pattern; released Orchestrator/AgentTask entrypoints remain compatibility adapters. | Examples 26–28 and plugin identity, goal-preparation, final-policy and typing tests. |
 | MCP | Playwright MCP examples cover local lifecycle and model-driven browser use. | Use ExecutionResource-owned MCP sessions and close them deterministically. | External runtime/browser dependency. | `examples/action_runtime/2_3_mcp_playwright_e2e_local.py` and `2_4_mcp_playwright_agent_qwen.py`. |
+| Long content and continuation | `long_content` produces structured long prose; `LongContent` fields are generated separately and filled back into the structure; `auto_continue` only continues unfinished requests. | Declare `(LongContent, "writing requirements")`; enable `.auto_continue()` when needed. | The `"long_content"` type spelling and `.ensure_long_output()` alias remain compatible; continuation need not trigger. | `examples/basic/auto_continue.py`, `examples/agent_auto_orchestration/29_field_long_content_ollama.py`, continuation/output-control tests. |
+| Execution controls | Safe-boundary pause/resume and save/load, plus same-object revision rework with retained earlier readers. | Use execution `pause/resume/save/load/rework` and async equivalents; inspect `control_capabilities` first. | Active provider/child snapshots and complete nested-budget recovery are not promised. | Unified control documentation, lifecycle/rework/snapshot tests, installed typing. |
+| Audio | Independent `AudioModelRequest` provides TTS/STT with explicit Agent binding; four composed streams distinguish continuous PCM, independent speech segments, transcript blocks and textual sentence endings. | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`; consume streams with `async with`. | No text Prompt reuse or implicit recording/playback; built-in native realtime STT input is not implemented. | [Audio usage](../models/audio.md), `examples/audio/tts_stt_roundtrip.py`, `examples/audio/continuous_audio.py`, audio tests. |
+| Shell (unfinished scope) | Native process core and reverse Cmd delegation are implemented; three environment profiles, four approval presets and the new general Agent entry are not complete. | Existing Cmd/enable_shell retains argv semantics; do not treat it as a general Bash/PowerShell script interface. | **Pending, not a supported capability**; CrossOver probes do not replace native Windows isolation acceptance. | Shell/Cmd lifecycle tests; complete feature acceptance remains open. |
+
+Long-form declarations and continuation settings are independent. Reuse the configured Agent above:
+
+```python
+from agently import LongContent
+
+execution = agent.input("Write a chapter-organized operations manual.").output({
+    "body": (LongContent, "Develop the requested content without inventing business constraints."),
+}).auto_continue()
+```
 
 ## Examples Added For This Release
 
@@ -104,7 +120,7 @@ The Ollama examples default to `qwen`; set
 `AGENT_EXECUTION_OLLAMA_MODEL` or `OLLAMA_DEFAULT_MODEL` to select another local
 Qwen model.
 
-Refactor checkpoint: the latest 26/27 runs completed framework delivery but
+Early refactor checkpoint (not current final acceptance): the 26/27 runs completed framework delivery but
 semantic inspection found an invented attendance threshold and an expanded
 deployment restriction, respectively. Example 28 prepared its missing contract
 but timed out in later production. These are retained Prompt-audit findings,

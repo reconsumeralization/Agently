@@ -29,6 +29,18 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     assert current_manifest == release_manifest
 
 
+def test_current_candidate_includes_accepted_development_contracts() -> None:
+    """A same-version release candidate must not silently ship stale contracts."""
+    development = _development_manifest()
+    if development["target_version"] != CURRENT_FRAMEWORK_VERSION:
+        return  # A later development train intentionally differs from a release.
+    current = get_current_release_manifest()
+    identity_fields = {"target_version", "release_train", "notes"}
+    for key, value in development.items():
+        if key not in identity_fields:
+            assert current[key] == value, f"Candidate contract is stale: {key}"
+
+
 def test_4_1_4_8_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 
