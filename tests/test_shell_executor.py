@@ -144,9 +144,62 @@ async def test_powershell_transports_exact_source_not_bash_syntax(tmp_path: Path
     await PowerShellExecutor(binary="pwsh").run(command, workdir=tmp_path, timeout=5)
     argv, options = calls[0]
     assert argv[:-1] == ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand"]
-    assert base64.b64decode(argv[-1]).decode("utf-16-le") == command
+    wire_source = base64.b64decode(argv[-1]).decode("utf-16-le")
+    assert "$agently_ast = [scriptblock]::Create('" + command.replace("'", "''") + "').Ast" in wire_source
+    assert '"`nif (-not `$?) { exit 1 }`n"' in wire_source
+    assert "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)" in wire_source
+    assert options["encoding"] == "utf-8"
     assert options["workdir"] == tmp_path
     # This is transport evidence only, not Windows execution or isolation proof.
+
+
+@pytest.mark.asyncio
+async def test_explicit_encoding_does_not_change_legacy_argv_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("locale.getpreferredencoding", lambda _=False: "latin-1")
+    argv = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([0xc3, 0xa9]))"]
+    legacy = await Shell().run_argv(argv, workdir=tmp_path, timeout=5)
+    utf8 = await Shell().run_argv(argv, workdir=tmp_path, timeout=5, encoding="utf-8")
+    assert legacy.stdout == "\u00c3\u00a9"
+    assert utf8.stdout == "\u00e9"
+
+
+@pytest.mark.asyncio
+async def test_powershell_transport_quotes_are_literal_and_env_unmodified(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+
+    async def capture(self, argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(Shell, "run_argv", capture)
+    command = "param($x = 'it''s 中文')\nWrite-Output $x; # '); throw 'not executed by wrapper"
+    env = {"TASK_TEST_KEY": "unchanged"}
+    await PowerShellExecutor(binary="pwsh").run(command, workdir=tmp_path, timeout=5, env=env)
+    argv, options = calls[0]
+    wire = base64.b64decode(argv[-1]).decode("utf-16-le")
+    literal = wire.split("$agently_ast = [scriptblock]::Create('", 1)[1].split("').Ast", 1)[0]
+    assert literal.replace("''", "'") == command
+    assert options["env"] == env == {"TASK_TEST_KEY": "unchanged"}
+
+
+@pytest.mark.asyncio
+async def test_powershell_limits_final_wire_size_including_escaping(tmp_path: Path, monkeypatch) -> None:
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Oversized transport must fail before spawn")
+
+    monkeypatch.setattr(Shell, "run_argv", forbidden)
+    with pytest.raises(ValueError, match="UTF-16LE"):
+        await PowerShellExecutor().run("'" * 5000, workdir=tmp_path, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_invalid_output_encoding_rejected_before_spawn(tmp_path: Path, monkeypatch) -> None:
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid encoding must not execute the command")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    with pytest.raises(LookupError):
+        await Shell().run_argv(["not-executed"], workdir=tmp_path, timeout=5, encoding="invalid-codec")
 
 
 @pytest.mark.asyncio

@@ -91,7 +91,23 @@ recognition, without requiring separate stubs or suppressed missing-type warning
 | Long content and continuation | `long_content` produces structured long prose; `LongContent` fields are generated separately and filled back into the structure; `auto_continue` only continues unfinished requests. | Declare `(LongContent, "writing requirements")`; enable `.auto_continue()` when needed. | The `"long_content"` type spelling and `.ensure_long_output()` alias remain compatible; continuation need not trigger. | `examples/basic/auto_continue.py`, `examples/agent_auto_orchestration/29_field_long_content_ollama.py`, continuation/output-control tests. |
 | Execution controls | Safe-boundary pause/resume and save/load, plus same-object revision rework with retained earlier readers. | Use execution `pause/resume/save/load/rework` and async equivalents; inspect `control_capabilities` first. | Active provider/child snapshots and complete nested-budget recovery are not promised. | Unified control documentation, lifecycle/rework/snapshot tests, installed typing. |
 | Audio | Independent `AudioModelRequest` provides TTS/STT with explicit Agent binding; four composed streams distinguish continuous PCM, independent speech segments, transcript blocks and textual sentence endings. | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`; consume streams with `async with`. | No text Prompt reuse or implicit recording/playback; built-in native realtime STT input is not implemented. | [Audio usage](../models/audio.md), `examples/audio/tts_stt_roundtrip.py`, `examples/audio/continuous_audio.py`, audio tests. |
-| Shell (unfinished scope) | Native process core and reverse Cmd delegation are implemented; three environment profiles, four approval presets and the new general Agent entry are not complete. | Existing Cmd/enable_shell retains argv semantics; do not treat it as a general Bash/PowerShell script interface. | **Pending, not a supported capability**; CrossOver probes do not replace native Windows isolation acceptance. | Shell/Cmd lifecycle tests; complete feature acceptance remains open. |
+| Shell (unfinished scope) | Native process core and reverse Cmd delegation are implemented; three environment profiles, four approval presets and the new general Agent entry are not complete. | Existing Cmd/enable_shell retains argv semantics; do not treat it as a general Bash/PowerShell script interface. | **Pending, not a supported capability**; this round uses CrossOver for Windows testing, not proof of native isolation. | Shell/Cmd lifecycle tests; complete feature acceptance remains open. |
+
+Windows: development testing for this release uses CrossOver. Existing basic probes cover
+Windows Python 3.14.7 and PowerShell 7.6.6, not all scenarios on native Windows.
+Windows users are encouraged to test and report issues with their Windows, Python,
+PowerShell and Agently versions, selected execution environment, a minimal reproduction
+and redacted error logs. Native sandboxing, network isolation and process-tree cleanup
+have not been verified on a native Windows machine. Unavailable or unimplemented
+execution environments must report an explicit error, never silently switch to direct host execution.
+
+The PowerShell execution core now explicitly configures UTF-8 output for each child
+process and decodes it accordingly, fixing Chinese stdout/stderr becoming question
+marks in CrossOver tests. Legacy Cmd/argv decoding is unchanged. The transport uses
+the PowerShell parser to preserve top-level parameters, using directives and named
+blocks, including explicit exits, final-command failures and syntax-error status.
+This fix does not complete the three environment profiles or the new Agent entry,
+nor establish all-scenario validation on native Windows.
 
 Long-form declarations and continuation settings are independent. Reuse the configured Agent above:
 

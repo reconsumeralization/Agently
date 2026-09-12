@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import locale
 import os
 import signal
@@ -45,6 +46,7 @@ class Shell:
         workdir: Path,
         timeout: float | None,
         env: Mapping[str, str] | None = None,
+        encoding: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run exact tokens, including empty arguments, without invoking a shell.
 
@@ -56,6 +58,8 @@ class Shell:
         args = list(argv)
         if not args or not args[0] or any(not isinstance(arg, str) or "\0" in arg for arg in args):
             raise ValueError("argv requires an executable and string arguments without NUL bytes")
+        if encoding is not None:
+            codecs.lookup(encoding)
         spawn = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *args,
@@ -103,10 +107,10 @@ class Shell:
             assert timeout is not None
             raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
         assert process.returncode is not None
-        encoding = locale.getpreferredencoding(False)
+        output_encoding = encoding if encoding is not None else locale.getpreferredencoding(False)
 
         def text(value: bytes) -> str:
-            return value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+            return value.decode(output_encoding).replace("\r\n", "\n").replace("\r", "\n")
 
         return subprocess.CompletedProcess(args, process.returncode, text(stdout), text(stderr))
 
@@ -159,7 +163,28 @@ class PowerShellExecutor(Shell):
         env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self._check(command)
-        source = command.encode("utf-16-le")
+        # Configure only this child process. Compile user source separately so
+        # leading param/using statements remain valid, without shell interpolation.
+        literal = command.replace("'", "''")
+        source = (
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding = [Console]::OutputEncoding; "
+            "try { $agently_ast = [scriptblock]::Create('" + literal + "').Ast } "
+            "catch { Write-Error $_; exit 1 }; "
+            # Invocation resets $? at the outer boundary. Deliver CLI's 0/1
+            # status inside the final body. The PowerShell parser owns source
+            # positions, including named begin/process/end blocks and comments;
+            # never find braces with string matching. Explicit exit is unchanged.
+            "$agently_body = $agently_ast.EndBlock; "
+            "if ($null -eq $agently_body) { $agently_body = $agently_ast.ProcessBlock }; "
+            "if ($null -eq $agently_body) { $agently_body = $agently_ast.BeginBlock }; "
+            "$agently_source = $agently_ast.Extent.Text; "
+            "if ($null -ne $agently_body) { "
+            "$agently_offset = $agently_body.Extent.EndOffset; "
+            "if (-not $agently_body.Unnamed) { $agently_offset -= 1 }; "
+            "$agently_source = $agently_source.Insert($agently_offset, \"`nif (-not `$?) { exit 1 }`n\") }; "
+            ". ([scriptblock]::Create($agently_source))"
+        ).encode("utf-16-le")
         # Keep the encoded argument below Windows' command-line limit rather
         # than starting a partial script. Longer source needs a file transport.
         if len(source) > 16384:
@@ -170,4 +195,5 @@ class PowerShellExecutor(Shell):
             workdir=workdir,
             timeout=timeout,
             env=env,
+            encoding="utf-8",
         )

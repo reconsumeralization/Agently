@@ -88,7 +88,18 @@ IDE 会为 `create_execution`、`effort`、`strategy`、`planning_protocol` 和 
 | 长文与续写 | `long_content` 负责结构长文生产；`LongContent` 字段独立生成后填回结构；`auto_continue` 只接续未完成的请求。 | 长字段使用 `(LongContent, "写作要求")`；按需启用 `.auto_continue()`。 | 兼容 `"long_content"` 类型表达和旧 `.ensure_long_output()`；不强制触发续写。 | `examples/basic/auto_continue.py`、`examples/agent_auto_orchestration/29_field_long_content_ollama.py`、续写/输出控制测试。 |
 | 执行控制 | 安全边界暂停/恢复、保存/加载与同对象 revision 返工；旧 reader 保留原结果。 | 使用 execution 的 `pause/resume/save/load/rework` 及异步对应方法，先检查 `control_capabilities`。 | 不承诺恢复活跃 provider、活动子执行或完整嵌套预算。 | 统一执行控制、生命周期/返工/快照及安装后 typing 测试。 |
 | 音频 | 独立 `AudioModelRequest` 提供 TTS/STT，Agent 显式挂载；四种组合流区分连续 PCM、独立音频段、转录块和文字句末。 | `Agently.create_audio_request(...)` → `agent.use_audio(audio)`；流使用 `async with`。 | 不复用文本 Prompt；不隐式录音/播放；内置驱动尚无原生实时 STT 输入。 | [音频用法](../models/audio.md)、`examples/audio/tts_stt_roundtrip.py`、`examples/audio/continuous_audio.py`、音频测试。 |
-| Shell（未完成范围） | 原生进程核心与 Cmd 反向委托已实现；三档环境、四档审批及通用 Agent 新入口仍未完成。 | 当前旧 Cmd/enable_shell 仍保留 argv 语义，不把它当作完整 Bash/PowerShell 脚本接口。 | **待完成，不是已支持能力**；CrossOver 环境探针不替代 Windows 原生隔离验收。 | Shell/Cmd 生命周期测试；完整功能验收仍开放。 |
+| Shell（未完成范围） | 原生进程核心与 Cmd 反向委托已实现；三档环境、四档审批及通用 Agent 新入口仍未完成。 | 当前旧 Cmd/enable_shell 仍保留 argv 语义，不把它当作完整 Bash/PowerShell 脚本接口。 | **待完成，不是已支持能力**；本轮 Windows 测试环境为 CrossOver，不代表原生隔离已验证。 | Shell/Cmd 生命周期测试；完整功能验收仍开放。 |
+
+Windows：本轮开发测试使用 CrossOver；已有 Windows Python 3.14.7 与 PowerShell 7.6.6
+的基础探针证据，不是原生 Windows 全场景测试。请 Windows 使用者在自己的环境测试和反馈；
+遇到问题建议提交 issue，附 Windows、Python、PowerShell 与 Agently 版本、所选执行环境、
+最小复现及去敏错误日志，便于排查。原生沙盒、网络隔离和进程树清理尚未获得实机验证；
+不可用或未实现的执行环境必须明确报错，不会静默改成本机直接执行。
+
+PowerShell 执行核心现在为单次子进程显式配置 UTF-8 输出并对应解码，修复 CrossOver
+测试中中文 stdout/stderr 变问号的问题；旧 Cmd/argv 默认解码不变。传输使用 PowerShell
+解析器保留顶层参数、using 与命名语句块，并保留显式退出、最后命令失败及语法错误状态。
+该修复不表示三档环境或 Agent 新入口已经完成，也不承诺原生 Windows 全场景验证。
 
 长文声明与续写配置彼此独立，例如复用上面的已配置 Agent：
 
