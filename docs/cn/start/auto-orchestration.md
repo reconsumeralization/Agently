@@ -940,6 +940,13 @@ ActionRuntime；仅顺序依赖（例如写入再读取已知路径）不需要�
 仍由子执行检查，任务所需 Action 缺失或失败仍会阻止验收。Agent 默认要求在任务创建时
 确定，并随任务 options 保存，恢复时不因后来新增默认要求而改变原任务义务。
 
+Flat 中仅产生普通观察的成功命令批次会交给下一步消费，不先把尚未完成全任务判成失败。
+这一交接只适用于没有显式终态就绪标记、实际候选、产物引用或既存终态修复的已知命令结果；
+计划中的 `inline_final` 只声明交付格式，不表示正文已经生成。累计 required 待办和精确
+Action 返回值继续传递，真实失败、权限、grounding 与修复要求不被隐藏。
+最终候选仍须经过终态验收；仅有中间观察或预算耗尽不能成为已接受结果。
+TaskBoard、产物读回和外层 `review` / `validate` 的原有职责不变。
+
 `examples/agent_task/action_result_dependency.py` 用真实模型执行工单读取/确认任务，
 revision 只在 Action 调用时生成。配置 `MODEL_BASE_URL`、`MODEL_API_KEY` 和
 `MODEL_NAME` 即可运行；可选 `MODEL_REQUEST_OPTIONS` 接收 JSON 对象形式的 provider 参数。

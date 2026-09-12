@@ -7204,7 +7204,11 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     assert "Reduce the report to 5-8 news items." in second_plan_prompt
     assert "Revise the candidate report; do not restart evidence gathering." in second_plan_prompt
     assert "repair_context" in second_execution_prompt
-    assert "active verification feedback for this work unit" in second_execution_prompt
+    assert (
+        "[input.repair_context.verification_source] distinguishes intermediate observations from verification feedback"
+        in second_execution_prompt
+    )
+    assert "Actual guard and repair findings still apply." in second_execution_prompt
     assert "Reduce the report to 5-8 news items." in second_execution_prompt
 
 

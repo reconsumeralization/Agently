@@ -1183,6 +1183,17 @@ Explicit step-required Actions still use the child's gate; missing or failed
 task-required Actions still prevent acceptance. Agent default requirements are
 captured when the task is created and retained with its saved options.
 
+In Flat, a successful command batch that only produces an ordinary observation
+passes its evidence to the next step without treating unfinished task goals as
+a failed step. This applies only to known command results without an explicit
+terminal-readiness flag, actual candidate, artifact refs or active terminal
+repair. A planned `inline_final` format does not mean an answer already exists.
+Pending required obligations and exact Action results remain available; real
+failures, permissions, grounding and repair findings still apply. Final
+candidates still require terminal verification. Intermediate observations or
+budget exhaustion never establish acceptance. TaskBoard, artifact readback and
+outer `review` / `validate` retain their existing responsibilities.
+
 `examples/agent_task/action_result_dependency.py` runs a real-model ticket
 lookup/acknowledgement task with a revision generated only at Action execution.
 Configure its `MODEL_BASE_URL`, `MODEL_API_KEY`, and `MODEL_NAME`; optional

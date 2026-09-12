@@ -94,3 +94,9 @@ if __name__ == "__main__":
 # returned revision; observed_calls[1]["result"]["acknowledged"] == True.
 # The final response accurately reports that acknowledgement. This run used six
 # model requests; request count and wording are observations, not fixed outputs.
+# Three further real runs with observation continuation each used seven model
+# requests: lookup step, acknowledgement step, answer step, then one terminal
+# verification. Each returned completed/accepted with one lookup and one exact-
+# revision acknowledgement. Intermediate observations did not trigger separate
+# terminal verification. A valid single-child-loop baseline used six requests;
+# seven is neither a required count nor a universal minimum.

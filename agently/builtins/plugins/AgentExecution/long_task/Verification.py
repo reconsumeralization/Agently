@@ -105,6 +105,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 ),
             }
             terminal_convergence = verification.get("terminal_convergence")
+            verification_source = record.get("verification_source") or verification.get("verification_source")
+            progress_projection = {
+                key: DataFormatter.sanitize(verification[key])
+                for key in (
+                    "guard_reasons", "replan_signal", "missing_required_capabilities",
+                    "missing_capability_evidence", "unenforced_evidence_requirements",
+                )
+                if verification_source and verification.get(key)
+            }
+            if verification_source:
+                progress_projection["verification_source"] = verification_source
+            if verification_source == "consumer_driven_continuation" and verification.get("replan_signals"):
+                progress_projection["replan_signals"] = DataFormatter.sanitize(verification["replan_signals"])
             summaries.append(
                 {
                     "iteration": record.get("iteration"),
@@ -112,6 +125,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     "effective_execution_shape": plan.get("effective_execution_shape", plan.get("execution_shape", "")),
                     "process_summary": DataFormatter.sanitize(record.get("process_summary", {})),
                     "verification": {
+                        **progress_projection,
                         "is_complete": verification.get("is_complete"),
                         "reason": verification.get("reason", ""),
                         "failure_analysis": verification.get("failure_analysis", ""),
@@ -451,6 +465,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         else:
             criterion_repair_contract = dict(DataFormatter.sanitize(criterion_repair_contract))
         terminal_convergence = verification.get("terminal_convergence")
+        progress_projection = {
+            key: DataFormatter.sanitize(verification[key])
+            for key in (
+                "verification_source", "guard_reasons", "replan_signal", "missing_required_capabilities",
+                "missing_capability_evidence", "unenforced_evidence_requirements",
+            )
+            if verification.get("verification_source") and verification.get(key)
+        }
+        if verification.get("verification_source") == "consumer_driven_continuation" and verification.get("replan_signals"):
+            progress_projection["replan_signals"] = DataFormatter.sanitize(verification["replan_signals"])
         if not any(
             [
                 missing_criteria,
@@ -461,10 +485,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 failure_analysis,
                 material_claim_repair_contract,
                 criterion_repair_contract,
+                verification.get("verification_source") == "consumer_driven_continuation",
             ]
         ):
             return {}
         repair_context = {
+            **progress_projection,
             "source_iteration": latest.get("iteration"),
             "verification_ref": latest.get("verification_ref"),
             "reason": str(verification.get("reason") or ""),
@@ -4753,11 +4779,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         normalized: dict[str, Any],
         guard_reasons: Sequence[str],
         raw_verification: Mapping[str, Any] | None = None,
+        *,
+        terminal: bool = True,
     ) -> None:
         if normalized.get("is_complete") is True or not guard_reasons:
             return
         raw_verification = raw_verification or {}
-        if raw_verification.get("is_complete") is not True:
+        if terminal and raw_verification.get("is_complete") is not True:
             return
         missing = cls._normalize_string_list(normalized.get("missing_criteria"))
         guard_label = ", ".join(str(reason) for reason in guard_reasons if str(reason).strip()) or "verification_guard"
@@ -4767,10 +4795,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         normalized["failure_analysis"] = guarded_reason
         if normalized.get("progress_message") not in (None, "", [], {}) or raw_verification.get("progress_message") not in (None, "", [], {}):
             normalized["progress_message"] = guarded_reason
-        normalized["replan_instruction"] = (
-            "Run another bounded step and produce explicit evidence for the guarded criteria."
+        if terminal or not normalized.get("replan_instruction"):
+            normalized["replan_instruction"] = (
+                "Run another bounded step and produce explicit evidence for the guarded criteria."
+            )
+        normalized["next_step_requirements"] = (
+            [normalized["replan_instruction"]]
+            if terminal
+            else cls._merge_string_lists(normalized.get("next_step_requirements"), [normalized["replan_instruction"]])
         )
-        normalized["next_step_requirements"] = [normalized["replan_instruction"]]
 
     @classmethod
     def _trusted_task_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
@@ -6094,12 +6127,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         grounding_guard: Mapping[str, Any] | None = None,
         terminal_candidate: Mapping[str, Any] | None = None,
         offered_reference_ids: set[str] | None = None,
+        terminal: bool = True,
     ) -> dict[str, Any]:
         normalized: dict[str, Any] = {
-            "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
+            "is_complete": terminal and self._normalize_bool(verification.get("is_complete"), default=False),
             "requires_block": self._normalize_bool(verification.get("requires_block"), default=False),
             "reason": str(verification.get("reason") or ""),
-            "failure_analysis": str(verification.get("failure_analysis") or verification.get("reason") or ""),
+            "failure_analysis": str(
+                verification.get("failure_analysis") or (verification.get("reason") if terminal else "") or ""
+            ),
             "acceptance_delta": self._normalize_string_list(verification.get("acceptance_delta")),
             "missing_criteria": self._normalize_string_list(verification.get("missing_criteria")),
             "replan_instruction": str(verification.get("replan_instruction") or ""),
@@ -6329,7 +6365,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             *[action_id for action_id in required_actions if action_id not in self._satisfied_required_actions],
             *[skill_id for skill_id in required_skills if skill_id not in self._satisfied_required_skills],
         ]
-        if missing_required:
+        if terminal and missing_required:
             normalized["is_complete"] = False
             guard_reasons.append("required_capability_evidence_missing")
             normalized["missing_criteria"] = [
@@ -6353,7 +6389,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         missing_capability_evidence, unenforced_requirements = self._evaluate_capability_evidence(
             execution_evidence_summary
         )
-        if missing_capability_evidence:
+        if terminal and missing_capability_evidence:
             normalized["is_complete"] = False
             guard_reasons.append("capability_evidence_missing")
             normalized["missing_criteria"] = [
@@ -6364,7 +6400,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized.get("acceptance_delta"),
                 [f"Missing required capability evidence: {', '.join(missing_capability_evidence)}"],
             )
-            missing_required = [*missing_required, *missing_capability_evidence]
+        missing_required = [*missing_required, *missing_capability_evidence]
         if unenforced_requirements:
             self.diagnostics.setdefault("unenforced_evidence_requirements", []).extend(unenforced_requirements)
         normalized["missing_required_capabilities"] = missing_required
@@ -6474,7 +6510,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 }
             )
         if guard_reasons:
-            self._align_guarded_verification_fields(normalized, guard_reasons, verification)
+            self._align_guarded_verification_fields(normalized, guard_reasons, verification, terminal=terminal)
             normalized["guard_reasons"] = guard_reasons
             if not normalized["replan_instruction"]:
                 normalized["replan_instruction"] = (
@@ -6500,9 +6536,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             normalized.get("missing_criteria"),
         )
         raw_replan_signal = verification.get("replan_signal")
+        normal_progress = not terminal and not guard_reasons and not any(
+            normalized.get(key)
+            for key in ("failure_analysis", "missing_criteria", "acceptance_delta", "repair_constraints")
+        )
         default_replan_status = (
             "continue"
-            if normalized.get("is_complete") is True
+            if normalized.get("is_complete") is True or normal_progress
             else ("blocked" if normalized.get("requires_block") is True else "repair")
         )
         signal_value: dict[str, Any]
@@ -6549,7 +6589,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         elif normalized.get("requires_block") is True:
             if raw_status not in {"blocked", "clarify"}:
                 signal_value["status"] = "blocked"
-        elif raw_status in {"", "continue", "blocked", "clarify"}:
+        elif not normal_progress and raw_status in {"", "continue", "blocked", "clarify"}:
             signal_value["status"] = "repair"
         try:
             replan_signal = ReplanSignal.from_value(signal_value)

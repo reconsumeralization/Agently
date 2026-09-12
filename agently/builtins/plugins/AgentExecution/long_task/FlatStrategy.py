@@ -399,6 +399,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         frame["observation_ref"] = observation_ref
         frame["checkpoint_ref"] = checkpoint_ref
         frame["step_reflection_ref"] = step_reflection_ref
+        frame["grounding_guard"] = flat_evidence_guard
         return frame
 
     async def _flat_terminal_verify_stage(
@@ -476,12 +477,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 execution_result,
                 execution_meta,
                 decision=verification_decision,
+                grounding_guard=frame.get("grounding_guard"),
             )
             verification_source = "consumer_driven_continuation"
             await self._emit_progress(
                 iteration_index,
                 "continue",
-                f"Iteration {iteration_index}: bounded step reported remaining work; the next iteration will consume its evidence.",
+                f"Iteration {iteration_index}: bounded step evidence is available for the next iteration.",
             )
         await self._record_phase(
             "verified",
@@ -758,7 +760,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         await self._emit_progress(
             iteration_index,
             "replan",
-            f"Iteration {iteration_index}: verifier found gaps; the next iteration will replan.",
+            (
+                f"Iteration {iteration_index}: consume the new observation and plan the next bounded step."
+                if verification_source == "consumer_driven_continuation"
+                and verification.get("replan_signal", {}).get("status") == "continue"
+                and not verification.get("guard_reasons")
+                else f"Iteration {iteration_index}: verification found gaps; the next iteration will replan."
+            ),
         )
         await self._emit(
             f"agent_task.iteration.{iteration_index}.replan",
@@ -898,6 +906,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         execution_meta: Mapping[str, Any],
         *,
         decision: Mapping[str, Any],
+        grounding_guard: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         raw_summary = self._cumulative_execution_evidence_summary(dict(execution_meta))
         remaining_work = []
@@ -912,10 +921,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "is_complete": False,
             "requires_block": False,
             "reason": reason,
-            "failure_analysis": reason,
-            "acceptance_delta": remaining_work or ["A downstream Flat iteration must consume the new evidence."],
+            "failure_analysis": "",
+            "acceptance_delta": [],
             "missing_criteria": [],
-            "replan_instruction": "Plan the next bounded work unit using the previous observation evidence.",
+            "replan_instruction": "",
             "repair_constraints": [],
             "next_step_requirements": remaining_work,
             "final_result_required": False,
@@ -925,6 +934,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             raw_verification,
             execution_evidence_summary=raw_summary,
             candidate_final_result="",
+            grounding_guard=grounding_guard,
+            terminal=False,
         )
         normalized["verification_source"] = "consumer_driven_continuation"
         normalized["consumer_driven_sufficiency"] = {
@@ -1855,8 +1866,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "Concrete runtime current_time values may be omitted from the model hot path; do not infer or write a "
             "current date/time as a business fact unless it appears in task facts or source evidence. It is not a resource cap. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
-            "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
-            "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
+            "[input.repair_context.verification_source] distinguishes intermediate observations from verification feedback. "
+            "For ordinary continuation, pending capabilities remain task obligations, not a failed step. "
+            "Actual guard and repair findings still apply. "
+            "Use [input.repair_context] to choose the next bounded step. The verifier does not choose tools, "
             "routes, execution shapes, or exact methods; the planner owns the next action while respecting grounded "
             "acceptance facts and deterministic guards. When repair_context.available_evidence_anchors is present, "
             "use its exact source_refs values and action_result_previews as the bounded evidence anchor set for repair; "
@@ -1985,7 +1998,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         raw_commands = raw_commands_override if raw_commands_override is not None else plan.get("action_commands")
         if raw_commands in (None, [], ()):
             return None
-        return await self._execute_bounded_action_commands(
+        result, meta = await self._execute_bounded_action_commands(
             raw_commands=raw_commands,
             required_action_ids=self._normalize_string_list(plan.get("required_action_ids")),
             execution_id=f"{self.id}:flat:iter-{iteration_index}:action-call",
@@ -1999,6 +2012,25 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             iteration_index=iteration_index,
             project_flat_action_batch=True,
         )
+        # This Carrier produces execution status, not a model-consumed final answer.
+        # A planned output format does not mean a candidate already exists.
+        inventory = self._lifecycle_state.carrier_inventory
+        if (
+            meta.get("status") == "success"
+            and "ready_for_final_verification" not in result
+            and str(plan.get("deliverable_mode") or "")
+            not in {"task_workspace_artifact", "sectioned_task_workspace_artifact"}
+            and not self._candidate_final_result_from_execution_result(result, include_answer=False)
+            and "artifact_manifest" not in result
+            and not result.get("artifact_refs")
+            and not result.get("file_refs")
+            and not (inventory and (inventory.inventory_version > 0 or inventory.carriers))
+            and not self._lifecycle_state.active_issue
+            and not self._lifecycle_state.repair_contract
+            and not self._terminal_convergence_state.active_records()
+        ):
+            result = {**result, "ready_for_final_verification": False}
+        return result, meta
 
     async def _try_flat_narrow_action_command_request(
         self,
@@ -2059,6 +2091,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Resolve Action arguments for [input.bounded_step_plan] using [input.context_pack], "
             "[input.repair_context], and the exact contracts in [info.available_actions]. "
+            "[input.repair_context.verification_source] distinguishes intermediate observations from verification feedback; "
+            "pending capabilities during ordinary continuation are task obligations, not a failed step. "
+            "Actual guard and repair findings still apply. "
             "Assess [output.requires_observation] before constructing [output.action_commands]. "
             "Serial dispatch preserves order but cannot supply a future Action result to this request. "
             "Do not execute Actions, guess missing values, invent placeholders, or synthesize a final response "
@@ -2713,9 +2748,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "claims. scoped_retrieval_results is a compatibility view derived from the same ledger and is not a "
                     "separate grounding authority. "
                     "Do not treat a retrieval hit as semantic acceptance by itself. "
-                    "When repair_context contains fields, it is the active verification feedback for this work unit. "
+                    "[input.repair_context.verification_source] distinguishes intermediate observations from verification feedback; "
+                    "pending capabilities during ordinary continuation are task obligations, not a failed step. "
+                    "Actual guard and repair findings still apply. "
                     "Use its acceptance_delta, advisory_repair_constraints, advisory_next_step_requirements, and "
-                    "available_evidence_anchors as the correction contract; do not rely on the planner restating every "
+                    "available_evidence_anchors as work-unit guidance; do not rely on the planner restating every "
                     "repair fact in step_instruction. "
                     "If material_claim_repair_contract is present, consume its structured claim requirements directly and "
                     "do not infer them from reason or other prose fields. "

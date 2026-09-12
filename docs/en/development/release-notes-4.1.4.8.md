@@ -117,6 +117,12 @@ Structured task-repair requirements and evidence identities now survive the
 projection into subsequent planning, including saved/restored iteration summaries.
 Requirements already lost from historical snapshots are not reconstructed.
 
+Flat now hands ordinary successful command observations to the next step when
+there is no terminal candidate, artifact or active repair. An unfinished task
+no longer makes that intermediate step fail a repeated terminal check. Real
+risk and cumulative required-capability checks remain, and the final answer
+still undergoes verification; outer `review` / `validate` are unchanged.
+
 ## Examples Added For This Release
 
 - `examples/agent_auto_orchestration/25_agent_execution_delivery_review_ollama.py`
