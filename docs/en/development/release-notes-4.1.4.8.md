@@ -126,6 +126,10 @@ programmatic catalogs remain supported. Default-planner catalog leases are
 settled precisely on cancellation, failure or an unconsumed terminal decision.
 Business schema fields named `env` are no longer mistakenly redacted; actual
 runtime environment values remain redacted.
+Flat argument generation now receives the current step's already-read bounded
+sources and evidence states without losing its original task or context and
+without additional reads or model requests. No-current-read and explicit fixed
+command paths remain unchanged.
 
 Flat now hands ordinary successful command observations to the next step when
 there is no terminal candidate, artifact or active repair. An unfinished task

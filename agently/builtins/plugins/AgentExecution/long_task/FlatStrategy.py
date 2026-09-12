@@ -2059,6 +2059,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         iteration_index: int,
         plan: Mapping[str, Any],
         context_pack: "TaskContextView",
+        *,
+        scoped_retrieval_results: Sequence[Mapping[str, Any]] | None = None,
+        evidence_ledger: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]] | Literal["requires_observation"] | None:
         """Dispatch ready kwargs, or defer new-observation dependencies to the existing loop."""
 
@@ -2100,17 +2103,21 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         repair_context = self._active_repair_context()
-        request.input(
-            {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "iteration": iteration_index,
-                "bounded_step_plan": DataFormatter.sanitize(dict(plan)),
-                "context_pack": DataFormatter.sanitize(request_context_pack),
-                "repair_context": DataFormatter.sanitize(repair_context or {}),
-            }
-        )
+        input_payload = {
+            "task_id": self.id,
+            "goal": self.goal,
+            "success_criteria": self.success_criteria,
+            "iteration": iteration_index,
+            "bounded_step_plan": DataFormatter.sanitize(dict(plan)),
+            "context_pack": DataFormatter.sanitize(request_context_pack),
+            "repair_context": DataFormatter.sanitize(repair_context or {}),
+        }
+        if scoped_retrieval_results:
+            input_payload.update({
+                "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results)),
+                "evidence_ledger": DataFormatter.sanitize(evidence_ledger or {}),
+            })
+        request.input(input_payload)
         request.info(
             {
                 "available_actions": action_contracts,
@@ -2127,6 +2134,12 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "Serial dispatch preserves order but cannot supply a future Action result to this request. "
             "Do not execute Actions, guess missing values, invent placeholders, or synthesize a final response "
             "outside Action inputs."
+            + (
+                " Use [input.scoped_retrieval_results] with the authoritative ids and states in "
+                "[input.evidence_ledger]. Do not infer source content from failed, empty, or ref_only "
+                "entries, or beyond truncated excerpts."
+                if scoped_retrieval_results else ""
+            )
         )
         request.output(
             {
@@ -2242,10 +2255,17 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "execution_result": DataFormatter.sanitize(direct_result),
                     "execution_meta": DataFormatter.sanitize(direct_meta),
                 }
+            scoped_retrieval_results = self._scoped_retrieval_results_from_block_context(_context)
+            evidence_ledger = self._flat_step_evidence_ledger(_context) if scoped_retrieval_results else None
+            scoped_inputs = {
+                "scoped_retrieval_results": scoped_retrieval_results,
+                "evidence_ledger": evidence_ledger,
+            } if scoped_retrieval_results else {}
             narrow_action_commands = await self._try_flat_narrow_action_command_request(
                 iteration_index,
                 plan,
                 context_pack,
+                **scoped_inputs,
             )
             if isinstance(narrow_action_commands, tuple):
                 direct_result, direct_meta = narrow_action_commands
@@ -2253,8 +2273,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "execution_result": DataFormatter.sanitize(direct_result),
                     "execution_meta": DataFormatter.sanitize(direct_meta),
                 }
-            scoped_retrieval_results = self._scoped_retrieval_results_from_block_context(_context)
-            evidence_ledger = self._flat_step_evidence_ledger(_context)
+            if evidence_ledger is None:
+                evidence_ledger = self._flat_step_evidence_ledger(_context)
             execution_result, execution_meta = await self._run_bounded_agent_execution_step(
                 iteration_index,
                 plan,

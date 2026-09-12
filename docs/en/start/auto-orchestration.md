@@ -1176,6 +1176,14 @@ The adaptive handoff does not impose the ordinary child's implicit two-round
 cap: calls may need another round for final synthesis. Explicit task
 `action_loop_max_rounds`, task deadlines and request budgets still apply.
 
+When the step has completed `scoped_retrieval`, its argument request also receives
+the bounded read results and existing evidence ledger, preserving the original
+task, step and context without another read or model request. Failed, empty,
+ref-only and truncated states retain their meaning; unread content cannot ground
+arguments. Requests without a current-step read remain unchanged. Explicit
+preplanned commands keep fixed arguments, and a deferred child receives the same
+evidence.
+
 Task-wide `require_actions` is checked against the task's cumulative Action
 evidence, not repeated as an obligation on every child request. A child that
 only writes the final answer or an artifact need not repeat completed Actions.
