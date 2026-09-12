@@ -21,7 +21,8 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -179,7 +180,8 @@ class LocalRecordStore:
         )
         return self.embedding_provider, self.vector_store_provider
 
-    def _connect(self, *, write: bool = False) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         if write:
             if self.read_only:
                 raise RecordStorePolicyError("RecordStore persistence backend is read-only.")
@@ -190,9 +192,13 @@ class LocalRecordStore:
         if not self.db_path.exists() and not write:
             raise FileNotFoundError(f"RecordStore database does not exist: {self.db_path}")
         connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_records_table(connection: sqlite3.Connection) -> None:

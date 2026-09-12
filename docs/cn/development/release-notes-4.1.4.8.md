@@ -100,6 +100,9 @@ execution = agent.input("写一份按章节组织的操作手册。").output({
 
 ## 本版补齐的 Examples
 
+内置 SQLite RecordStore 和向量存储现在会在每次操作退出时关闭连接，保留原有
+提交、回滚及异常传播。这修复了连接泄漏，不改变公开调用、只读策略或惰性创建行为。
+
 - `25_agent_execution_delivery_review_ollama.py`：真实本地 Qwen 生成、模型 review、
   blocking handler review 与物理 artifact readback。
 - `26_plan_execution_interaction_ollama.py`：一次 connected clarification exchange、
