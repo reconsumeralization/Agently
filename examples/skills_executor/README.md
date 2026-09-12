@@ -6,8 +6,10 @@ indexed resources. `SkillLibrary` owns installation and package truth;
 `ContextReader` own progressive disclosure.
 
 `Agently.skills_executor` remains a thin management/compatibility facade. It
-can configure the library, install/list/inspect/read Skills, build compatibility
-context packs, and expose the TaskDAG helper. It does not choose execution
+can configure the library, install/list/inspect/read Skills, and build
+compatibility context packs. Its legacy TaskDAG helper is not an executor-ready
+integration until host code adapts the real `TaskDAGContext`; do not present
+direct registration as a working example. The facade does not choose execution
 routes, run Skill-local strategies, actionize scripts, or grant capabilities.
 
 Recommended execution:

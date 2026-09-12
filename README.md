@@ -364,7 +364,10 @@ immutable installed revisions, AgentExecution owns selection and exact-revision
 binding, and TaskContext owns progressive disclosure. `agent.use_skills(...)`
 is the normal candidate-binding surface; `agent.require_skills(...)` binds a
 known exact revision. `Agently.skills_executor` remains a thin compatibility
-facade for installation, inspection, context projection, and TaskDAG helpers.
+facade for installation, inspection, and context projection. In 4.1.4.8, as in
+4.1.4.7, its legacy TaskDAG `skill` resolver helper is not an executor-ready
+integration: it still needs a host adapter from the real `TaskDAGContext` before
+node selectors reach the compatibility projection.
 
 ```python
 result = (

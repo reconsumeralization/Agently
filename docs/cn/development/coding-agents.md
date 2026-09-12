@@ -83,7 +83,8 @@ done
 ```
 
 只有迁移项目才额外安装 `agently-migration`。历史 catalog 通过冻结归档分支保留，
-而不是放在默认分支文件树里；V1 12-skill catalog 归档在
+而不是放在默认分支文件树里：V2 归档在 `update/archive-v2-catalog`，
+最后支持 Agently `4.1.4.7`；V1 12-skill catalog 归档在
 `update/archive-legacy-v1-catalog`，最后支持 Agently `4.1.1`。新项目不要把归档
 catalog 加入 coding agent 的常规搜索路径。
 

@@ -436,8 +436,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                             'remain eligible only for lossy-parent or '
                                                                             'later bounded reads',
                                                 'compatibility_facade': 'Agently.skills_executor supports local '
-                                                                        'configure/install/list/inspect/read/context-pack/TaskDAG '
-                                                                        'helpers only',
+                                                                        'configure/install/list/inspect/read/context-pack '
+                                                                        'projection. Its legacy TaskDAG skill resolver '
+                                                                        'helper is not executor-ready until host code '
+                                                                        'adapts the real TaskDAGContext into the helper\'s '
+                                                                        'mapping input.',
                                                 'execution_policy': 'No Skills route, Skill-local strategy, stage '
                                                                     'engine, implicit script actionization, per-script '
                                                                     'Action discovery, capability inference, or '

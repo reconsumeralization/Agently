@@ -357,8 +357,10 @@ raw = agent.action.read_action_artifact(
 Skills 是可复用的任务指导包。在当前发布中，`SkillLibrary` 负责不可变的已安装
 revision，AgentExecution 负责选择和精确 revision binding，TaskContext 负责渐进
 disclosure。`agent.use_skills(...)` 是普通候选绑定入口；已知精确 revision 时使用
-`agent.require_skills(...)`。`Agently.skills_executor` 只保留安装、检查、context
-projection 与 TaskDAG helper 的轻量兼容 facade。
+`agent.require_skills(...)`。`Agently.skills_executor` 只保留安装、检查与 context
+projection 的轻量兼容 facade。4.1.4.8 延续 4.1.4.7 的限制：其历史 TaskDAG `skill`
+resolver helper 并不是可直接交给 executor 的完整集成；真实 `TaskDAGContext` 仍需经过宿主 adapter，
+node selector 才能进入兼容投影。
 
 ```python
 result = (

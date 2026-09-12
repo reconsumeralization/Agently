@@ -83,7 +83,7 @@ do
 done
 ```
 
-Add `agently-migration` only for migration projects. Historical catalogs are kept on frozen archive branches instead of the default branch; the V1 12-skill catalog is archived on `update/archive-legacy-v1-catalog` and last supports Agently `4.1.1`. Do not add archived catalogs to a coding agent's normal search path for new projects.
+Add `agently-migration` only for migration projects. Historical catalogs are kept on frozen archive branches instead of the default branch: V2 is archived on `update/archive-v2-catalog` and last supports Agently `4.1.4.7`; V1 is archived on `update/archive-legacy-v1-catalog` and last supports Agently `4.1.1`. Do not add archived catalogs to a coding agent's normal search path for new projects.
 
 ## Why skills, not just docs
 
