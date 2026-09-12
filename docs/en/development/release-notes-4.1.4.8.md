@@ -117,6 +117,14 @@ Structured task-repair requirements and evidence identities now survive the
 projection into subsequent planning, including saved/restored iteration summaries.
 Requirements already lost from historical snapshots are not reconstructed.
 
+Model-planned Action batches are now checked as a whole against the Host-offered
+scope before approval or dispatch; required ids and planner metadata cannot
+expand a child step's authority. Legitimate artifact recall and Host-retained
+programmatic catalogs remain supported. Default-planner catalog leases are
+settled precisely on cancellation, failure or an unconsumed terminal decision.
+Business schema fields named `env` are no longer mistakenly redacted; actual
+runtime environment values remain redacted.
+
 Flat now hands ordinary successful command observations to the next step when
 there is no terminal candidate, artifact or active repair. An unfinished task
 no longer makes that intermediate step fail a repeated terminal check. Real

@@ -128,6 +128,9 @@ agent-scoped actions, MCP tools mounted through `agent.use_mcp(...)`, and
 narrow subset. Managed execution environment metadata redacts raw `env` values
 in this visible schema while preserving key names; providers still receive the
 raw env only through the execution path.
+Declared `kwargs` / `returns` are call schemas, not runtime environment values:
+business fields named `env` retain their nested types and descriptions. Do not
+put secrets into model-facing schema descriptions.
 
 The Host owns model Action visibility. Without an explicit Execution scope,
 Agent-default Actions are used; a Host may explicitly select other registered,

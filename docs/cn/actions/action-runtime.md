@@ -125,6 +125,8 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 `agent.use_mcp(...)` 挂载的 MCP tools，以及 `enable_*` component helpers。只有需要
 窄范围子集时才传显式 `tags=[...]`。托管执行环境 metadata 在这个可见 schema
 里会脱敏原始 `env` 值，但保留 env key；provider 只会在实际执行路径中拿到 raw env。
+声明的 `kwargs` / `returns` 是调用 schema，不属于运行环境值；其中名为 `env` 的
+业务字段及其嵌套类型、描述会原样保留。不要把秘密值写入面向模型的 schema 描述。
 
 模型调用范围由 Host 决定。没有显式 Execution 范围时使用 Agent 的默认
 Actions；Host 可以在 Execution 上显式选择其它已注册、允许向模型暴露的

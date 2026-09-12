@@ -104,9 +104,12 @@ def _sanitize_metadata_value(value: Any, *, parent_key: str = "") -> Any:
 
 
 def sanitize_action_spec_for_metadata(spec: ActionSpec | dict[str, Any]) -> dict[str, Any]:
-    """Return a model/host-visible copy of an action spec without raw env values."""
+    """Preserve declared schemas while redacting runtime metadata env values."""
 
-    return _sanitize_metadata_value(deepcopy(dict(spec)))
+    return {
+        str(key): value if key in {"kwargs", "returns"} else _sanitize_metadata_value(value, parent_key=str(key))
+        for key, value in deepcopy(dict(spec)).items()
+    }
 
 
 def project_action_spec_for_planning(spec: ActionSpec | dict[str, Any]) -> dict[str, Any]:
