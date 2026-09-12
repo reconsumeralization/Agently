@@ -159,8 +159,10 @@ IO handlers own that later read. Without a bound TaskWorkspace, remote-file Brow
 fails closed instead of sending raw bytes into the model hot path.
 
 For shell access, prefer `agent.enable_shell(...)`, which mounts a managed
-`run_bash` action. `Cmd` remains available as a low-level compatibility package
-and as an implementation helper for Bash execution. Use shell for tests,
+`run_bash` action. `Cmd` remains available as a low-level compatibility package;
+it delegates native process execution to the shared Shell execution core rather
+than implementing process lifecycle itself. This internal migration does not
+enable full shell syntax on the existing argv entry. Use shell for tests,
 builds, git inspection, and read-only diagnostics; use TaskWorkspace file actions
 such as `read_file`, `grep_files`, `edit_file`, and `apply_patch` for file
 reading, searching, editing, and writing.

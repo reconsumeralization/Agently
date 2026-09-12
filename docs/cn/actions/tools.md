@@ -146,7 +146,9 @@ download-like binary response，且当前 execution 绑定了 TaskWorkspace 时�
 Browse 会 fail closed，不会把 raw bytes 放进模型 hot path。
 
 shell 能力优先使用 `agent.enable_shell(...)`，它挂载托管 `run_bash` action。
-`Cmd` 仍作为低层兼容 package 与 Bash 执行实现 helper 保留。shell 用于测试、构建、
+`Cmd` 仍作为低层兼容 package 保留，但原生进程执行已反向委托共享 Shell 执行核心，
+不再自行实现进程生命周期。本次内部迁移不会让既有 argv 入口自动获得完整 Shell 语法。
+shell 用于测试、构建、
 git inspection 和只读诊断；文件读取、检索、编辑和写入使用 `read_file`、`grep_files`、
 `edit_file`、`apply_patch` 等 TaskWorkspace file actions。
 

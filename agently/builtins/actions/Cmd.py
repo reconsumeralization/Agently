@@ -13,15 +13,13 @@
 # limitations under the License.
 
 
-import asyncio
-import locale
-import os
 import shlex
-import signal
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from agently.builtins.plugins.ExecutionResourceProvider.Shell import BashExecutor
 
 
 DEFAULT_SAFE_CMD_PREFIXES = [
@@ -64,6 +62,8 @@ def normalize_command_argv(cmd: str | Sequence[str]) -> list[str]:
 
 
 class Cmd:
+    """Legacy argv/Action adapter; native execution belongs to the new executor."""
+
     def __init__(
         self,
         *,
@@ -91,6 +91,7 @@ class Cmd:
         self.env = env
         self.max_output_chars = max(1, int(max_output_chars))
         self.output_artifact_dir = Path(output_artifact_dir).resolve() if output_artifact_dir is not None else None
+        self._executor = BashExecutor()
 
     def register_actions(
         self,
@@ -235,7 +236,10 @@ class Cmd:
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
         try:
-            result = await self._run_process(args, workdir_path)
+            # Exact argv delegation never invokes Bash, including on Windows.
+            result = await self._executor.run_argv(
+                args, workdir=workdir_path, timeout=self.timeout, env=self.env
+            )
         except subprocess.TimeoutExpired as error:
             stdout, stdout_truncated, stdout_artifact = self._bounded_output("stdout", error.stdout or "")
             stderr, stderr_truncated, stderr_artifact = self._bounded_output("stderr", error.stderr or "")
@@ -272,73 +276,6 @@ class Cmd:
             "output_artifacts": artifacts,
             "diagnostics": [],
         }
-
-    @staticmethod
-    def _kill_process(process: asyncio.subprocess.Process) -> None:
-        try:
-            if os.name == "posix":
-                # A parent may already have exited while its children still own
-                # the output pipes. Terminate our group even in that case.
-                os.killpg(process.pid, signal.SIGKILL)
-            elif process.returncode is None:
-                process.kill()
-        except ProcessLookupError:
-            pass
-
-    async def _run_process(self, args: list[str], workdir: Path) -> subprocess.CompletedProcess[str]:
-        spawn = asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(workdir),
-                env=self.env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
-        )
-        output: asyncio.Task[tuple[bytes, bytes]] | None = None
-
-        async def stop() -> None:
-            process = await spawn
-            self._kill_process(process)
-            if output is None:
-                await process.communicate()
-            else:
-                await output
-            await process.wait()
-
-        timed_out = False
-        try:
-            # Shield creation as well as collection: cancellation must not lose
-            # a process created just before its handle is returned to this call.
-            process = await asyncio.shield(spawn)
-            output = asyncio.create_task(process.communicate())
-            try:
-                stdout, stderr = await asyncio.wait_for(asyncio.shield(output), timeout=self.timeout)
-            except asyncio.TimeoutError:
-                timed_out = True
-                self._kill_process(process)
-                stdout, stderr = await asyncio.shield(output)
-        except BaseException:
-            cleanup = asyncio.create_task(stop())
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    # Repeated cancellation must not abandon owned cleanup.
-                    continue
-            cleanup.result()
-            raise
-        if timed_out:
-            raise subprocess.TimeoutExpired(args, self.timeout, output=stdout, stderr=stderr)
-        assert process.returncode is not None
-        encoding = locale.getpreferredencoding(False)
-
-        def text(value: bytes) -> str:
-            # Preserve subprocess.run(text=True)'s decoding and universal newlines.
-            return value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
-
-        return subprocess.CompletedProcess(args, process.returncode, text(stdout), text(stderr))
 
     def _bounded_output(self, stream_name: str, value: str | bytes) -> tuple[str, bool, dict | None]:
         text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
